@@ -46,7 +46,7 @@ Não inclua senhas de equipe em arquivos, variáveis de build, commits, logs ou 
 
 ## Banco de dados
 
-Execute as migrations de `supabase/migrations/` uma vez no projeto Supabase de produção. A migration habilita RLS, filtros de leitura por perfil/carteira e notificações Realtime; o Netlify Functions usa a chave privada para as operações validadas no servidor.
+Execute as migrations de `supabase/migrations/` uma vez no projeto Supabase de produção. A migration habilita RLS, filtros de leitura por perfil/carteira e notificações Realtime; o Netlify Functions usa a chave privada para as operações validadas no servidor. Carregue a relação de empreendimentos diretamente no banco privado antes da ativação do primeiro administrador; a lista comercial não é incluída no repositório público.
 
 Ao abrir o site sem usuários, a tela de configuração inicial aceita apenas o e-mail definido em `CRM_BOOTSTRAP_EMAIL` e o segredo definido em `CRM_BOOTSTRAP_SECRET`. Após ativar, remova ambos os segredos de bootstrap do Netlify. Cadastre a equipe em **Equipe**, gere a senha compartilhada uma única vez e distribua por canal privado.
 

@@ -1,0 +1,15 @@
+{
+  "name": "crm-comercial-mundo-apto",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CRM comercial responsivo para equipe imobiliária, com Netlify Functions e Supabase",
+  "scripts": {
+    "build": "node scripts/build-config.cjs && node scripts/build-static.cjs",
+    "package": "npm run build && node scripts/package-apps-script.cjs",
+    "test": "node --test test/*.test.cjs",
+    "check": "npm run build && node scripts/package-apps-script.cjs && npm test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

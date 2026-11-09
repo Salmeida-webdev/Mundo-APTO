@@ -1,0 +1,680 @@
+<script>
+(() => {
+  'use strict';
+  const state = { token: '', refreshToken: '', user: null, refs: null, page: 'dashboard', pageNumber: 1, lastDashboard: null, pollId: null, queryTimer: null };
+  const byId = (id) => document.getElementById(id);
+  const ADMIN_ROLES = ['Administrador', 'Gerente', 'Coordenador', 'Assistente'];
+  const ROLE_LIST = ['Administrador', 'Gerente', 'Coordenador', 'Assistente', 'SDR', 'Corretor'];
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+
+  function button(text, className, onClick) {
+    const node = el('button', 'button ' + (className || ''), text);
+    node.type = 'button';
+    node.addEventListener('click', onClick);
+    return node;
+  }
+
+  function callApi(method, ...args) {
+    const request = (apiMethod, apiArgs) => fetch('/.netlify/functions/crm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify({ method: apiMethod, args: apiArgs })
+    }).then(async (response) => ({ response, result: await response.json().catch(() => ({})) }));
+    return request(method, args).then(async ({ response, result }) => {
+      const refreshable = ['apiLogin', 'apiRefresh', 'apiBootstrapInfo', 'apiBootstrapAdmin', 'apiLogout'];
+      if (response.status === 401 && state.refreshToken && !refreshable.includes(method)) {
+        const refreshed = await request('apiRefresh', [state.refreshToken]);
+        if (refreshed.response.ok && refreshed.result && refreshed.result.ok === true) {
+          state.token = refreshed.result.token;
+          state.refreshToken = refreshed.result.refreshToken;
+          sessionStorage.setItem('crm-session-token', state.token);
+          sessionStorage.setItem('crm-refresh-token', state.refreshToken);
+          const retryArgs = args.slice();
+          retryArgs[0] = state.token;
+          const retry = await request(method, retryArgs);
+          if (!retry.response.ok) throw new Error(retry.result.message || 'Falha ao comunicar com o sistema.');
+          return retry.result;
+        }
+        state.token = ''; state.refreshToken = '';
+        sessionStorage.removeItem('crm-session-token'); sessionStorage.removeItem('crm-refresh-token');
+      }
+      if (!response.ok) throw new Error(result.message || 'Falha ao comunicar com o sistema.');
+      return result;
+    });
+  }
+
+  function toast(message, kind) {
+    const region = byId('toast-region');
+    const item = el('div', 'toast ' + (kind || ''), message);
+    region.appendChild(item);
+    window.setTimeout(() => item.remove(), 4200);
+  }
+
+  function showLoading(message) {
+    const area = byId('content-area');
+    area.replaceChildren();
+    const box = el('div', 'loading');
+    const stack = el('div');
+    stack.append(el('div', 'spinner'), el('div', '', message || 'Carregando dados…'));
+    box.appendChild(stack);
+    area.appendChild(box);
+  }
+
+  function isAdmin() { return Boolean(state.user && ADMIN_ROLES.includes(state.user.role)); }
+  function isManagerOrSdr() { return Boolean(state.user && (isAdmin() || state.user.role === 'SDR')); }
+  function escapeDisplay(value) { return String(value === undefined || value === null || value === '' ? '—' : value); }
+
+  async function handleFailure(error) {
+    const message = error && error.message ? error.message : 'Não foi possível concluir a operação.';
+    if (/sessão (expirada|inválida)|entre novamente|sistema não inicializado/i.test(message)) {
+      await logout(false);
+      byId('login-error').textContent = 'Sua sessão expirou. Entre novamente.';
+      return;
+    }
+    toast(message, 'error');
+  }
+
+  function readFilters(staleOnly) {
+    const filters = {
+      query: byId('filter-query').value.trim(),
+      developmentId: byId('filter-development').value,
+      status: byId('filter-status').value,
+      dateFrom: byId('filter-from').value,
+      dateTo: byId('filter-to').value,
+      staleOnly: staleOnly === true
+    };
+    if (isManagerOrSdr()) filters.brokerId = byId('filter-broker').value;
+    return filters;
+  }
+
+  async function login(event) {
+    event.preventDefault();
+    const submit = byId('login-submit');
+    const error = byId('login-error');
+    error.textContent = '';
+    submit.disabled = true;
+    submit.textContent = 'Verificando…';
+    try {
+      const result = await callApi('apiLogin', byId('login-email').value, byId('login-password').value);
+      if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'E-mail ou senha inválidos.');
+      state.token = result.token;
+      state.refreshToken = result.refreshToken || '';
+      state.user = result.user;
+      sessionStorage.setItem('crm-session-token', state.token);
+      if (state.refreshToken) sessionStorage.setItem('crm-refresh-token', state.refreshToken);
+      byId('login-password').value = '';
+      await enterApplication();
+    } catch (err) {
+      error.textContent = err.message || 'Não foi possível entrar.';
+    } finally {
+      submit.disabled = false;
+      submit.textContent = 'Entrar no sistema';
+    }
+  }
+
+  async function restoreSession() {
+    const token = sessionStorage.getItem('crm-session-token');
+    if (!token) return;
+    state.token = token;
+    state.refreshToken = sessionStorage.getItem('crm-refresh-token') || '';
+    try {
+      state.refs = await callApi('apiGetReferenceData', token);
+      state.user = state.refs.user;
+      await enterApplication(true);
+    } catch (error) {
+      sessionStorage.removeItem('crm-session-token');
+      state.token = '';
+    }
+  }
+
+  async function enterApplication(restored) {
+    state.refs = await callApi('apiGetReferenceData', state.token);
+    state.user = state.refs.user || state.user;
+    byId('login-view').classList.add('hidden');
+    byId('app-view').classList.remove('hidden');
+    byId('user-name').textContent = state.user.name;
+    byId('user-role').textContent = state.user.role;
+    byId('user-avatar').textContent = state.user.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
+    byId('users-nav').classList.toggle('hidden', !isAdmin());
+    byId('broker-filter-wrap').classList.toggle('hidden', !isManagerOrSdr());
+    fillFilters();
+    bindNavigation();
+    state.page = 'dashboard';
+    setActiveNav('dashboard');
+    if (state.user.mustChangePassword) showLoading('Defina uma nova senha para continuar.');
+    else await refreshPage();
+    if (state.pollId) window.clearInterval(state.pollId);
+    state.pollId = state.user.mustChangePassword ? null : window.setInterval(() => {
+      if (!document.hidden && state.token) refreshPage(true).catch(handleFailure);
+    }, 20000);
+    if (state.user.mustChangePassword) openPasswordDialog(true);
+    else if (!restored) toast('Bem-vindo, ' + state.user.name.split(' ')[0] + '.', 'success');
+  }
+
+  function fillFilters() {
+    const project = byId('filter-development');
+    project.replaceChildren(new Option('Todos', ''));
+    state.refs.developments.forEach((item) => project.add(new Option(item.name, item.id)));
+    const status = byId('filter-status');
+    status.replaceChildren(new Option('Todos', ''));
+    state.refs.statuses.forEach((item) => status.add(new Option(item.name, item.name)));
+    if (isManagerOrSdr()) {
+      const broker = byId('filter-broker');
+      broker.replaceChildren(new Option('Todos', ''));
+      state.refs.brokers.forEach((item) => broker.add(new Option(item.name, item.id)));
+    }
+    document.querySelectorAll('#filters-panel input,#filters-panel select').forEach((control) => {
+      control.onchange = () => { state.pageNumber = 1; refreshPage().catch(handleFailure); };
+    });
+    byId('filter-query').oninput = () => {
+      window.clearTimeout(state.queryTimer);
+      state.queryTimer = window.setTimeout(() => { state.pageNumber = 1; refreshPage().catch(handleFailure); }, 350);
+    };
+    byId('clear-filters').onclick = () => {
+      byId('filter-query').value = '';
+      byId('filter-broker').value = '';
+      byId('filter-development').value = '';
+      byId('filter-status').value = '';
+      byId('filter-from').value = '';
+      byId('filter-to').value = '';
+      state.pageNumber = 1;
+      refreshPage().catch(handleFailure);
+    };
+    byId('refresh-button').onclick = () => refreshPage().catch(handleFailure);
+    byId('logout-button').onclick = () => logout(true);
+    byId('change-password-button').onclick = () => openPasswordDialog(false);
+  }
+
+  function bindNavigation() {
+    byId('main-nav').querySelectorAll('[data-page]').forEach((item) => {
+      item.onclick = () => {
+        if (item.classList.contains('hidden')) return;
+        state.page = item.dataset.page;
+        state.pageNumber = 1;
+        setActiveNav(state.page);
+        refreshPage().catch(handleFailure);
+      };
+    });
+  }
+
+  function setActiveNav(page) {
+    byId('main-nav').querySelectorAll('[data-page]').forEach((item) => item.classList.toggle('active', item.dataset.page === page));
+    const titles = { dashboard: ['PAINEL COMERCIAL', 'Visão geral'], leads: ['CARTEIRA COMERCIAL', 'Clientes'], followups: ['ACOMPANHAMENTO', 'Follow-ups'], users: ['ADMINISTRAÇÃO', 'Equipe'] };
+    const current = titles[page] || titles.dashboard;
+    byId('page-kicker').textContent = current[0];
+    byId('page-title').textContent = current[1];
+    byId('filters-panel').classList.toggle('hidden', page === 'users');
+  }
+
+  async function refreshPage(silent) {
+    if (!state.token) return;
+    if (!silent) showLoading('Atualizando ' + (state.page === 'dashboard' ? 'indicadores' : 'dados') + '…');
+    if (state.page === 'dashboard') await renderDashboard();
+    else if (state.page === 'leads') await renderLeads(false);
+    else if (state.page === 'followups') await renderLeads(true);
+    else if (state.page === 'users') await renderUsers();
+  }
+
+  function kpi(label, value, sub, color) {
+    const card = el('article', 'kpi-card');
+    const accent = el('span', 'kpi-accent');
+    if (color) accent.style.backgroundColor = color;
+    card.append(accent, el('div', 'kpi-label', label), el('div', 'kpi-value', value), el('div', 'kpi-sub', sub || ''));
+    return card;
+  }
+
+  async function renderDashboard() {
+    const data = await callApi('apiGetDashboard', state.token, readFilters(false));
+    state.lastDashboard = data;
+    byId('stale-badge').textContent = data.staleCount > 99 ? '99+' : String(data.staleCount || '');
+    byId('stale-badge').classList.toggle('hidden', !data.staleCount);
+    const area = byId('content-area');
+    area.replaceChildren();
+    const heading = el('div', 'page-heading');
+    const text = el('div');
+    text.append(el('h2', '', 'Acompanhamento da operação'), el('p', '', 'Indicadores filtrados pela carteira e pelo período selecionado. Atualização automática a cada 45 segundos.'));
+    heading.append(text);
+    area.appendChild(heading);
+
+    const cards = el('section', 'kpi-grid');
+    cards.append(
+      kpi('Total de clientes', data.total, 'Na seleção atual', '#EE7A00'),
+      kpi('Em atendimento', data.activeAttendance, 'Status atual', '#3b82f6'),
+      kpi('Agendamentos', data.appointments, 'Atendimentos marcados', '#8b5cf6'),
+      kpi('Atendimentos realizados', data.completed, 'Etapa concluída', '#14b8a6'),
+      kpi('Aprovados pela Caixa', data.approved, 'Aprovações', '#22c55e'),
+      kpi('Reprovados pela Caixa', data.rejected, 'Reprovações', '#ef4444'),
+      kpi('Desistências', data.withdrawals, 'Clientes encerrados', '#9ca3af'),
+      kpi('Já compraram', data.purchased, 'Conversões registradas', '#16a34a')
+    );
+    area.appendChild(cards);
+
+    const grid = el('div', 'dashboard-grid');
+    const funnel = el('section', 'panel');
+    const funnelHeader = el('div', 'panel-header');
+    const funnelTitle = el('div');
+    funnelTitle.append(el('h3', '', 'Funil de atendimento'), el('p', '', 'Distribuição de clientes por etapa'));
+    funnelHeader.append(funnelTitle, el('span', 'panel-chip', '10 etapas'));
+    funnel.appendChild(funnelHeader);
+    const list = el('div', 'funnel-list');
+    const maximum = Math.max(1, ...Object.values(data.stageCounts));
+    state.refs.statuses.forEach((status) => {
+      const row = el('div', 'funnel-row');
+      const name = el('div', 'funnel-name', status.name);
+      const track = el('div', 'funnel-track');
+      const fill = el('div', 'funnel-fill');
+      fill.style.backgroundColor = status.color;
+      fill.style.width = Math.round((data.stageCounts[status.name] / maximum) * 100) + '%';
+      track.appendChild(fill);
+      row.append(name, track, el('div', 'funnel-count', data.stageCounts[status.name]));
+      list.appendChild(row);
+    });
+    funnel.appendChild(list);
+
+    const ranking = el('section', 'panel');
+    const rankingHeader = el('div', 'panel-header');
+    const rankingTitle = el('div');
+    rankingTitle.append(el('h3', '', 'Ranking de corretores'), el('p', '', 'Clientes cadastrados e distribuição por etapa'));
+    rankingHeader.append(rankingTitle, el('span', 'panel-chip', data.ranking.length + ' corretores'));
+    ranking.appendChild(rankingHeader);
+    if (!data.ranking.length) ranking.appendChild(el('div', 'empty-state', 'Nenhum corretor na seleção.'));
+    else {
+      const table = el('table', 'ranking-table');
+      const thead = el('thead'); const headerRow = el('tr');
+      ['Corretor', 'Clientes', 'Distribuição do funil'].forEach((label) => headerRow.appendChild(el('th', '', label)));
+      thead.appendChild(headerRow); table.appendChild(thead);
+      const tbody = el('tbody');
+      data.ranking.forEach((broker) => {
+        const tr = el('tr');
+        tr.appendChild(el('td', '', broker.name + (broker.active ? '' : ' · inativo')));
+        tr.appendChild(el('td', 'ranking-number', broker.total));
+        const td = el('td'); const distribution = el('div', 'distribution');
+        const titleParts = [];
+        state.refs.statuses.forEach((status) => {
+          const count = broker.statuses[status.name] || 0;
+          titleParts.push(status.name + ': ' + count);
+          if (count > 0) {
+            const segment = el('span');
+            segment.style.backgroundColor = status.color;
+            segment.style.width = (count / Math.max(1, broker.total) * 100) + '%';
+            distribution.appendChild(segment);
+          }
+        });
+        distribution.title = titleParts.join(' · ');
+        td.appendChild(distribution); tr.appendChild(td); tbody.appendChild(tr);
+      });
+      table.appendChild(tbody); ranking.appendChild(table);
+    }
+    grid.append(funnel, ranking);
+    area.appendChild(grid);
+
+    const stalePanel = el('section', 'panel');
+    const staleHead = el('div', 'panel-header');
+    const staleTitle = el('div');
+    staleTitle.append(el('h3', '', 'Atenção para follow-up'), el('p', '', 'Clientes sem atualização do SDR por 3 dias úteis ou mais.'));
+    staleHead.append(staleTitle, button('Ver lista', 'button-small', () => { state.page = 'followups'; setActiveNav('followups'); refreshPage().catch(handleFailure); }));
+    stalePanel.appendChild(staleHead);
+    if (!data.staleLeads.length) stalePanel.appendChild(el('div', 'empty-state', 'Tudo em dia. Não há clientes vencidos para follow-up.'));
+    else stalePanel.appendChild(buildStalePreview(data.staleLeads));
+    area.appendChild(stalePanel);
+  }
+
+  function buildStalePreview(leads) {
+    const wrap = el('div', 'table-scroll'); const table = el('table', 'data-table'); const head = el('thead'); const trHead = el('tr');
+    ['Cliente', 'Corretor', 'Empreendimento', 'Última atualização SDR', 'Dias úteis'].forEach((label) => trHead.appendChild(el('th', '', label)));
+    head.appendChild(trHead); table.appendChild(head);
+    const body = el('tbody');
+    leads.slice(0, 8).forEach((lead) => {
+      const tr = el('tr');
+      tr.append(el('td', '', lead.name), el('td', '', lead.brokerName), el('td', '', lead.developmentName), el('td', '', formatDate(lead.sdrUpdatedAt || lead.createdAt)), el('td', 'stale-age', lead.staleBusinessDays));
+      body.appendChild(tr);
+    });
+    table.appendChild(body); wrap.appendChild(table); return wrap;
+  }
+
+  async function renderLeads(staleOnly) {
+    const filters = readFilters(staleOnly);
+    const result = await callApi('apiListLeads', state.token, filters, state.pageNumber, 100);
+    const area = byId('content-area'); area.replaceChildren();
+    const heading = el('div', 'page-heading'); const title = el('div');
+    title.append(el('h2', '', staleOnly ? 'Clientes que precisam de acompanhamento' : 'Carteira de clientes'), el('p', '', staleOnly ? 'Ordenados pelo maior tempo sem atualização do SDR.' : 'A busca considera nome, telefone, corretor, empreendimento, status e período de cadastro.'));
+    heading.appendChild(title);
+    if (!staleOnly && state.user.role !== 'SDR') heading.appendChild(button('+ Novo cliente', 'button-primary', () => openLeadDialog(null)));
+    area.appendChild(heading);
+    if (staleOnly) {
+      const note = el('div', 'followup-note', 'A lista identifica clientes sem atualização do SDR por pelo menos 3 dias úteis. Use os filtros para focar um corretor, empreendimento ou status.');
+      area.appendChild(note);
+    }
+    const panel = el('section', 'table-panel'); const toolbar = el('div', 'table-toolbar'); const left = el('div');
+    left.append(el('h3', '', result.total + ' cliente' + (result.total === 1 ? '' : 's')), el('p', '', 'As alterações são sincronizadas para a equipe.'));
+    toolbar.appendChild(left); panel.appendChild(toolbar);
+    const scroll = el('div', 'table-scroll'); const table = el('table', 'data-table'); const head = el('thead'); const row = el('tr');
+    ['Cliente', 'Telefone', 'Empreendimento', 'Corretor', 'Status', 'Atualização SDR', 'Ação'].forEach((label) => row.appendChild(el('th', '', label)));
+    head.appendChild(row); table.appendChild(head);
+    const body = el('tbody');
+    if (!result.items.length) {
+      const tr = el('tr'); const td = el('td', 'table-empty', staleOnly ? 'Nenhum cliente vencido para follow-up.' : 'Nenhum cliente encontrado.'); td.colSpan = 7; tr.appendChild(td); body.appendChild(tr);
+    } else result.items.forEach((lead) => {
+      const tr = el('tr');
+      tr.appendChild(el('td', '', lead.name));
+      tr.appendChild(el('td', '', lead.phone));
+      tr.appendChild(el('td', '', lead.developmentName));
+      tr.appendChild(el('td', '', lead.brokerName));
+      const statusCell = el('td'); const status = el('span', 'status-pill'); const color = statusColor(lead.status); status.style.backgroundColor = color; status.appendChild(el('span', '', lead.status)); statusCell.appendChild(status); tr.appendChild(statusCell);
+      tr.appendChild(el('td', lead.isStale ? 'stale-age' : '', formatDate(lead.sdrUpdatedAt || lead.createdAt)));
+      const action = el('td'); action.appendChild(button('Abrir', 'button-small', () => openLeadDialog(lead))); tr.appendChild(action);
+      body.appendChild(tr);
+    });
+    table.appendChild(body); scroll.appendChild(table); panel.appendChild(scroll);
+    const pageFooter = el('div', 'table-toolbar');
+    const first = result.total ? (result.page - 1) * result.pageSize + 1 : 0;
+    const last = Math.min(result.total, result.page * result.pageSize);
+    pageFooter.appendChild(el('p', 'muted', 'Exibindo ' + first + '–' + last + ' de ' + result.total));
+    const pageControls = el('div', 'row-actions');
+    const previous = button('Anterior', 'button-small', () => { if (state.pageNumber > 1) { state.pageNumber -= 1; renderLeads(staleOnly).catch(handleFailure); } });
+    const next = button('Próxima', 'button-small', () => { if (result.page * result.pageSize < result.total) { state.pageNumber += 1; renderLeads(staleOnly).catch(handleFailure); } });
+    previous.disabled = result.page <= 1; next.disabled = result.page * result.pageSize >= result.total;
+    pageControls.append(previous, next); pageFooter.appendChild(pageControls); panel.appendChild(pageFooter); area.appendChild(panel);
+  }
+
+  function statusColor(statusName) {
+    const status = state.refs.statuses.find((item) => item.name === statusName);
+    return status ? status.color : '#e5e7eb';
+  }
+
+  function formatDate(value) {
+    if (!value) return 'Sem atualização';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '—';
+    return new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short', timeZone: 'America/Sao_Paulo' }).format(date);
+  }
+
+  function makeSelect(options, selected) {
+    const select = document.createElement('select');
+    options.forEach((item) => {
+      const option = new Option(item.label, item.value);
+      option.selected = String(item.value) === String(selected || '');
+      select.add(option);
+    });
+    return select;
+  }
+
+  function addField(parent, labelText, control, full) {
+    const label = el('label', 'field' + (full ? ' field-full' : ''));
+    label.append(el('span', '', labelText), control); parent.appendChild(label); return control;
+  }
+
+  function readonlyField(parent, label, value, full) {
+    const wrapper = el('div', 'field' + (full ? ' field-full' : ''));
+    wrapper.append(el('span', '', label), el('div', 'readonly-value', escapeDisplay(value)));
+    parent.appendChild(wrapper);
+  }
+
+  function openLeadDialog(lead) {
+    const isCreate = !lead;
+    const admin = isAdmin(); const sdr = state.user.role === 'SDR';
+    const dialog = byId('lead-dialog'); const content = byId('lead-dialog-content'); content.replaceChildren();
+    const box = el('div', 'modal-content');
+    box.append(el('h2', '', isCreate ? 'Novo cliente' : 'Ficha do cliente'), el('p', 'muted', isCreate ? 'Cadastre os dados básicos para iniciar o acompanhamento.' : 'Atualize as informações de acordo com seu perfil de acesso.'));
+    const form = el('form'); const grid = el('div', 'form-grid');
+    const name = document.createElement('input'); name.maxLength = 150; name.required = true; name.value = lead ? lead.name : '';
+    const phone = document.createElement('input'); phone.type = 'tel'; phone.maxLength = 30; phone.required = true; phone.value = lead ? lead.phone : '';
+    const development = makeSelect([{label:'Selecione um empreendimento',value:''}, ...state.refs.developments.map((item) => ({label:item.name,value:item.id}))], lead ? lead.developmentId : '');
+    const notes = document.createElement('textarea'); notes.maxLength = 3000; notes.value = lead ? lead.notes : '';
+    const feedback = document.createElement('textarea'); feedback.maxLength = 3000; feedback.value = lead ? lead.sdrFeedback : '';
+    const status = makeSelect(state.refs.statuses.map((item) => ({label:item.name,value:item.name})), lead ? lead.status : 'Em contato');
+    let broker = null;
+    if (admin) broker = makeSelect(state.refs.brokers.filter((item) => item.active).map((item) => ({label:item.name,value:item.id})), lead ? lead.brokerId : (state.refs.brokers.find((item) => item.active) || {}).id);
+
+    if (sdr && !isCreate) {
+      readonlyField(grid, 'Cliente', lead.name); readonlyField(grid, 'Telefone', lead.phone);
+      readonlyField(grid, 'Empreendimento', lead.developmentName); readonlyField(grid, 'Corretor responsável', lead.brokerName);
+      readonlyField(grid, 'Observações do corretor', lead.notes || '—', true);
+      addField(grid, 'Status do atendimento', status);
+      addField(grid, 'Feedback do SDR', feedback, true);
+    } else {
+      addField(grid, 'Nome completo', name);
+      addField(grid, 'Telefone', phone);
+      addField(grid, 'Empreendimento', development, true);
+      if (admin) addField(grid, 'Corretor responsável', broker, true);
+      addField(grid, 'Observações', notes, true);
+      if (admin) {
+        addField(grid, 'Status do atendimento', status);
+        addField(grid, 'Feedback do SDR', feedback, true);
+      } else if (lead) {
+        readonlyField(grid, 'Status do atendimento', lead.status);
+        readonlyField(grid, 'Feedback do SDR', lead.sdrFeedback || '—', true);
+      } else {
+        readonlyField(grid, 'Status inicial', 'Em contato');
+      }
+    }
+    if (sdr && lead) {
+      const fieldHint = el('p', 'field-hint', 'Ao registrar o contato, o status e o feedback ficam salvos como uma nova entrada no histórico deste cliente.');
+      grid.appendChild(fieldHint);
+    }
+    form.appendChild(grid);
+    const error = el('p', 'form-error'); error.setAttribute('role','alert'); form.appendChild(error);
+    const actions = el('div', 'modal-actions');
+    const cancel = button('Cancelar', '', () => dialog.close());
+    const save = el('button', 'button button-primary', isCreate ? 'Cadastrar cliente' : (sdr ? 'Registrar contato' : 'Salvar alterações')); save.type = 'submit';
+    actions.append(cancel, save); form.appendChild(actions); box.appendChild(form); content.appendChild(box);
+    let historyList = null;
+    if (lead) {
+      const historySection = el('section', 'sdr-history');
+      const historyHeader = el('div', 'sdr-history-header');
+      const historyTitle = el('div');
+      historyTitle.append(el('h3', '', 'Histórico de contatos do SDR'), el('p', '', 'Entradas novas aparecem primeiro, com data, responsável, etapa e feedback.'));
+      historyHeader.appendChild(historyTitle);
+      historySection.append(historyHeader, el('p', 'sdr-history-note', 'A partir desta versão, cada registro do SDR será preservado. Para dados antigos, só é possível importar o último estado que ainda está salvo; feedbacks anteriores já sobrescritos não podem ser recuperados.'));
+      historyList = el('div', 'sdr-history-list');
+      historyList.appendChild(el('p', 'muted', 'Carregando histórico…'));
+      historySection.appendChild(historyList);
+      box.appendChild(historySection);
+    }
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault(); error.textContent = ''; save.disabled = true;
+      const payload = {};
+      if (sdr) { payload.status = status.value; payload.sdrFeedback = feedback.value; }
+      else if (admin) { payload.name = name.value; payload.phone = phone.value; payload.developmentId = development.value; payload.notes = notes.value; payload.sdrFeedback = feedback.value; payload.status = status.value; payload.brokerId = broker.value; }
+      else { payload.name = name.value; payload.phone = phone.value; payload.developmentId = development.value; payload.notes = notes.value; }
+      try {
+        const result = await callApi('apiSaveLead', state.token, lead ? lead.id : '', payload);
+        if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível salvar.');
+        dialog.close(); toast(result.message, 'success'); await refreshPage(true);
+      } catch (err) { error.textContent = err.message; }
+      finally { save.disabled = false; }
+    });
+    dialog.showModal();
+    if (lead && historyList) {
+      callApi('apiGetSdrHistory', state.token, lead.id).then((entries) => {
+        historyList.replaceChildren();
+        if (!entries.length) {
+          historyList.appendChild(el('p', 'sdr-history-empty', 'Nenhum contato do SDR foi registrado para este cliente.'));
+          return;
+        }
+        entries.forEach((entry) => {
+          const item = el('article', 'sdr-history-item');
+          const top = el('div', 'sdr-history-item-top');
+          const meta = el('div', 'sdr-history-meta');
+          meta.append(el('strong', '', entry.userName), el('time', '', formatDate(entry.at)));
+          top.appendChild(meta);
+          if (entry.status) {
+            const status = el('span', 'status-pill sdr-history-status');
+            status.style.backgroundColor = statusColor(entry.status);
+            status.appendChild(el('span', '', entry.status));
+            top.appendChild(status);
+          }
+          item.appendChild(top);
+          item.appendChild(el('p', 'sdr-history-feedback', entry.feedback || 'Contato registrado sem observação adicional.'));
+          if (entry.source && entry.source !== 'Atualização registrada pelo SDR') item.appendChild(el('small', 'sdr-history-source', entry.source));
+          historyList.appendChild(item);
+        });
+      }).catch((error) => {
+        historyList.replaceChildren(el('p', 'sdr-history-empty', error && error.message ? error.message : 'Não foi possível carregar o histórico.'));
+      });
+    }
+  }
+
+  async function renderUsers() {
+    if (!isAdmin()) { state.page = 'dashboard'; setActiveNav('dashboard'); return renderDashboard(); }
+    const users = await callApi('apiListUsers', state.token);
+    const area = byId('content-area'); area.replaceChildren();
+    const heading = el('div', 'page-heading'); const title = el('div');
+    title.append(el('h2', '', 'Usuários e permissões'), el('p', '', 'Cadastre, desative ou substitua pessoas sem reconstruir a estrutura. Usuários desativados permanecem no histórico.'));
+    const headingActions = el('div', 'row-actions');
+    headingActions.appendChild(button('+ Adicionar usuário', 'button-primary', () => openUserDialog(null)));
+    if (state.refs.sharedTemporaryPasswordAvailable) headingActions.appendChild(button('Senha inicial da equipe', 'button-small', openSharedTemporaryPasswordDialog));
+    heading.append(title, headingActions); area.appendChild(heading);
+    const panel = el('section', 'table-panel'); const scroll = el('div', 'table-scroll'); const table = el('table', 'data-table'); table.style.minWidth = '720px';
+    const thead = el('thead'); const trHead = el('tr'); ['Nome', 'E-mail', 'Perfil', 'Acesso', 'Ações'].forEach((label) => trHead.appendChild(el('th', '', label))); thead.appendChild(trHead); table.appendChild(thead);
+    const tbody = el('tbody');
+    users.forEach((user) => {
+      const tr = el('tr'); tr.append(el('td', '', user.name), el('td', '', user.email), el('td', '', user.role), el('td', '', user.active ? 'Ativo' : 'Desativado'));
+      const actions = el('td'); const actionWrap = el('div', 'row-actions');
+      actionWrap.append(button('Editar', 'button-small', () => openUserDialog(user)), button('Gerar senha', 'button-small', () => resetPassword(user)));
+      actions.appendChild(actionWrap); tr.appendChild(actions); tbody.appendChild(tr);
+    });
+    table.appendChild(tbody); scroll.appendChild(table); panel.appendChild(scroll); area.appendChild(panel);
+  }
+
+  function openSharedTemporaryPasswordDialog() {
+    const dialog = byId('user-dialog'); const content = byId('user-dialog-content'); content.replaceChildren();
+    const box = el('div', 'modal-content');
+    box.append(el('h2', '', 'Senha inicial temporária da equipe'), el('p', 'muted', 'A senha será aplicada uma única vez às contas ativas, exceto a sua conta atualmente conectada. Todos os outros usuários deverão criar uma senha própria no primeiro acesso.'));
+    const notice = el('div', 'followup-note', 'As senhas atuais dos demais usuários serão substituídas e suas sessões encerradas. Digite uma senha diferente da sua senha atual; o sistema armazenará somente hashes individuais.');
+    const form = el('form'); const grid = el('div', 'form-grid');
+    const password = document.createElement('input'); password.type = 'password'; password.autocomplete = 'new-password'; password.minLength = 12; password.maxLength = 128; password.required = true;
+    addField(grid, 'Senha temporária compartilhada', password, true);
+    form.appendChild(grid);
+    const error = el('p', 'form-error'); error.setAttribute('role', 'alert'); form.appendChild(error);
+    const actions = el('div', 'modal-actions');
+    actions.append(button('Cancelar', '', () => dialog.close()));
+    const save = el('button', 'button button-primary', 'Aplicar uma vez'); save.type = 'submit'; actions.appendChild(save); form.appendChild(actions);
+    box.append(notice, form); content.appendChild(box);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault(); error.textContent = '';
+      if (!window.confirm('Aplicar esta senha a todas as contas ativas, exceto a sua conta? As senhas atuais dos demais usuários serão invalidadas.')) return;
+      save.disabled = true;
+      try {
+        const result = await callApi('apiApplySharedTemporaryPassword', state.token, password.value);
+        password.value = '';
+        if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível aplicar a senha inicial.');
+        dialog.close();
+        state.refs.sharedTemporaryPasswordAvailable = false;
+        toast(result.updatedCount + ' conta(s) preparada(s). Todos deverão definir uma senha individual no primeiro acesso.', 'success');
+        await renderUsers();
+      } catch (err) { error.textContent = err.message || 'Não foi possível aplicar a senha inicial.'; }
+      finally { save.disabled = false; }
+    });
+    dialog.showModal();
+    password.focus();
+  }
+
+  function openUserDialog(user) {
+    const dialog = byId('user-dialog'); const content = byId('user-dialog-content'); content.replaceChildren();
+    const box = el('div', 'modal-content'); const isCreate = !user;
+    box.append(el('h2', '', isCreate ? 'Adicionar usuário' : 'Editar usuário'), el('p', 'muted', 'O acesso é baseado no perfil e, para corretores, na carteira associada à própria conta.'));
+    const form = el('form'); const grid = el('div', 'form-grid');
+    const name = document.createElement('input'); name.required = true; name.maxLength = 150; name.value = user ? user.name : '';
+    const email = document.createElement('input'); email.type = 'email'; email.required = true; email.value = user ? user.email : '';
+    const role = makeSelect(ROLE_LIST.map((value) => ({label:value,value})), user ? user.role : 'Corretor');
+    const active = document.createElement('input'); active.type = 'checkbox'; active.checked = user ? user.active : true;
+    const activeLabel = el('label', 'checkbox-row'); activeLabel.append(active, el('span', '', 'Usuário ativo'));
+    addField(grid, 'Nome completo', name); addField(grid, 'E-mail de acesso', email); addField(grid, 'Perfil', role); grid.appendChild(activeLabel);
+    form.appendChild(grid); const error = el('p', 'form-error'); error.setAttribute('role','alert'); form.appendChild(error);
+    const actions = el('div', 'modal-actions'); actions.append(button('Cancelar', '', () => dialog.close()));
+    const save = el('button', 'button button-primary', 'Salvar usuário'); save.type='submit'; actions.appendChild(save); form.appendChild(actions); box.appendChild(form); content.appendChild(box);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault(); error.textContent=''; save.disabled=true;
+      try {
+        const result = await callApi('apiSaveUser', state.token, {id:user ? user.id : '',name:name.value,email:email.value,role:role.value,active:active.checked});
+        if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível salvar.');
+        dialog.close(); toast(result.message, 'success'); await renderUsers();
+      } catch (err) { error.textContent=err.message; }
+      finally { save.disabled=false; }
+    });
+    dialog.showModal();
+  }
+
+  async function resetPassword(user) {
+    if (!window.confirm('Gerar uma senha temporária para ' + user.name + '? A senha atual será invalidada e a próxima entrada exigirá troca.')) return;
+    try {
+      const result = await callApi('apiResetUserPassword', state.token, user.id);
+      if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível gerar a senha.');
+      window.alert('Senha temporária de uso único para ' + user.email + ':\n\n' + result.temporaryPassword + '\n\nCompartilhe por um canal privado. O usuário deverá alterá-la ao entrar.');
+      toast('Senha temporária gerada.', 'success');
+    } catch (err) { handleFailure(err); }
+  }
+
+  function openPasswordDialog(required) {
+    const dialog = byId('user-dialog'); const content = byId('user-dialog-content'); content.replaceChildren();
+    const box = el('div', 'modal-content');
+    box.append(el('h2', '', required ? 'Defina sua nova senha' : 'Alterar senha'), el('p', 'muted', 'Use pelo menos 12 caracteres. A senha atual não é armazenada em texto legível.'));
+    const form = el('form'); const grid = el('div', 'form-grid');
+    const current = document.createElement('input'); current.type='password'; current.autocomplete='current-password'; current.required=true;
+    const next = document.createElement('input'); next.type='password'; next.autocomplete='new-password'; next.minLength=12; next.required=true;
+    const confirm = document.createElement('input'); confirm.type='password'; confirm.autocomplete='new-password'; confirm.minLength=12; confirm.required=true;
+    addField(grid,'Senha temporária/atual',current,true); addField(grid,'Nova senha',next,true); addField(grid,'Confirme a nova senha',confirm,true);
+    form.appendChild(grid); const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);
+    const actions=el('div','modal-actions'); const save=el('button','button button-primary','Salvar nova senha');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
+    form.addEventListener('submit',async(event)=>{
+      event.preventDefault();error.textContent='';
+      if(next.value!==confirm.value){error.textContent='As novas senhas não coincidem.';return;}
+      save.disabled=true;
+      try{
+        const result=await callApi('apiChangePassword',state.token,current.value,next.value);
+        if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível alterar a senha.');
+        dialog.close();await logout(false);byId('login-error').textContent='Senha alterada. Entre novamente com a nova senha.';
+      }catch(err){error.textContent=err.message;}finally{save.disabled=false;}
+    });
+    dialog.showModal();
+  }
+
+  async function logout(notify) {
+    const token = state.token;
+    if (token) {
+      try { await callApi('apiLogout', token, state.refreshToken); } catch (_) { /* sessão já pode ter expirado */ }
+    }
+    if (state.pollId) window.clearInterval(state.pollId);
+    state.token='';state.refreshToken='';state.user=null;state.refs=null;sessionStorage.removeItem('crm-session-token');sessionStorage.removeItem('crm-refresh-token');
+    byId('app-view').classList.add('hidden');byId('login-view').classList.remove('hidden');
+    if(notify)byId('login-error').textContent='Você saiu do sistema.';
+  }
+
+  async function initializeBootstrap() {
+    try {
+      const info = await callApi('apiBootstrapInfo');
+      if (info && info.setupAvailable) {
+        byId('login-card').classList.add('hidden');
+        byId('bootstrap-card').classList.remove('hidden');
+        byId('bootstrap-form').addEventListener('submit', async (event) => {
+          event.preventDefault();
+          const submit = byId('bootstrap-submit'); const error = byId('bootstrap-error');
+          error.textContent = ''; submit.disabled = true; submit.textContent = 'Configurando…';
+          try {
+            const result = await callApi('apiBootstrapAdmin', byId('bootstrap-secret').value, byId('bootstrap-name').value, byId('bootstrap-email').value, byId('bootstrap-password').value);
+            if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível ativar o CRM.');
+            state.token = result.token; state.refreshToken = result.refreshToken || ''; state.user = result.user;
+            sessionStorage.setItem('crm-session-token', state.token);
+            if (state.refreshToken) sessionStorage.setItem('crm-refresh-token', state.refreshToken);
+            byId('bootstrap-password').value = ''; byId('bootstrap-secret').value = '';
+            await enterApplication();
+          } catch (err) { error.textContent = err.message || 'Não foi possível ativar o CRM.'; }
+          finally { submit.disabled = false; submit.textContent = 'Ativar CRM'; }
+        });
+      }
+    } catch (_) { /* a tela de login permanece disponível; a conexão será indicada ao tentar entrar */ }
+  }
+
+  byId('login-form').addEventListener('submit', login);
+  initializeBootstrap().then(restoreSession);
+})();
+</script>

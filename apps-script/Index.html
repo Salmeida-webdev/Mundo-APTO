@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <?!= include_('Styles'); ?>
+  </head>
+  <body>
+    <div id="toast-region" class="toast-region" aria-live="polite"></div>
+    <main id="login-view" class="login-shell">
+      <section id="login-card" class="login-card">
+        <img class="brand-logo brand-logo-login" src="__MUNDO_APTO_LOGO_DATA_URI__" alt="Mundo Apto">
+        <p class="eyebrow">MUNDO APTO · GESTÃO COMERCIAL</p>
+        <h1><?= systemName ?></h1>
+        <p class="muted">Entre com seu e-mail cadastrado para acessar sua área.</p>
+        <form id="login-form" class="stack">
+          <label>E-mail
+            <input id="login-email" type="email" autocomplete="username" required placeholder="voce@empresa.com">
+          </label>
+          <label>Senha
+            <input id="login-password" type="password" autocomplete="current-password" required placeholder="Sua senha">
+          </label>
+          <p id="login-error" class="form-error" role="alert"></p>
+          <button id="login-submit" class="button button-primary button-wide" type="submit">Entrar no sistema</button>
+        </form>
+        <p class="login-footnote">Acesso individual. Se ainda não recebeu uma senha, solicite à gestão.</p>
+      </section>
+      <section id="bootstrap-card" class="login-card hidden">
+        <img class="brand-logo brand-logo-login" src="__MUNDO_APTO_LOGO_DATA_URI__" alt="Mundo Apto">
+        <p class="eyebrow">CONFIGURAÇÃO INICIAL</p>
+        <h1>Ativar acesso administrador</h1>
+        <p class="muted">Crie a conta administrativa do CRM. Use o mesmo e-mail e, se desejar manter a senha, a mesma senha que já utiliza.</p>
+        <form id="bootstrap-form" class="stack">
+          <label>Nome completo<input id="bootstrap-name" type="text" autocomplete="name" required maxlength="150"></label>
+          <label>E-mail administrador<input id="bootstrap-email" type="email" autocomplete="username" required></label>
+          <label>Senha do CRM<input id="bootstrap-password" type="password" autocomplete="new-password" required minlength="12" maxlength="128"></label>
+          <label>Chave de configuração<input id="bootstrap-secret" type="password" autocomplete="off" required></label>
+          <p id="bootstrap-error" class="form-error" role="alert"></p>
+          <button id="bootstrap-submit" class="button button-primary button-wide" type="submit">Ativar CRM</button>
+        </form>
+        <p class="login-footnote">A configuração fica disponível apenas enquanto o banco estiver sem usuários e será encerrada automaticamente após a criação do administrador.</p>
+      </section>
+      <div class="login-aside"><span class="aside-orb"></span><span class="aside-orb aside-orb-small"></span><div><p class="eyebrow">PIPELINE EM FOCO</p><h2>Atendimento organizado.<br>Decisões mais claras.</h2><p>Clientes, acompanhamentos e resultados em um só painel.</p></div></div>
+    </main>
+
+    <div id="app-view" class="app-shell hidden">
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-logo-wrap"><img class="brand-logo brand-logo-sidebar" src="__MUNDO_APTO_LOGO_DATA_URI__" alt="Mundo Apto"></div>
+          <small>CRM Comercial</small>
+        </div>
+        <nav id="main-nav" class="main-nav" aria-label="Navegação principal">
+          <button class="nav-item active" data-page="dashboard"><span class="nav-icon">▦</span>Visão geral</button>
+          <button class="nav-item" data-page="leads"><span class="nav-icon">◎</span>Clientes</button>
+          <button class="nav-item" data-page="followups"><span class="nav-icon">◷</span>Follow-ups <span id="stale-badge" class="nav-badge hidden"></span></button>
+          <button class="nav-item hidden" data-page="users" id="users-nav"><span class="nav-icon">♙</span>Equipe</button>
+        </nav>
+        <div class="sidebar-bottom"><span class="live-dot"></span><span>Sincronização ativa</span></div>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div class="topbar-heading">
+            <img class="brand-logo brand-logo-header" src="__MUNDO_APTO_LOGO_DATA_URI__" alt="Mundo Apto">
+            <div><p id="page-kicker" class="eyebrow">PAINEL COMERCIAL</p><h1 id="page-title">Visão geral</h1></div>
+          </div>
+          <div class="topbar-actions"><button id="refresh-button" class="button button-quiet" type="button">↻ <span>Atualizar</span></button><div class="user-menu"><div class="avatar" id="user-avatar">MA</div><div><strong id="user-name"></strong><small id="user-role"></small></div><button id="change-password-button" class="button button-quiet button-logout" type="button">Senha</button><button id="logout-button" class="button button-quiet button-logout" type="button">Sair</button></div></div>
+        </header>
+
+        <section id="filters-panel" class="filters-panel">
+          <div class="filter-field filter-search"><label for="filter-query">Buscar cliente</label><input id="filter-query" type="search" placeholder="Nome ou telefone"></div>
+          <div class="filter-field hidden" id="broker-filter-wrap"><label for="filter-broker">Corretor</label><select id="filter-broker"><option value="">Todos</option></select></div>
+          <div class="filter-field"><label for="filter-development">Empreendimento</label><select id="filter-development"><option value="">Todos</option></select></div>
+          <div class="filter-field"><label for="filter-status">Status</label><select id="filter-status"><option value="">Todos</option></select></div>
+          <div class="filter-field"><label for="filter-from">Cadastro de</label><input id="filter-from" type="date"></div>
+          <div class="filter-field"><label for="filter-to">Cadastro até</label><input id="filter-to" type="date"></div>
+          <button id="clear-filters" class="button button-text" type="button">Limpar filtros</button>
+        </section>
+
+        <main id="content-area" class="content-area" tabindex="-1"></main>
+      </section>
+    </div>
+
+    <dialog id="lead-dialog" class="modal"><form method="dialog" class="modal-dismiss"><button aria-label="Fechar" class="icon-button">×</button></form><div id="lead-dialog-content"></div></dialog>
+    <dialog id="user-dialog" class="modal modal-narrow"><form method="dialog" class="modal-dismiss"><button aria-label="Fechar" class="icon-button">×</button></form><div id="user-dialog-content"></div></dialog>
+    <?!= include_('Client'); ?>
+  </body>
+</html>
