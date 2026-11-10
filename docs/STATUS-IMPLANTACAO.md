@@ -6,7 +6,8 @@
 - SDR consulta todos os clientes, pode cadastrar um cliente escolhendo um corretor ativo e, nos registros existentes, edita apenas feedback e status.
 - Gestão de empreendimentos, importação CSV validada e exportação de cadastros/relatórios, com operações restritas aos perfis administrativos.
 - Histórico dos contatos do SDR e histórico de mudanças de etapa para conversões e comparações.
-- Dashboard com indicadores, ranking, comparativos móveis de 7 e 30 dias, conversões, tempo até o primeiro contato, atrasos e concentrações de clientes parados.
+- Dashboard com indicadores, ranking, comparação semanal e mensal por calendário, conversões, tempo até o primeiro contato, atrasos e concentrações de clientes parados por etapa, corretor e empreendimento.
+- Prazo de follow-up configurável pela gestão entre 1 e 30 dias úteis, com padrão inicial de 3 dias úteis.
 - Migration de análise histórica aplicada ao Supabase de produção. Os 55 clientes existentes receberam um snapshot inicial; nenhum cadastro foi apagado ou alterado.
 - `npm run check`: build e **56 testes automatizados aprovados**.
 

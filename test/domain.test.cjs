@@ -142,6 +142,36 @@ test('análises históricas comparam coortes, contatos SDR e conversões entre e
   assert.equal(result.analytics.conversionBasis.includes('histórico começa'), true);
 });
 
+test('análises comparam semana e mês do calendário com o recorte equivalente anterior', () => {
+  const periodLeads = [
+    {id:'W1',createdAt:'2026-11-09T10:00:00-03:00'},
+    {id:'W0',createdAt:'2026-11-02T10:00:00-03:00'},
+    {id:'M1',createdAt:'2026-11-05T10:00:00-03:00'},
+    {id:'M0',createdAt:'2026-10-05T10:00:00-03:00'},
+    {id:'M0-OUT',createdAt:'2026-10-15T10:00:00-03:00'}
+  ];
+  const week = plain(domain.buildHistoricalAnalytics(periodLeads, [], [], {periodMode:'week'}, {today:'2026-11-11T12:00:00-03:00'}));
+  assert.equal(week.periodLabel, 'Semana atual');
+  assert.equal(week.comparisonLabel, 'Semana atual × semana anterior até o mesmo dia');
+  assert.equal(week.current.newLeads, 1);
+  assert.equal(week.previous.newLeads, 1);
+  const month = plain(domain.buildHistoricalAnalytics(periodLeads, [], [], {periodMode:'month'}, {today:'2026-11-10T12:00:00-03:00'}));
+  assert.equal(month.periodLabel, 'Mês atual');
+  assert.equal(month.current.newLeads, 3);
+  assert.equal(month.previous.newLeads, 1);
+});
+
+test('alerta identifica concentração de follow-ups atrasados também por etapa', () => {
+  const staleLeads = [
+    {...leads[0], id:'S1', status:'Atendimento agendado', createdAt:'2026-11-02T10:00:00-03:00', sdrUpdatedAt:'2026-11-02T10:00:00-03:00'},
+    {...leads[1], id:'S2', status:'Atendimento agendado', createdAt:'2026-11-02T10:00:00-03:00', sdrUpdatedAt:'2026-11-02T10:00:00-03:00'}
+  ];
+  const events = staleLeads.map((lead) => ({leadId:lead.id,at:'2026-11-01T12:00:00Z',eventType:'baseline',newStatus:lead.status}));
+  const result = plain(domain.buildHistoricalAnalytics(staleLeads, events, [], {periodMode:'month'}, {today:'2026-11-10T12:00:00-03:00',staleBusinessDays:3}));
+  assert.equal(result.staleCurrent, 2);
+  assert.ok(result.alerts.some((item) => item.title === 'Clientes parados concentrados' && item.detail.includes('na etapa Atendimento agendado')));
+});
+
 test('paginação limita a 100 linhas e calcula total e página', () => {
   const page = plain(domain.paginate(Array.from({length:240}, (_, i) => i), 3, 500));
   assert.equal(page.page, 3);

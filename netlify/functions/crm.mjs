@@ -10,7 +10,7 @@ const ALLOWED_METHODS = new Set([
   'apiChangePassword', 'apiGetReferenceData', 'apiGetDashboard', 'apiListLeads',
   'apiGetSdrHistory', 'apiSaveLead', 'apiListUsers', 'apiSaveUser',
   'apiResetUserPassword', 'apiApplySharedTemporaryPassword', 'apiListDevelopments',
-  'apiSaveDevelopment', 'apiPreviewLeadImport', 'apiImportLeads', 'apiExportLeads', 'apiExportReport'
+  'apiSaveDevelopment', 'apiPreviewLeadImport', 'apiImportLeads', 'apiExportLeads', 'apiExportReport', 'apiSaveFollowupDays'
 ]);
 
 class HttpError extends Error {
@@ -303,6 +303,27 @@ async function apiGetReferenceData(token) {
   };
 }
 
+async function getFollowupBusinessDays() {
+  const rows = await dbRequest('crm_settings', { query: { select: 'value', key: 'eq.followup_business_days', limit: 1 } });
+  const stored = Array.isArray(rows) && rows[0] ? rows[0].value : null;
+  const value = stored && typeof stored === 'object' ? stored.days : stored;
+  const days = Number(value);
+  return Number.isInteger(days) && days >= 1 && days <= 30 ? days : Number(CRM_CONFIG.staleBusinessDays || 3);
+}
+
+async function apiSaveFollowupDays(token, value) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  const days = Number(value);
+  if (!Number.isInteger(days) || days < 1 || days > 30) return { ok: false, message: 'O prazo deve ser um número inteiro entre 1 e 30 dias úteis.' };
+  const stamp = now();
+  await dbRequest('crm_settings', {
+    method: 'POST', query: { on_conflict: 'key' }, prefer: 'resolution=merge-duplicates,return=minimal',
+    body: { key: 'followup_business_days', value: { days }, updated_at: stamp }
+  });
+  await audit(actor, 'settings.followup_days.update', 'setting', 'followup_business_days', `${days} dias úteis`);
+  return { ok: true, days, message: `Prazo de follow-up atualizado para ${days} dia(s) útil(eis).` };
+}
+
 async function loadLeadContext() {
   const [userRows, developmentRows, leadRows] = await Promise.all([
     listAll('crm_users', { select: '*' }), listAll('crm_developments', { select: '*' }), listAll('crm_leads', { select: '*' })
@@ -312,13 +333,14 @@ async function loadLeadContext() {
 
 async function apiGetDashboard(token, filters) {
   const actor = await verifyActor(token);
-  const [context, eventRows, historyRows] = await Promise.all([
-    loadLeadContext(), listAll('crm_lead_events', { select: '*' }), listAll('crm_sdr_history', { select: 'lead_id,at,status,feedback,source' })
+  const [context, eventRows, historyRows, staleBusinessDays] = await Promise.all([
+    loadLeadContext(), listAll('crm_lead_events', { select: '*' }), listAll('crm_sdr_history', { select: 'lead_id,at,status,feedback,source' }),
+    getFollowupBusinessDays()
   ]);
   const events = (eventRows || []).map((item) => ({ id: item.id, leadId: item.lead_id, at: item.at, eventType: item.event_type, oldStatus: item.old_status || '', newStatus: item.new_status || '', brokerId: item.broker_id, developmentId: item.development_id }));
   const sdrHistory = (historyRows || []).map((item) => ({ leadId: item.lead_id, at: item.at, status: item.status, feedback: item.feedback, source: item.source }));
   const dashboard = CrmDomain.buildDashboard(context.leads, context.users, filters, {
-    actor, today: now(), staleBusinessDays: CRM_CONFIG.staleBusinessDays,
+    actor, today: now(), staleBusinessDays,
     allLeads: context.leads, events, sdrHistory
   });
   if (actor.role === 'Corretor') dashboard.ranking = dashboard.ranking.filter((item) => item.id === actor.id);
@@ -327,15 +349,15 @@ async function apiGetDashboard(token, filters) {
 
 async function apiListLeads(token, filters, page, pageSize) {
   const actor = await verifyActor(token);
-  const context = await loadLeadContext();
-  const options = { today: now(), staleBusinessDays: CRM_CONFIG.staleBusinessDays };
+  const [context, staleBusinessDays] = await Promise.all([loadLeadContext(), getFollowupBusinessDays()]);
+  const options = { today: now(), staleBusinessDays };
   const found = CrmDomain.filterLeads(context.leads, actor, filters, options);
   found.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
   const enriched = found.map((lead) => {
     const info = CrmDomain.staleInfo(lead, options.today, options.staleBusinessDays);
     return Object.assign({}, lead, { staleBusinessDays: info.businessDays, isStale: info.stale });
   });
-  return CrmDomain.paginate(enriched, page, pageSize);
+  return { ...CrmDomain.paginate(enriched, page, pageSize), staleBusinessDays };
 }
 
 async function apiGetSdrHistory(token, leadId) {
@@ -486,8 +508,8 @@ async function apiImportLeads(token, rows) {
 
 async function apiExportLeads(token, filters) {
   const actor = await verifyActor(token); requireAdmin(actor);
-  const context = await loadLeadContext();
-  const found = CrmDomain.filterLeads(context.leads, actor, filters || {}, { today: now(), staleBusinessDays: CRM_CONFIG.staleBusinessDays });
+  const [context, staleBusinessDays] = await Promise.all([loadLeadContext(), getFollowupBusinessDays()]);
+  const found = CrmDomain.filterLeads(context.leads, actor, filters || {}, { today: now(), staleBusinessDays });
   if (found.length > 10000) throw new HttpError(413, 'A exportação excede 10.000 registros. Aplique filtros e exporte em partes.');
   return found.map((lead) => ({
     name: lead.name, phone: lead.phone, development: lead.developmentName, broker: lead.brokerName,
@@ -614,7 +636,7 @@ const api = {
   apiBootstrapInfo, apiBootstrapAdmin, apiLogin, apiRefresh, apiLogout, apiChangePassword,
   apiGetReferenceData, apiGetDashboard, apiListLeads, apiGetSdrHistory, apiSaveLead,
   apiListUsers, apiSaveUser, apiResetUserPassword, apiApplySharedTemporaryPassword,
-  apiListDevelopments, apiSaveDevelopment, apiPreviewLeadImport, apiImportLeads, apiExportLeads, apiExportReport
+  apiListDevelopments, apiSaveDevelopment, apiPreviewLeadImport, apiImportLeads, apiExportLeads, apiExportReport, apiSaveFollowupDays
 };
 
 export default async (request) => {

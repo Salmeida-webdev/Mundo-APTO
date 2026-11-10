@@ -53,8 +53,10 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
         let filtered = list;
         const idFilter = url.searchParams.get('id');
         const leadFilter = url.searchParams.get('lead_id');
+        const keyFilter = url.searchParams.get('key');
         if (idFilter && idFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.id) === idFilter.slice(3));
         if (leadFilter && leadFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.lead_id) === leadFilter.slice(3));
+        if (keyFilter && keyFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.key) === keyFilter.slice(3));
         if (url.searchParams.get('active') === 'eq.true') filtered = filtered.filter((row) => row.active === true);
         return Response.json(filtered);
       }
@@ -206,6 +208,24 @@ test('importação valida duplicidades e exportações ficam restritas à gestã
   const report = await invoke('apiExportReport', [token, {}], token);
   assert.equal(report.response.status, 200);
   assert.equal(report.body.rows[0][0], 'categoria');
+});
+
+test('gestão configura o prazo de follow-up e o SDR não pode alterá-lo', async (t) => {
+  const settingsBefore = rows.crm_settings.slice();
+  const auditsBefore = rows.crm_audit.slice();
+  t.after(() => { rows.crm_settings.splice(0, rows.crm_settings.length, ...settingsBefore); rows.crm_audit.splice(0, rows.crm_audit.length, ...auditsBefore); });
+  const manager = mockEnvironmentAndFetch(t, { role: 'Gerente', userId: userIdManager, email: 'gestao@example.test' });
+  const saved = await invoke('apiSaveFollowupDays', [manager.token, 5], manager.token);
+  assert.equal(saved.response.status, 200);
+  assert.equal(saved.body.ok, true);
+  assert.equal(rows.crm_settings.find((item) => item.key === 'followup_business_days').value.days, 5);
+  const leads = await invoke('apiListLeads', [manager.token, {}, 1, 100], manager.token);
+  assert.equal(leads.body.staleBusinessDays, 5);
+  const invalid = await invoke('apiSaveFollowupDays', [manager.token, 31], manager.token);
+  assert.equal(invalid.body.ok, false);
+  const sdr = mockEnvironmentAndFetch(t, { role: 'SDR', userId: userIdSdr, email: 'sdr@example.test' });
+  const denied = await invoke('apiSaveFollowupDays', [sdr.token, 6], sdr.token);
+  assert.equal(denied.response.status, 403);
 });
 
 test('migration is private by default, grants only scoped reads and contains no user roster', () => {

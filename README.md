@@ -11,8 +11,8 @@ CRM web responsivo para gestão de atendimentos, clientes e funil comercial imob
 - Dez etapas, lista controlada e cores; cadastro, filtros, busca, dashboard, funil, ranking, follow-ups e gestão de usuários.
 - Empreendimentos podem ser cadastrados, editados, ativados ou desativados pela gestão. Desativar não apaga clientes ou históricos vinculados.
 - Importação por CSV padronizado com pré-validação de campos, corretor, empreendimento e telefones duplicados; exportação de clientes filtrados e relatórios gerenciais em CSV. Apenas perfis administrativos podem importar ou exportar.
-- Análises históricas com coortes de conversão entre etapas e geral, comparação de períodos de 7 ou 30 dias com a janela anterior, volume de contatos SDR, tempo médio até o primeiro contato, tendência de follow-ups atrasados e concentração de clientes parados por corretor/empreendimento.
-- Alertas gerenciais são apresentados no dashboard. O prazo operacional de follow-up permanece em três dias úteis.
+- Análises históricas com conversões entre etapas e geral; comparação da semana atual com a semana anterior e do mês atual com o mesmo recorte do mês anterior; contatos SDR, tempo até o primeiro contato, atrasos e concentração por etapa, corretor e empreendimento.
+- Alertas gerenciais aparecem no dashboard. A gestão pode configurar o prazo de follow-up entre 1 e 30 dias úteis; o padrão inicial é 3 dias úteis.
 - Senha inicial temporária para a equipe, excluindo a conta administrativa conectada, e troca obrigatória no primeiro acesso.
 - Estrutura de dados preparada para adicionar, desativar ou substituir pessoas e empreendimentos sem reconstruir a aplicação.
 
@@ -59,6 +59,8 @@ Ao abrir o site sem usuários, a tela de configuração inicial aceita o segredo
 O painel faz sincronização automática enquanto está aberto e atualiza imediatamente para quem salvou. A interface consulta alterações a cada 20 segundos.
 
 As análises históricas começam com uma fotografia dos status atuais na data da migration e registram os eventos seguintes. Mudanças anteriores à fotografia e contatos SDR não armazenados não podem ser reconstruídos.
+
+As análises usam semana e mês do calendário em `America/Sao_Paulo`; a comparação considera o período anterior até o mesmo dia da semana ou do mês. Um intervalo personalizado nos filtros compara o recorte selecionado com o intervalo anterior de igual duração.
 
 A importação usa CSV UTF-8 compatível com Excel e Google Sheets, até 200 clientes por arquivo. Nome, telefone, empreendimento e e-mail do corretor são obrigatórios; telefones duplicados bloqueiam a importação para revisão.
 

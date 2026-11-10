@@ -326,8 +326,11 @@
     const stalePanel = el('section', 'panel');
     const staleHead = el('div', 'panel-header');
     const staleTitle = el('div');
-    staleTitle.append(el('h3', '', 'Atenção para follow-up'), el('p', '', 'Clientes sem atualização do SDR por 3 dias úteis ou mais.'));
-    staleHead.append(staleTitle, button('Ver lista', 'button-small', () => { state.page = 'followups'; setActiveNav('followups'); refreshPage().catch(handleFailure); }));
+    staleTitle.append(el('h3', '', 'Atenção para follow-up'), el('p', '', 'Clientes sem atualização do SDR por ' + data.staleBusinessDays + ' dias úteis ou mais.'));
+    const staleActions = el('div', 'row-actions');
+    if (isAdmin()) staleActions.appendChild(button('Configurar prazo', 'button-small', () => openFollowupSettings(data.staleBusinessDays)));
+    staleActions.appendChild(button('Ver lista', 'button-small', () => { state.page = 'followups'; setActiveNav('followups'); refreshPage().catch(handleFailure); }));
+    staleHead.append(staleTitle, staleActions);
     stalePanel.appendChild(staleHead);
     if (!data.staleLeads.length) stalePanel.appendChild(el('div', 'empty-state', 'Tudo em dia. Não há clientes vencidos para follow-up.'));
     else stalePanel.appendChild(buildStalePreview(data.staleLeads));
@@ -338,7 +341,7 @@
   function buildAnalyticsPanel(analytics) {
     const panel = el('section', 'panel analytics-panel');
     const head = el('div', 'panel-header'); const title = el('div');
-    title.append(el('h3', '', 'Análises históricas e alertas gerenciais'), el('p', '', 'Comparação de ' + analytics.periodLabel + ' com o período anterior.'));
+    title.append(el('h3', '', 'Análises históricas e alertas gerenciais'), el('p', '', analytics.comparisonLabel || ('Comparação de ' + analytics.periodLabel + ' com o período anterior.')));
     head.append(title, el('span', 'panel-chip', 'Histórico progressivo'));
     panel.appendChild(head);
     const current = analytics.current; const previous = analytics.previous;
@@ -415,7 +418,7 @@
     }
     area.appendChild(heading);
     if (staleOnly) {
-      const note = el('div', 'followup-note', 'A lista identifica clientes sem atualização do SDR por pelo menos 3 dias úteis. Use os filtros para focar um corretor, empreendimento ou status.');
+      const note = el('div', 'followup-note', 'A lista identifica clientes sem atualização do SDR por pelo menos ' + result.staleBusinessDays + ' dias úteis. Use os filtros para focar um corretor, empreendimento ou status.');
       area.appendChild(note);
     }
     const panel = el('section', 'table-panel'); const toolbar = el('div', 'table-toolbar'); const left = el('div');
@@ -676,6 +679,31 @@
       downloadCsv('relatorio-gerencial-mundo-apto-' + new Date().toISOString().slice(0, 10) + '.csv', report.rows[0], report.rows.slice(1));
       toast('Relatório gerencial exportado em CSV.', 'success');
     } catch (error) { handleFailure(error); }
+  }
+
+  function openFollowupSettings(currentDays) {
+    if (!isAdmin()) return;
+    const dialog = byId('admin-dialog'); const content = byId('admin-dialog-content'); content.replaceChildren();
+    const box = el('div', 'modal-content');
+    box.append(el('h2', '', 'Prazo de follow-up'), el('p', 'muted', 'Defina após quantos dias úteis sem atualização do SDR um cliente deve aparecer como atrasado.'));
+    const form = el('form'); const grid = el('div', 'form-grid');
+    const days = document.createElement('input'); days.type = 'number'; days.min = '1'; days.max = '30'; days.step = '1'; days.required = true; days.value = String(currentDays || 3);
+    addField(grid, 'Prazo em dias úteis (1 a 30)', days, true);
+    form.appendChild(grid);
+    const error = el('p', 'form-error'); error.setAttribute('role', 'alert'); form.appendChild(error);
+    const actions = el('div', 'modal-actions'); actions.append(button('Cancelar', '', () => dialog.close()));
+    const save = el('button', 'button button-primary', 'Salvar prazo'); save.type = 'submit'; actions.appendChild(save); form.appendChild(actions);
+    box.appendChild(form); content.appendChild(box);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault(); error.textContent = ''; save.disabled = true;
+      try {
+        const result = await callApi('apiSaveFollowupDays', state.token, Number(days.value));
+        if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível salvar o prazo.');
+        dialog.close(); toast(result.message, 'success'); await refreshPage(true);
+      } catch (err) { error.textContent = err.message || 'Não foi possível salvar o prazo.'; }
+      finally { save.disabled = false; }
+    });
+    dialog.showModal();
   }
 
   function openImportDialog() {

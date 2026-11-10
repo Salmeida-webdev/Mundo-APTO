@@ -21,13 +21,18 @@ var CrmDomain = (function () {
   var ADMIN_FIELDS = LEAD_FIELDS.slice();
   var CONVERSION_PATHS = [
     ['Em contato', 'Em atendimento'],
+    ['Em contato', 'Desistência'],
     ['Em atendimento', 'Atendimento agendado'],
+    ['Em atendimento', 'Desistência'],
     ['Atendimento agendado', 'Atendimento realizado'],
+    ['Atendimento agendado', 'Desistência'],
     ['Atendimento realizado', 'Enviando documentação'],
+    ['Atendimento realizado', 'Desistência'],
     ['Enviando documentação', 'Em análise documental'],
+    ['Enviando documentação', 'Desistência'],
     ['Em análise documental', 'Aprovado pela Caixa'],
     ['Em análise documental', 'Reprovado pela Caixa'],
-    ['Em atendimento', 'Desistência'],
+    ['Em análise documental', 'Desistência'],
     ['Aprovado pela Caixa', 'Já comprou']
   ];
 
@@ -209,6 +214,7 @@ var CrmDomain = (function () {
       ranking: brokers,
       staleCount: stale.length,
       staleLeads: stale.slice(0, 50),
+      staleBusinessDays: Number(options && options.staleBusinessDays || 3),
       analytics: analytics
     };
   }
@@ -224,19 +230,42 @@ var CrmDomain = (function () {
     var to = String(filters && filters.dateTo || '').slice(0, 10);
     var start = 0;
     var end = current;
-    var label = String(filters && filters.periodMode || '') === 'month' ? 'Últimos 30 dias' : 'Últimos 7 dias';
-    if (from) start = Date.parse(from + 'T00:00:00-03:00');
-    if (to) end = Date.parse(to + 'T23:59:59.999-03:00');
-    if (!start || !Number.isFinite(start)) {
-      var durationDays = String(filters && filters.periodMode || '') === 'month' ? 30 : 7;
-      start = current - durationDays * 24 * 60 * 60 * 1000;
+    var mode = String(filters && filters.periodMode || '') === 'month' ? 'month' : 'week';
+    var label = mode === 'month' ? 'Mês atual' : 'Semana atual';
+    var comparisonLabel = mode === 'month' ? 'Mês atual × mês anterior até o mesmo dia' : 'Semana atual × semana anterior até o mesmo dia';
+    var previousStart; var previousEnd;
+    if (from || to) {
+      if (from) start = Date.parse(from + 'T00:00:00-03:00');
+      if (to) end = Date.parse(to + 'T23:59:59.999-03:00');
+      if (!start || !Number.isFinite(start)) start = current - 7 * 24 * 60 * 60 * 1000;
+      if (!Number.isFinite(end) || end <= 0) end = current;
+      if (end > current) end = current;
+      if (start > current) start = current;
+      label = from && to ? from + ' a ' + to : from ? 'Desde ' + from : 'Até ' + to;
+      var customDuration = Math.max(1, end - start + 1);
+      previousStart = start - customDuration;
+      previousEnd = start - 1;
+      comparisonLabel = 'Intervalo selecionado × intervalo anterior';
+    } else {
+      // Operação comercial usa America/Sao_Paulo (UTC−03:00, sem horário de verão vigente).
+      var localNow = new Date(current - 3 * 60 * 60 * 1000);
+      var year = localNow.getUTCFullYear(); var month = localNow.getUTCMonth(); var day = localNow.getUTCDate();
+      if (mode === 'month') {
+        start = Date.UTC(year, month, 1, 3, 0, 0, 0);
+        previousStart = Date.UTC(year, month - 1, 1, 3, 0, 0, 0);
+        previousEnd = Math.min(previousStart + (current - start), start - 1);
+      } else {
+        var localDate = new Date(Date.UTC(year, month, day));
+        var mondayOffset = (localDate.getUTCDay() + 6) % 7;
+        localDate.setUTCDate(localDate.getUTCDate() - mondayOffset);
+        start = Date.UTC(localDate.getUTCFullYear(), localDate.getUTCMonth(), localDate.getUTCDate(), 3, 0, 0, 0);
+        previousStart = start - 7 * 24 * 60 * 60 * 1000;
+        previousEnd = previousStart + (current - start);
+      }
     }
-    if (!Number.isFinite(end) || end <= 0) end = current;
     if (end > current) end = current;
-    if (start > current) start = current;
-    if (from || to) label = from && to ? from + ' a ' + to : from ? 'Desde ' + from : 'Até ' + to;
     var duration = Math.max(1, end - start + 1);
-    return { start: start, end: end, previousStart: start - duration, previousEnd: start - 1, label: label };
+    return { start: start, end: end, previousStart: previousStart, previousEnd: previousEnd, label: label, comparisonLabel: comparisonLabel, duration: duration };
   }
 
   function isWithin(value, start, end) {
@@ -354,20 +383,22 @@ var CrmDomain = (function () {
     if (currentAvg !== null && previousAvg !== null && current.firstContactCount >= 2 && currentAvg > previousAvg && currentAvg - previousAvg >= Math.max(1, previousAvg * 0.1)) {
       alerts.push({ severity: 'medium', title: 'Primeiro contato mais demorado', detail: 'A média subiu de ' + previousAvg + ' h para ' + currentAvg + ' h.' });
     }
-    var byBroker = {}; var byDevelopment = {};
+    var byBroker = {}; var byDevelopment = {}; var byStatus = {};
     staleLeads.forEach(function (lead) {
       var broker = String(lead.brokerName || lead.broker_name || 'Corretor sem nome');
       var development = String(lead.developmentName || lead.development_name || 'Empreendimento sem nome');
+      var status = String(lead.status || 'Status não informado');
       byBroker[broker] = (byBroker[broker] || 0) + 1;
       byDevelopment[development] = (byDevelopment[development] || 0) + 1;
+      byStatus[status] = (byStatus[status] || 0) + 1;
     });
     function concentration(items, label) {
       Object.keys(items).map(function (name) { return { name: name, count: items[name] }; }).sort(function (a, b) { return b.count - a.count; }).slice(0, 3).forEach(function (item) {
         if (item.count >= 2 && staleNow && item.count / staleNow >= 0.3) alerts.push({ severity: 'medium', title: 'Clientes parados concentrados', detail: item.count + ' clientes sem atualização em ' + label + ' ' + item.name + '.' });
       });
     }
-    concentration(byBroker, 'no corretor'); concentration(byDevelopment, 'no empreendimento');
-    return { periodLabel: bounds.label, historyStartedAt: historyStartedAt ? new Date(historyStartedAt).toISOString() : '', current: current, previous: previous, staleCurrent: staleNow, stalePrevious: staleBefore, alerts: alerts.slice(0, 8), conversionBasis: 'Coorte: clientes que entraram na etapa ou estavam nela no início do histórico e avançaram posteriormente. O histórico começa após a implantação desta análise.' };
+    concentration(byStatus, 'na etapa'); concentration(byBroker, 'no corretor'); concentration(byDevelopment, 'no empreendimento');
+    return { periodLabel: bounds.label, comparisonLabel: bounds.comparisonLabel, historyStartedAt: historyStartedAt ? new Date(historyStartedAt).toISOString() : '', current: current, previous: previous, staleCurrent: staleNow, stalePrevious: staleBefore, alerts: alerts.slice(0, 8), conversionBasis: 'Coorte: clientes que entraram na etapa ou estavam nela no início do histórico e avançaram posteriormente. O histórico começa após a implantação desta análise.' };
   }
 
   function paginate(list, page, pageSize) {
