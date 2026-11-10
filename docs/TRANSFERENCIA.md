@@ -10,10 +10,10 @@
 
 1. Crie o projeto Supabase e aplique a migration `supabase/migrations/202611090001_crm_schema.sql`.
 2. Importe a lista de empreendimentos para `crm_developments` diretamente no banco privado, sem adicioná-la ao repositório público.
-3. Configure no Netlify as variáveis `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY`, `CRM_BOOTSTRAP_EMAIL` e um `CRM_BOOTSTRAP_SECRET` aleatório.
+3. Configure no Netlify as variáveis `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY` e um `CRM_BOOTSTRAP_SECRET` forte e temporário.
 4. Publique a aplicação e acesse o endereço do site.
-5. Na tela de configuração, informe o e-mail administrativo definido no ambiente, nome, segredo de bootstrap e a senha desejada. Para manter a senha anterior, use a mesma senha que já era utilizada no CRM Apps Script.
-6. Confirme o acesso administrativo, remova `CRM_BOOTSTRAP_SECRET` e `CRM_BOOTSTRAP_EMAIL` do Netlify e cadastre/valide os usuários.
+5. Na tela de configuração, informe o e-mail administrativo que já era usado no CRM, nome, segredo de bootstrap e a senha desejada. Para manter a senha anterior, use a mesma senha que já era utilizada no CRM Apps Script.
+6. Confirme o acesso administrativo e cadastre/valide os usuários. O endpoint de configuração inicial se bloqueia automaticamente após a criação do administrador. Como as variáveis ficam congeladas por deploy, remova `CRM_BOOTSTRAP_SECRET` na próxima publicação planejada, sem fazer outro deploy apenas para isso.
 7. No menu **Equipe**, aplique a senha inicial compartilhada uma vez. Distribua-a por canal privado; todos os usuários deverão trocá-la no primeiro acesso.
 
 ## Mudanças futuras de equipe

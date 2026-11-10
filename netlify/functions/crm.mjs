@@ -21,8 +21,7 @@ function env() {
     url: String(process.env.SUPABASE_URL || '').replace(/\/+$/, ''),
     publishableKey: process.env.SUPABASE_PUBLISHABLE_KEY || '',
     secretKey: process.env.SUPABASE_SECRET_KEY || '',
-    bootstrapSecret: process.env.CRM_BOOTSTRAP_SECRET || '',
-    bootstrapEmail: normalizeEmail(process.env.CRM_BOOTSTRAP_EMAIL || '')
+    bootstrapSecret: process.env.CRM_BOOTSTRAP_SECRET || ''
   };
   if (!config.url || !config.publishableKey || !config.secretKey) {
     throw new HttpError(503, 'O CRM ainda não está conectado ao banco de dados.');
@@ -193,7 +192,7 @@ async function updateAuthProfile(userId, { email, name, sessionVersion }) {
 async function apiBootstrapInfo() {
   const cfg = env();
   const rows = await dbRequest('crm_users', { query: { select: 'id', limit: 1 } });
-  return { initialized: Array.isArray(rows) && rows.length > 0, setupAvailable: Boolean(cfg.bootstrapSecret && cfg.bootstrapEmail && Array.isArray(rows) && rows.length === 0), systemName: CRM_CONFIG.systemName };
+  return { initialized: Array.isArray(rows) && rows.length > 0, setupAvailable: Boolean(cfg.bootstrapSecret && Array.isArray(rows) && rows.length === 0), systemName: CRM_CONFIG.systemName };
 }
 
 async function apiBootstrapAdmin(secret, name, email, password) {
@@ -203,7 +202,8 @@ async function apiBootstrapAdmin(secret, name, email, password) {
   const secretOkay = supplied.length === expected.length && expected.length > 0 && timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
   const normalizedEmail = normalizeEmail(email);
   name = String(name || '').trim(); password = String(password || '');
-  if (!secretOkay || !cfg.bootstrapEmail || normalizedEmail !== cfg.bootstrapEmail) throw new HttpError(403, 'Chave ou e-mail de configuração inválido.');
+  if (!secretOkay) throw new HttpError(403, 'Chave de configuração inválida.');
+  if (!normalizedEmail || normalizedEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) throw new HttpError(400, 'Informe um e-mail válido para o administrador.');
   if (!name || name.length > 150 || password.length < 12 || password.length > 128) throw new HttpError(400, 'Informe o nome e uma senha de 12 a 128 caracteres.');
   const existingProfiles = await dbRequest('crm_users', { query: { select: 'id', limit: 1 } });
   if (!Array.isArray(existingProfiles) || existingProfiles.length) throw new HttpError(409, 'A configuração inicial já foi concluída.');

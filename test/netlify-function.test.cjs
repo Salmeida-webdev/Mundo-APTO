@@ -33,7 +33,6 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
   process.env.SUPABASE_PUBLISHABLE_KEY = 'public-test-key';
   process.env.SUPABASE_SECRET_KEY = 'service-test-key';
   process.env.CRM_BOOTSTRAP_SECRET = '';
-  process.env.CRM_BOOTSTRAP_EMAIL = '';
   const token = jwtFor(role, userId, email);
   const calls = [];
   const fakeUser = { id: userId, email, app_metadata: { role, crm_session_version: 0 } };
@@ -108,6 +107,22 @@ test('API do corretor retorna somente sua carteira e rejeita tentativa de acesso
   const forbidden = await invoke('apiSaveLead', [token, 'lead-b', { notes: 'Tentativa de cruzar carteiras' }], token);
   assert.equal(forbidden.body.ok, false);
   assert.match(forbidden.body.message, /sem permissão/);
+});
+
+test('bootstrap usa segredo temporário e e-mail informado na tela, sem variável de e-mail', async (t) => {
+  const originalUsers = rows.crm_users.slice();
+  rows.crm_users.splice(0, rows.crm_users.length);
+  t.after(() => rows.crm_users.splice(0, rows.crm_users.length, ...originalUsers));
+  mockEnvironmentAndFetch(t);
+  process.env.CRM_BOOTSTRAP_SECRET = 'segredo-temporario-de-teste';
+  delete process.env.CRM_BOOTSTRAP_EMAIL;
+  const info = await invoke('apiBootstrapInfo', []);
+  assert.equal(info.response.status, 200);
+  assert.equal(info.body.setupAvailable, true);
+  const denied = await invoke('apiBootstrapAdmin', ['segredo-incorreto', 'Admin', 'admin@example.test', 'senha-super-segura-123']);
+  assert.equal(denied.response.status, 403);
+  const invalidEmail = await invoke('apiBootstrapAdmin', ['segredo-temporario-de-teste', 'Admin', 'email-invalido', 'senha-super-segura-123']);
+  assert.equal(invalidEmail.response.status, 400);
 });
 
 test('SDR não altera campos do corretor e registra histórico ao atualizar feedback/status', async (t) => {
