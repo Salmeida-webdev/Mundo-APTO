@@ -30,8 +30,8 @@ const jwtFor = (role, userId, email) => `e30.${Buffer.from(JSON.stringify({ sub:
 function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA, email = 'a@example.test' } = {}) {
   const savedEnv = { ...process.env };
   process.env.SUPABASE_URL = 'https://supabase.example.test';
-  process.env.SUPABASE_ANON_KEY = 'public-test-key';
-  process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-test-key';
+  process.env.SUPABASE_PUBLISHABLE_KEY = 'public-test-key';
+  process.env.SUPABASE_SECRET_KEY = 'service-test-key';
   process.env.CRM_BOOTSTRAP_SECRET = '';
   process.env.CRM_BOOTSTRAP_EMAIL = '';
   const token = jwtFor(role, userId, email);
@@ -41,7 +41,7 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
   global.fetch = async (input, options = {}) => {
     const url = new URL(String(input));
     const method = options.method || 'GET';
-    calls.push({ path: url.pathname, method, query: Object.fromEntries(url.searchParams), body: options.body ? JSON.parse(options.body) : null });
+    calls.push({ path: url.pathname, method, query: Object.fromEntries(url.searchParams), headers: options.headers || {}, body: options.body ? JSON.parse(options.body) : null });
     if (url.pathname === '/auth/v1/user') return Response.json(fakeUser);
     if (url.pathname.startsWith('/rest/v1/')) {
       const table = url.pathname.split('/').pop();
@@ -95,12 +95,16 @@ test('função rejeita verbos indevidos, métodos desconhecidos e origem externa
 });
 
 test('API do corretor retorna somente sua carteira e rejeita tentativa de acesso cruzado', async (t) => {
-  const { token } = mockEnvironmentAndFetch(t);
+  const { token, calls } = mockEnvironmentAndFetch(t);
   const listed = await invoke('apiListLeads', [token, {}, 1, 100], token);
   assert.equal(listed.response.status, 200);
   assert.equal(listed.body.total, 1);
   assert.equal(listed.body.items[0].id, 'lead-a');
   assert.equal(listed.body.items.some((lead) => lead.id === 'lead-b'), false);
+  const databaseCalls = calls.filter((call) => call.path.startsWith('/rest/v1/'));
+  assert.ok(databaseCalls.length > 0);
+  assert.ok(databaseCalls.every((call) => call.headers.apikey === 'service-test-key'));
+  assert.ok(databaseCalls.every((call) => !call.headers.Authorization));
   const forbidden = await invoke('apiSaveLead', [token, 'lead-b', { notes: 'Tentativa de cruzar carteiras' }], token);
   assert.equal(forbidden.body.ok, false);
   assert.match(forbidden.body.message, /sem permissão/);
@@ -135,5 +139,5 @@ test('build estático não deixa marcações Apps Script nem credenciais no HTML
   assert.doesNotMatch(html, /google\.script|<\?!=|<\?=|__MUNDO_APTO_LOGO_DATA_URI__/);
   assert.match(html, /Ativar acesso administrador/);
   assert.match(html, /data:image\/jpeg;base64,/);
-  assert.doesNotMatch(html, /SUPABASE_SERVICE_ROLE_KEY|Sharks@12345/);
+  assert.doesNotMatch(html, /SUPABASE_SECRET_KEY|Sharks@12345/);
 });
