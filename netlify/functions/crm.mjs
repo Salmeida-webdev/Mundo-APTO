@@ -19,12 +19,12 @@ class HttpError extends Error {
 function env() {
   const config = {
     url: String(process.env.SUPABASE_URL || '').replace(/\/+$/, ''),
-    anonKey: process.env.SUPABASE_ANON_KEY || '',
-    serviceKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
+    publishableKey: process.env.SUPABASE_PUBLISHABLE_KEY || '',
+    secretKey: process.env.SUPABASE_SECRET_KEY || '',
     bootstrapSecret: process.env.CRM_BOOTSTRAP_SECRET || '',
     bootstrapEmail: normalizeEmail(process.env.CRM_BOOTSTRAP_EMAIL || '')
   };
-  if (!config.url || !config.anonKey || !config.serviceKey) {
+  if (!config.url || !config.publishableKey || !config.secretKey) {
     throw new HttpError(503, 'O CRM ainda não está conectado ao banco de dados.');
   }
   return config;
@@ -50,7 +50,7 @@ async function readJson(response, fallback) {
 
 async function authRequest(path, { method = 'GET', body, token, admin = false } = {}) {
   const cfg = env();
-  const key = admin ? cfg.serviceKey : cfg.anonKey;
+  const key = admin ? cfg.secretKey : cfg.publishableKey;
   const headers = { apikey: key, Accept: 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -63,7 +63,7 @@ async function dbRequest(table, { method = 'GET', query = {}, body, prefer, rang
   const params = new URLSearchParams();
   Object.entries(query).forEach(([key, value]) => params.set(key, String(value)));
   const url = `${cfg.url}/rest/v1/${table}${params.size ? `?${params}` : ''}`;
-  const headers = { apikey: cfg.serviceKey, Authorization: `Bearer ${cfg.serviceKey}`, Accept: 'application/json' };
+  const headers = { apikey: cfg.secretKey, Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (prefer) headers.Prefer = prefer;
   if (range) { headers.Range = range; headers['Range-Unit'] = 'items'; }
