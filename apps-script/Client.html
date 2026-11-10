@@ -89,6 +89,7 @@
       status: byId('filter-status').value,
       dateFrom: byId('filter-from').value,
       dateTo: byId('filter-to').value,
+      periodMode: byId('filter-period').value,
       staleOnly: staleOnly === true
     };
     if (isManagerOrSdr()) filters.brokerId = byId('filter-broker').value;
@@ -144,6 +145,7 @@
     byId('user-role').textContent = state.user.role;
     byId('user-avatar').textContent = state.user.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
     byId('users-nav').classList.toggle('hidden', !isAdmin());
+    byId('developments-nav').classList.toggle('hidden', !isAdmin());
     byId('broker-filter-wrap').classList.toggle('hidden', !isManagerOrSdr());
     fillFilters();
     bindNavigation();
@@ -207,11 +209,14 @@
 
   function setActiveNav(page) {
     byId('main-nav').querySelectorAll('[data-page]').forEach((item) => item.classList.toggle('active', item.dataset.page === page));
-    const titles = { dashboard: ['PAINEL COMERCIAL', 'Visão geral'], leads: ['CARTEIRA COMERCIAL', 'Clientes'], followups: ['ACOMPANHAMENTO', 'Follow-ups'], users: ['ADMINISTRAÇÃO', 'Equipe'] };
+    const titles = { dashboard: ['PAINEL COMERCIAL', 'Visão geral'], leads: ['CARTEIRA COMERCIAL', 'Clientes'], followups: ['ACOMPANHAMENTO', 'Follow-ups'], users: ['ADMINISTRAÇÃO', 'Equipe'], developments: ['CONFIGURAÇÃO COMERCIAL', 'Empreendimentos'] };
     const current = titles[page] || titles.dashboard;
     byId('page-kicker').textContent = current[0];
     byId('page-title').textContent = current[1];
-    byId('filters-panel').classList.toggle('hidden', page === 'users');
+    const filters = byId('filters-panel');
+    filters.classList.toggle('hidden', page === 'users' || page === 'developments');
+    filters.classList.toggle('dashboard-mode', page === 'dashboard');
+    if (page === 'dashboard') { byId('filter-query').value = ''; byId('filter-status').value = ''; }
   }
 
   async function refreshPage(silent) {
@@ -221,6 +226,7 @@
     else if (state.page === 'leads') await renderLeads(false);
     else if (state.page === 'followups') await renderLeads(true);
     else if (state.page === 'users') await renderUsers();
+    else if (state.page === 'developments') await renderDevelopments();
   }
 
   function kpi(label, value, sub, color) {
@@ -240,8 +246,9 @@
     area.replaceChildren();
     const heading = el('div', 'page-heading');
     const text = el('div');
-    text.append(el('h2', '', 'Acompanhamento da operação'), el('p', '', 'Indicadores filtrados pela carteira e pelo período selecionado. Atualização automática a cada 45 segundos.'));
+    text.append(el('h2', '', 'Acompanhamento da operação'), el('p', '', 'Indicadores atuais e históricos por carteira, empreendimento e período. Sincronização automática a cada 20 segundos.'));
     heading.append(text);
+    if (isAdmin()) heading.appendChild(button('Exportar relatório CSV', 'button-small', exportReport));
     area.appendChild(heading);
 
     const cards = el('section', 'kpi-grid');
@@ -325,6 +332,56 @@
     if (!data.staleLeads.length) stalePanel.appendChild(el('div', 'empty-state', 'Tudo em dia. Não há clientes vencidos para follow-up.'));
     else stalePanel.appendChild(buildStalePreview(data.staleLeads));
     area.appendChild(stalePanel);
+    area.appendChild(buildAnalyticsPanel(data.analytics));
+  }
+
+  function buildAnalyticsPanel(analytics) {
+    const panel = el('section', 'panel analytics-panel');
+    const head = el('div', 'panel-header'); const title = el('div');
+    title.append(el('h3', '', 'Análises históricas e alertas gerenciais'), el('p', '', 'Comparação de ' + analytics.periodLabel + ' com o período anterior.'));
+    head.append(title, el('span', 'panel-chip', 'Histórico progressivo'));
+    panel.appendChild(head);
+    const current = analytics.current; const previous = analytics.previous;
+    const summary = el('div', 'analytics-summary');
+    summary.append(
+      kpi('Novos cadastros', current.newLeads, 'Período anterior: ' + previous.newLeads, '#EE7A00'),
+      kpi('Contatos do SDR', current.sdrContacts, 'Período anterior: ' + previous.sdrContacts, '#8b5cf6'),
+      kpi('Conversão geral', current.overallConversion === null ? '—' : current.overallConversion + '%', 'Anterior: ' + (previous.overallConversion === null ? '—' : previous.overallConversion + '%') + ' · ' + current.purchased + ' compras', '#16a34a'),
+      kpi('1º contato médio', current.averageFirstContactHours === null ? '—' : current.averageFirstContactHours + ' h', 'Anterior: ' + (previous.averageFirstContactHours === null ? '—' : previous.averageFirstContactHours + ' h') + ' · ' + current.firstContactCount + ' clientes', '#3b82f6'),
+      kpi('Follow-ups atrasados', analytics.staleCurrent === null ? '—' : analytics.staleCurrent, 'Período anterior: ' + (analytics.stalePrevious === null ? '—' : analytics.stalePrevious), analytics.stalePrevious !== null && analytics.staleCurrent > analytics.stalePrevious ? '#ef4444' : '#14b8a6')
+    );
+    panel.appendChild(summary);
+
+    const conversionBlock = el('div', 'conversion-block');
+    const conversionTitle = el('div', 'analytics-section-title');
+    conversionTitle.append(el('h4', '', 'Conversão entre etapas'), el('p', '', analytics.conversionBasis));
+    conversionBlock.appendChild(conversionTitle);
+    const scroll = el('div', 'table-scroll'); const table = el('table', 'data-table');
+    const headRow = el('tr'); ['Etapa de origem', 'Próxima etapa', 'Entraram', 'Avançaram', 'Conversão', 'Período anterior'].forEach((label) => headRow.appendChild(el('th', '', label)));
+    const thead = el('thead'); thead.appendChild(headRow); table.appendChild(thead);
+    const tbody = el('tbody');
+    current.conversions.forEach((item, index) => {
+      const prior = previous.conversions[index]; const row = el('tr');
+      row.append(el('td', '', item.from), el('td', '', item.to), el('td', '', item.entered), el('td', '', item.converted), el('td', 'ranking-number', item.rate === null ? '—' : item.rate + '%'), el('td', '', prior.rate === null ? '—' : prior.rate + '%'));
+      tbody.appendChild(row);
+    });
+    table.appendChild(tbody); scroll.appendChild(table); conversionBlock.appendChild(scroll); panel.appendChild(conversionBlock);
+
+    const alertBlock = el('div', 'analytics-alerts');
+    const alertTitle = el('div', 'analytics-section-title'); alertTitle.append(el('h4', '', 'Pontos de atenção'), el('p', '', 'Alertas calculados a partir dos registros disponíveis.'));
+    alertBlock.appendChild(alertTitle);
+    if (!analytics.alerts.length) alertBlock.appendChild(el('div', 'empty-state analytics-empty', 'Nenhum alerta gerencial identificado neste recorte.'));
+    else {
+      const list = el('div', 'alert-list');
+      analytics.alerts.forEach((alert) => {
+        const item = el('article', 'alert-item alert-' + alert.severity);
+        item.append(el('strong', '', alert.title), el('p', '', alert.detail)); list.appendChild(item);
+      });
+      alertBlock.appendChild(list);
+    }
+    panel.appendChild(alertBlock);
+    panel.appendChild(el('p', 'analytics-disclaimer', 'As comparações históricas começam na implantação desta versão. A conversão geral considera clientes cadastrados no período que chegaram à etapa “Já comprou”; os dados anteriores não registrados não podem ser reconstruídos.'));
+    return panel;
   }
 
   function buildStalePreview(leads) {
@@ -347,7 +404,15 @@
     const heading = el('div', 'page-heading'); const title = el('div');
     title.append(el('h2', '', staleOnly ? 'Clientes que precisam de acompanhamento' : 'Carteira de clientes'), el('p', '', staleOnly ? 'Ordenados pelo maior tempo sem atualização do SDR.' : 'A busca considera nome, telefone, corretor, empreendimento, status e período de cadastro.'));
     heading.appendChild(title);
-    if (!staleOnly && state.user.role !== 'SDR') heading.appendChild(button('+ Novo cliente', 'button-primary', () => openLeadDialog(null)));
+    if (!staleOnly) {
+      const actions = el('div', 'row-actions');
+      actions.appendChild(button('+ Novo cliente', 'button-primary', () => openLeadDialog(null)));
+      if (isAdmin()) {
+        actions.appendChild(button('Importar CSV', 'button-small', openImportDialog));
+        actions.appendChild(button('Exportar CSV', 'button-small', exportLeads));
+      }
+      heading.appendChild(actions);
+    }
     area.appendChild(heading);
     if (staleOnly) {
       const note = el('div', 'followup-note', 'A lista identifica clientes sem atualização do SDR por pelo menos 3 dias úteis. Use os filtros para focar um corretor, empreendimento ou status.');
@@ -421,9 +486,10 @@
   function openLeadDialog(lead) {
     const isCreate = !lead;
     const admin = isAdmin(); const sdr = state.user.role === 'SDR';
+    const sdrCreate = sdr && isCreate;
     const dialog = byId('lead-dialog'); const content = byId('lead-dialog-content'); content.replaceChildren();
     const box = el('div', 'modal-content');
-    box.append(el('h2', '', isCreate ? 'Novo cliente' : 'Ficha do cliente'), el('p', 'muted', isCreate ? 'Cadastre os dados básicos para iniciar o acompanhamento.' : 'Atualize as informações de acordo com seu perfil de acesso.'));
+    box.append(el('h2', '', isCreate ? 'Novo cliente' : 'Ficha do cliente'), el('p', 'muted', sdrCreate ? 'Cadastre o cliente e escolha o corretor responsável. Seu perfil continuará sendo SDR; o cliente ficará na carteira do corretor selecionado.' : isCreate ? 'Cadastre os dados básicos para iniciar o acompanhamento.' : 'Atualize as informações de acordo com seu perfil de acesso.'));
     const form = el('form'); const grid = el('div', 'form-grid');
     const name = document.createElement('input'); name.maxLength = 150; name.required = true; name.value = lead ? lead.name : '';
     const phone = document.createElement('input'); phone.type = 'tel'; phone.maxLength = 30; phone.required = true; phone.value = lead ? lead.phone : '';
@@ -432,7 +498,7 @@
     const feedback = document.createElement('textarea'); feedback.maxLength = 3000; feedback.value = lead ? lead.sdrFeedback : '';
     const status = makeSelect(state.refs.statuses.map((item) => ({label:item.name,value:item.name})), lead ? lead.status : 'Em contato');
     let broker = null;
-    if (admin) broker = makeSelect(state.refs.brokers.filter((item) => item.active).map((item) => ({label:item.name,value:item.id})), lead ? lead.brokerId : (state.refs.brokers.find((item) => item.active) || {}).id);
+    if (admin || sdrCreate) broker = makeSelect([{label:'Selecione o corretor responsável',value:''}, ...state.refs.brokers.filter((item) => item.active).map((item) => ({label:item.name,value:item.id}))], lead ? lead.brokerId : '');
 
     if (sdr && !isCreate) {
       readonlyField(grid, 'Cliente', lead.name); readonlyField(grid, 'Telefone', lead.phone);
@@ -444,7 +510,7 @@
       addField(grid, 'Nome completo', name);
       addField(grid, 'Telefone', phone);
       addField(grid, 'Empreendimento', development, true);
-      if (admin) addField(grid, 'Corretor responsável', broker, true);
+      if (admin || sdrCreate) addField(grid, 'Corretor responsável', broker, true);
       addField(grid, 'Observações', notes, true);
       if (admin) {
         addField(grid, 'Status do atendimento', status);
@@ -459,6 +525,8 @@
     if (sdr && lead) {
       const fieldHint = el('p', 'field-hint', 'Ao registrar o contato, o status e o feedback ficam salvos como uma nova entrada no histórico deste cliente.');
       grid.appendChild(fieldHint);
+    } else if (sdrCreate) {
+      grid.appendChild(el('p', 'field-hint', 'O cliente será criado com status “Em contato” e ficará visível para o SDR, para a gestão e para o corretor escolhido.'));
     }
     form.appendChild(grid);
     const error = el('p', 'form-error'); error.setAttribute('role','alert'); form.appendChild(error);
@@ -482,7 +550,8 @@
     form.addEventListener('submit', async (event) => {
       event.preventDefault(); error.textContent = ''; save.disabled = true;
       const payload = {};
-      if (sdr) { payload.status = status.value; payload.sdrFeedback = feedback.value; }
+      if (sdr && lead) { payload.status = status.value; payload.sdrFeedback = feedback.value; }
+      else if (sdrCreate) { payload.name = name.value; payload.phone = phone.value; payload.developmentId = development.value; payload.notes = notes.value; payload.brokerId = broker.value; }
       else if (admin) { payload.name = name.value; payload.phone = phone.value; payload.developmentId = development.value; payload.notes = notes.value; payload.sdrFeedback = feedback.value; payload.status = status.value; payload.brokerId = broker.value; }
       else { payload.name = name.value; payload.phone = phone.value; payload.developmentId = development.value; payload.notes = notes.value; }
       try {
@@ -521,6 +590,178 @@
         historyList.replaceChildren(el('p', 'sdr-history-empty', error && error.message ? error.message : 'Não foi possível carregar o histórico.'));
       });
     }
+  }
+
+  function normalizeCsvHeader(value) {
+    return String(value || '').replace(/^\uFEFF/, '').trim().toLocaleLowerCase('pt-BR').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+  }
+
+  function parseCsv(text) {
+    const source = String(text || '').replace(/^\uFEFF/, '');
+    const firstLine = (source.split(/\r?\n/, 1)[0] || '');
+    let commas = 0; let semicolons = 0; let quoted = false;
+    for (let i = 0; i < firstLine.length; i += 1) {
+      if (firstLine[i] === '"' && firstLine[i + 1] === '"' && quoted) { i += 1; continue; }
+      if (firstLine[i] === '"') quoted = !quoted;
+      else if (!quoted && firstLine[i] === ',') commas += 1;
+      else if (!quoted && firstLine[i] === ';') semicolons += 1;
+    }
+    const delimiter = semicolons >= commas ? ';' : ',';
+    const records = []; let record = []; let field = ''; quoted = false;
+    for (let i = 0; i < source.length; i += 1) {
+      const char = source[i];
+      if (char === '"') {
+        if (quoted && source[i + 1] === '"') { field += '"'; i += 1; }
+        else quoted = !quoted;
+      } else if (char === delimiter && !quoted) { record.push(field); field = ''; }
+      else if ((char === '\n' || char === '\r') && !quoted) {
+        if (char === '\r' && source[i + 1] === '\n') i += 1;
+        record.push(field); field = '';
+        if (record.some((value) => String(value).trim() !== '')) records.push(record);
+        record = [];
+      } else field += char;
+    }
+    record.push(field);
+    if (record.some((value) => String(value).trim() !== '')) records.push(record);
+    if (records.length < 2) throw new Error('A planilha precisa ter cabeçalho e pelo menos um cliente.');
+    const headers = records.shift().map(normalizeCsvHeader);
+    const indexes = {
+      name: headers.findIndex((value) => ['nome', 'nomecompleto', 'cliente'].includes(value)),
+      phone: headers.findIndex((value) => ['telefone', 'celular', 'fone'].includes(value)),
+      development: headers.findIndex((value) => ['empreendimento', 'empreendimentodeinteresse'].includes(value)),
+      brokerEmail: headers.findIndex((value) => ['emailcorretor', 'corretoremail', 'emailresponsavel'].includes(value)),
+      notes: headers.findIndex((value) => ['observacoes', 'observacao', 'notas'].includes(value)),
+      status: headers.findIndex((value) => ['status', 'statusdoatendimento'].includes(value)),
+      sdrFeedback: headers.findIndex((value) => ['feedbacksdr', 'feedback'].includes(value))
+    };
+    const missing = ['name', 'phone', 'development', 'brokerEmail'].filter((key) => indexes[key] < 0);
+    if (missing.length) throw new Error('Cabeçalhos obrigatórios ausentes: nome, telefone, empreendimento e email_corretor. Baixe o modelo e tente novamente.');
+    return records.map((values) => ({
+      name: values[indexes.name] || '', phone: values[indexes.phone] || '', development: values[indexes.development] || '',
+      brokerEmail: values[indexes.brokerEmail] || '', notes: indexes.notes >= 0 ? values[indexes.notes] || '' : '',
+      status: indexes.status >= 0 ? values[indexes.status] || '' : '', sdrFeedback: indexes.sdrFeedback >= 0 ? values[indexes.sdrFeedback] || '' : ''
+    }));
+  }
+
+  function csvCell(value) {
+    let text = String(value === undefined || value === null ? '' : value);
+    if (/^[\s\u0000-\u001f]*[=+\-@]/.test(text)) text = "'" + text;
+    return '"' + text.replace(/"/g, '""') + '"';
+  }
+
+  function downloadCsv(filename, headers, rows) {
+    const csv = '\uFEFF' + [headers, ...rows].map((row) => row.map(csvCell).join(';')).join('\r\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a'); link.href = url; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function downloadImportTemplate() {
+    downloadCsv('modelo-importacao-clientes-mundo-apto.csv', ['nome', 'telefone', 'empreendimento', 'email_corretor', 'observacoes', 'status', 'feedback_sdr'], []);
+  }
+
+  async function exportLeads() {
+    try {
+      const rows = await callApi('apiExportLeads', state.token, readFilters(false));
+      const headers = ['nome', 'telefone', 'empreendimento', 'corretor', 'email_corretor', 'status', 'observacoes', 'feedback_sdr', 'cadastrado_em', 'atualizado_sdr_em', 'ultima_atualizacao'];
+      const values = rows.map((item) => [item.name, item.phone, item.development, item.broker, item.brokerEmail, item.status, item.notes, item.sdrFeedback, item.createdAt, item.sdrUpdatedAt, item.updatedAt]);
+      downloadCsv('clientes-mundo-apto-' + new Date().toISOString().slice(0, 10) + '.csv', headers, values);
+      toast(rows.length + ' cliente(s) exportado(s) com os filtros atuais.', 'success');
+    } catch (error) { handleFailure(error); }
+  }
+
+  async function exportReport() {
+    try {
+      const report = await callApi('apiExportReport', state.token, readFilters(false));
+      downloadCsv('relatorio-gerencial-mundo-apto-' + new Date().toISOString().slice(0, 10) + '.csv', report.rows[0], report.rows.slice(1));
+      toast('Relatório gerencial exportado em CSV.', 'success');
+    } catch (error) { handleFailure(error); }
+  }
+
+  function openImportDialog() {
+    const dialog = byId('admin-dialog'); const content = byId('admin-dialog-content'); content.replaceChildren();
+    const box = el('div', 'modal-content');
+    box.append(el('h2', '', 'Importar clientes por planilha'), el('p', 'muted', 'Use o modelo CSV. Cada linha precisa informar o corretor responsável pelo e-mail cadastrado no CRM. A importação só grava quando todas as linhas estiverem válidas.'));
+    const info = el('div', 'followup-note', 'A planilha deve conter: nome, telefone, empreendimento, email_corretor, observacoes, status e feedback_sdr. CSV separado por ponto e vírgula ou vírgula; até 200 clientes por arquivo. Telefones duplicados são bloqueados para revisão.');
+    const download = button('Baixar modelo CSV', 'button-small', downloadImportTemplate);
+    const file = document.createElement('input'); file.type = 'file'; file.accept = '.csv,text/csv'; file.setAttribute('aria-label', 'Selecionar arquivo CSV');
+    const fieldGrid = el('div', 'form-grid'); addField(fieldGrid, 'Arquivo CSV', file, true);
+    const error = el('p', 'form-error'); error.setAttribute('role', 'alert');
+    const previewArea = el('div', 'import-preview');
+    const actions = el('div', 'modal-actions'); actions.append(button('Fechar', '', () => dialog.close()));
+    const save = button('Importar clientes', 'button-primary', null); save.disabled = true; actions.appendChild(save);
+    box.append(info, download, fieldGrid, error, previewArea, actions); content.appendChild(box);
+    let parsedRows = []; let preview = null;
+    file.addEventListener('change', async () => {
+      error.textContent = ''; previewArea.replaceChildren(); save.disabled = true;
+      if (!file.files || !file.files[0]) return;
+      if (file.files[0].size > 450000) { error.textContent = 'O arquivo deve ter até 450 KB para uma importação segura. Divida a planilha em arquivos menores.'; return; }
+      try {
+        parsedRows = parseCsv(await file.files[0].text());
+        preview = await callApi('apiPreviewLeadImport', state.token, parsedRows);
+        if (!preview || preview.ok !== true) throw new Error(preview && preview.message ? preview.message : 'Não foi possível validar a planilha.');
+        const summary = el('div', preview.errorCount ? 'followup-note import-summary import-error' : 'followup-note import-summary', preview.validCount + ' linha(s) válida(s); ' + preview.errorCount + ' com erro ou duplicidade.');
+        previewArea.appendChild(summary);
+        const failures = preview.rows.filter((item) => item.errors.length).slice(0, 20);
+        if (failures.length) {
+          const list = el('ul', 'import-errors');
+          failures.forEach((item) => list.appendChild(el('li', '', 'Linha ' + item.row + ': ' + item.errors.join(' '))));
+          previewArea.appendChild(list);
+        }
+        save.disabled = preview.errorCount > 0 || preview.validCount === 0;
+      } catch (err) { error.textContent = err.message || 'Não foi possível ler a planilha.'; }
+    });
+    save.addEventListener('click', async () => {
+      if (!preview || preview.errorCount || !parsedRows.length) return;
+      if (!window.confirm('Importar ' + preview.validCount + ' cliente(s) e atribuí-los aos corretores indicados?')) return;
+      save.disabled = true; error.textContent = '';
+      try {
+        const result = await callApi('apiImportLeads', state.token, parsedRows);
+        if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'A importação não foi concluída.');
+        dialog.close(); toast(result.message, 'success'); await refreshPage(true);
+      } catch (err) { error.textContent = err.message || 'Não foi possível importar.'; save.disabled = false; }
+    });
+    dialog.showModal();
+  }
+
+  async function renderDevelopments() {
+    if (!isAdmin()) { state.page = 'dashboard'; setActiveNav('dashboard'); return renderDashboard(); }
+    const developments = await callApi('apiListDevelopments', state.token);
+    const area = byId('content-area'); area.replaceChildren();
+    const heading = el('div', 'page-heading'); const title = el('div');
+    title.append(el('h2', '', 'Empreendimentos'), el('p', '', 'Cadastre, edite e desative opções sem apagar os vínculos dos clientes já registrados.'));
+    heading.append(title, button('+ Novo empreendimento', 'button-primary', () => openDevelopmentDialog(null))); area.appendChild(heading);
+    const panel = el('section', 'table-panel'); const scroll = el('div', 'table-scroll'); const table = el('table', 'data-table');
+    const thead = el('thead'); const row = el('tr'); ['Empreendimento', 'Situação', 'Ações'].forEach((label) => row.appendChild(el('th', '', label))); thead.appendChild(row); table.appendChild(thead);
+    const body = el('tbody');
+    if (!developments.length) { const tr = el('tr'); const td = el('td', 'table-empty', 'Nenhum empreendimento cadastrado.'); td.colSpan = 3; tr.appendChild(td); body.appendChild(tr); }
+    developments.forEach((development) => {
+      const tr = el('tr'); tr.append(el('td', '', development.name), el('td', '', development.active ? 'Ativo' : 'Desativado'));
+      const actions = el('td'); actions.appendChild(button('Editar', 'button-small', () => openDevelopmentDialog(development))); tr.appendChild(actions); body.appendChild(tr);
+    });
+    table.appendChild(body); scroll.appendChild(table); panel.appendChild(scroll); area.appendChild(panel);
+  }
+
+  function openDevelopmentDialog(development) {
+    const dialog = byId('admin-dialog'); const content = byId('admin-dialog-content'); content.replaceChildren();
+    const box = el('div', 'modal-content'); const isCreate = !development;
+    box.append(el('h2', '', isCreate ? 'Novo empreendimento' : 'Editar empreendimento'), el('p', 'muted', 'Desativar preserva clientes e históricos já ligados a este empreendimento.'));
+    const form = el('form'); const grid = el('div', 'form-grid'); const name = document.createElement('input'); name.required = true; name.maxLength = 150; name.value = development ? development.name : '';
+    addField(grid, 'Nome do empreendimento', name, true);
+    const active = document.createElement('input'); active.type = 'checkbox'; active.checked = development ? development.active : true;
+    const activeLabel = el('label', 'checkbox-row'); activeLabel.append(active, el('span', '', 'Empreendimento ativo')); grid.appendChild(activeLabel);
+    form.appendChild(grid); const error = el('p', 'form-error'); error.setAttribute('role', 'alert'); form.appendChild(error);
+    const actions = el('div', 'modal-actions'); actions.append(button('Cancelar', '', () => dialog.close())); const save = el('button', 'button button-primary', 'Salvar empreendimento'); save.type = 'submit'; actions.appendChild(save); form.appendChild(actions); box.appendChild(form); content.appendChild(box);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault(); error.textContent = ''; save.disabled = true;
+      try {
+        const result = await callApi('apiSaveDevelopment', state.token, { id: development ? development.id : '', name: name.value, active: active.checked });
+        if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível salvar.');
+        state.refs = await callApi('apiGetReferenceData', state.token); fillFilters(); dialog.close(); toast(result.message, 'success'); await renderDevelopments();
+      } catch (err) { error.textContent = err.message || 'Não foi possível salvar.'; }
+      finally { save.disabled = false; }
+    });
+    dialog.showModal();
   }
 
   async function renderUsers() {

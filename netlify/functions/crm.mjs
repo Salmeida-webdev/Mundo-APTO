@@ -9,7 +9,8 @@ const ALLOWED_METHODS = new Set([
   'apiBootstrapInfo', 'apiBootstrapAdmin', 'apiLogin', 'apiRefresh', 'apiLogout',
   'apiChangePassword', 'apiGetReferenceData', 'apiGetDashboard', 'apiListLeads',
   'apiGetSdrHistory', 'apiSaveLead', 'apiListUsers', 'apiSaveUser',
-  'apiResetUserPassword', 'apiApplySharedTemporaryPassword'
+  'apiResetUserPassword', 'apiApplySharedTemporaryPassword', 'apiListDevelopments',
+  'apiSaveDevelopment', 'apiPreviewLeadImport', 'apiImportLeads', 'apiExportLeads', 'apiExportReport'
 ]);
 
 class HttpError extends Error {
@@ -311,8 +312,15 @@ async function loadLeadContext() {
 
 async function apiGetDashboard(token, filters) {
   const actor = await verifyActor(token);
-  const context = await loadLeadContext();
-  const dashboard = CrmDomain.buildDashboard(context.leads, context.users, filters, { actor, today: now(), staleBusinessDays: CRM_CONFIG.staleBusinessDays });
+  const [context, eventRows, historyRows] = await Promise.all([
+    loadLeadContext(), listAll('crm_lead_events', { select: '*' }), listAll('crm_sdr_history', { select: 'lead_id,at,status,feedback,source' })
+  ]);
+  const events = (eventRows || []).map((item) => ({ id: item.id, leadId: item.lead_id, at: item.at, eventType: item.event_type, oldStatus: item.old_status || '', newStatus: item.new_status || '', brokerId: item.broker_id, developmentId: item.development_id }));
+  const sdrHistory = (historyRows || []).map((item) => ({ leadId: item.lead_id, at: item.at, status: item.status, feedback: item.feedback, source: item.source }));
+  const dashboard = CrmDomain.buildDashboard(context.leads, context.users, filters, {
+    actor, today: now(), staleBusinessDays: CRM_CONFIG.staleBusinessDays,
+    allLeads: context.leads, events, sdrHistory
+  });
   if (actor.role === 'Corretor') dashboard.ranking = dashboard.ranking.filter((item) => item.id === actor.id);
   return dashboard;
 }
@@ -371,8 +379,143 @@ async function apiSaveLead(token, leadId, payload) {
   }
   if (!saved) throw new HttpError(404, 'Cliente não encontrado ou sem permissão.');
   if (isSdrContact) await dbRequest('crm_sdr_history', { method: 'POST', prefer: 'return=minimal', body: { lead_id: saved.id, user_id: actor.id, user_name: actor.name, status: saved.status, feedback: saved.sdr_feedback || '', source: 'Atualização registrada pelo SDR', at: stamp } });
-  await audit(actor, isCreate ? 'lead.create' : isSdrContact ? 'lead.sdr_contact' : 'lead.update', 'lead', saved.id, changedFields.join(','));
-  return { ok: true, leadId: saved.id, message: isCreate ? 'Cliente cadastrado.' : isSdrContact ? 'Contato registrado no histórico.' : 'Cliente atualizado.' };
+  await audit(actor, isCreate ? (actor.role === 'SDR' ? 'lead.create_by_sdr' : 'lead.create') : isSdrContact ? 'lead.sdr_contact' : 'lead.update', 'lead', saved.id, changedFields.join(','));
+  return { ok: true, leadId: saved.id, message: isCreate ? (actor.role === 'SDR' ? 'Cliente cadastrado e atribuído ao corretor selecionado.' : 'Cliente cadastrado.') : isSdrContact ? 'Contato registrado no histórico.' : 'Cliente atualizado.' };
+}
+
+async function apiListDevelopments(token) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  return (await listAll('crm_developments', { select: 'id,name,active' })).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+}
+
+async function apiSaveDevelopment(token, payload) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  payload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  const allowed = ['id', 'name', 'active'];
+  if (Object.keys(payload).some((key) => !allowed.includes(key))) return { ok: false, message: 'A solicitação contém campos não permitidos.' };
+  if (Object.prototype.hasOwnProperty.call(payload, 'active') && typeof payload.active !== 'boolean') return { ok: false, message: 'Estado do empreendimento inválido.' };
+  const name = String(payload.name || '').trim();
+  const id = String(payload.id || '').trim();
+  const active = payload.active !== false;
+  if (!name || name.length > 150) return { ok: false, message: 'Informe um nome de até 150 caracteres.' };
+  const rows = await listAll('crm_developments', { select: 'id,name,active' });
+  const existing = id ? rows.find((row) => String(row.id) === id) : null;
+  if (id && !existing) return { ok: false, message: 'Empreendimento não encontrado.' };
+  if (rows.some((row) => String(row.id) !== id && row.name.trim().toLocaleLowerCase('pt-BR') === name.toLocaleLowerCase('pt-BR'))) return { ok: false, message: 'Já existe um empreendimento com esse nome.' };
+  let saved;
+  if (existing) {
+    const result = await dbRequest('crm_developments', { method: 'PATCH', query: { id: `eq.${id}` }, prefer: 'return=representation', body: { name, active } });
+    saved = Array.isArray(result) ? result[0] : null;
+  } else {
+    const newId = `DEV-${randomBytes(12).toString('hex')}`;
+    const result = await dbRequest('crm_developments', { method: 'POST', prefer: 'return=representation', body: { id: newId, name, active } });
+    saved = Array.isArray(result) ? result[0] : result;
+  }
+  if (!saved) throw new HttpError(502, 'Não foi possível salvar o empreendimento.');
+  await audit(actor, existing ? 'development.update' : 'development.create', 'development', saved.id, 'name,active');
+  return { ok: true, development: saved, message: existing ? 'Empreendimento atualizado.' : 'Empreendimento cadastrado.' };
+}
+
+function phoneKey(value) { return String(value || '').replace(/\D/g, ''); }
+function importRowValue(row, ...keys) {
+  for (const key of keys) if (row && Object.prototype.hasOwnProperty.call(row, key)) return row[key];
+  return '';
+}
+
+async function validateImportRows(actor, inputRows, context) {
+  if (!Array.isArray(inputRows) || !inputRows.length) return { ok: false, message: 'Selecione uma planilha com pelo menos uma linha de cliente.', rows: [] };
+  if (inputRows.length > 200) return { ok: false, message: 'Importe no máximo 200 clientes por vez.', rows: [] };
+  const allowedKeys = ['name', 'phone', 'development', 'developmentId', 'broker', 'brokerEmail', 'brokerId', 'notes', 'status', 'sdrFeedback'];
+  const existingPhones = new Set(context.leads.map((lead) => phoneKey(lead.phone)).filter(Boolean));
+  const importedPhones = new Set();
+  const results = inputRows.map((row, index) => {
+    const errors = [];
+    if (!row || typeof row !== 'object' || Array.isArray(row) || Object.keys(row).some((key) => !allowedKeys.includes(key))) return { row: index + 2, valid: false, duplicate: false, errors: ['Formato de linha inválido.'], lead: null };
+    const rawDevelopment = String(importRowValue(row, 'developmentId', 'development') || '').trim();
+    const development = context.developments.find((item) => item.active === true && (String(item.id).toLocaleLowerCase('pt-BR') === rawDevelopment.toLocaleLowerCase('pt-BR') || item.name.trim().toLocaleLowerCase('pt-BR') === rawDevelopment.toLocaleLowerCase('pt-BR')));
+    const rawBroker = String(importRowValue(row, 'brokerId', 'brokerEmail', 'broker') || '').trim().toLocaleLowerCase('pt-BR');
+    const broker = context.users.find((item) => item.role === 'Corretor' && item.active === true && [String(item.id).toLocaleLowerCase('pt-BR'), String(item.email).toLocaleLowerCase('pt-BR'), String(item.name).toLocaleLowerCase('pt-BR')].includes(rawBroker));
+    if (!development) errors.push('Empreendimento inexistente ou inativo.');
+    if (!broker) errors.push('Corretor responsável inexistente ou inativo.');
+    const payload = {
+      name: importRowValue(row, 'name'), phone: importRowValue(row, 'phone'),
+      developmentId: development ? development.id : rawDevelopment,
+      brokerId: broker ? broker.id : rawBroker,
+      notes: importRowValue(row, 'notes'), sdrFeedback: importRowValue(row, 'sdrFeedback'),
+      status: importRowValue(row, 'status') || 'Em contato'
+    };
+    const validated = CrmDomain.validateLeadInput(actor, payload, null, { isCreate: true });
+    if (!validated.ok) errors.push(validated.error);
+    const phone = phoneKey(payload.phone);
+    const duplicate = Boolean(phone && (existingPhones.has(phone) || importedPhones.has(phone)));
+    if (phone) importedPhones.add(phone);
+    if (duplicate) errors.push('Telefone duplicado em cadastro existente ou nesta planilha.');
+    return { row: index + 2, valid: errors.length === 0, duplicate, errors: [...new Set(errors)], lead: errors.length ? null : validated.value };
+  });
+  return { ok: true, rows: results, validCount: results.filter((item) => item.valid).length, errorCount: results.filter((item) => item.errors.length).length };
+}
+
+async function apiPreviewLeadImport(token, rows) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  const context = await loadLeadContext();
+  return validateImportRows(actor, rows, context);
+}
+
+async function apiImportLeads(token, rows) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  const context = await loadLeadContext();
+  const preview = await validateImportRows(actor, rows, context);
+  if (!preview.ok || preview.errorCount) return { ok: false, message: preview.ok ? 'Corrija os erros ou duplicidades antes de importar; nenhum cliente foi gravado.' : preview.message, preview };
+  const stamp = now();
+  const payload = preview.rows.map((item) => ({ ...leadToDb(item.lead), broker_id: item.lead.brokerId, status: item.lead.status || 'Em contato', created_by: actor.id, updated_by: actor.id, created_at: stamp, updated_at: stamp }));
+  const saved = await dbRequest('crm_leads', { method: 'POST', prefer: 'return=representation', body: payload });
+  if (!Array.isArray(saved) || saved.length !== payload.length) {
+    const ids = (saved || []).map((item) => item.id).filter(Boolean);
+    if (ids.length) await dbRequest('crm_leads', { method: 'DELETE', query: { id: `in.(${ids.join(',')})` } }).catch(() => null);
+    throw new HttpError(502, 'A importação não foi concluída. Nenhum cliente deve ser considerado importado; atualize a lista e tente novamente.');
+  }
+  try {
+    await audit(actor, 'lead.import', 'lead_batch', saved.map((item) => item.id).join(','), `${saved.length} clientes`);
+  } catch (error) {
+    const ids = saved.map((item) => item.id).filter(Boolean);
+    if (ids.length) await dbRequest('crm_leads', { method: 'DELETE', query: { id: `in.(${ids.join(',')})` } }).catch(() => null);
+    throw error;
+  }
+  return { ok: true, importedCount: saved.length, message: `${saved.length} cliente(s) importado(s) e atribuído(s) aos corretores selecionados.` };
+}
+
+async function apiExportLeads(token, filters) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  const context = await loadLeadContext();
+  const found = CrmDomain.filterLeads(context.leads, actor, filters || {}, { today: now(), staleBusinessDays: CRM_CONFIG.staleBusinessDays });
+  if (found.length > 10000) throw new HttpError(413, 'A exportação excede 10.000 registros. Aplique filtros e exporte em partes.');
+  return found.map((lead) => ({
+    name: lead.name, phone: lead.phone, development: lead.developmentName, broker: lead.brokerName,
+    brokerEmail: (context.users.find((user) => String(user.id) === String(lead.brokerId)) || {}).email || '',
+    status: lead.status, notes: lead.notes, sdrFeedback: lead.sdrFeedback,
+    createdAt: lead.createdAt, sdrUpdatedAt: lead.sdrUpdatedAt, updatedAt: lead.updatedAt
+  }));
+}
+
+async function apiExportReport(token, filters) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  const data = await apiGetDashboard(token, filters || {});
+  const rows = [['categoria', 'indicador', 'periodo_atual', 'periodo_anterior']];
+  rows.push(['Operação', 'Total de clientes na seleção', data.total, '']);
+  Object.keys(data.stageCounts).forEach((status) => rows.push(['Funil atual', status, data.stageCounts[status], '']));
+  data.ranking.forEach((broker) => rows.push(['Corretor', broker.name, broker.total, JSON.stringify(broker.statuses)]));
+  const analytics = data.analytics;
+  rows.push(['Histórico', 'Novos cadastros', analytics.current.newLeads, analytics.previous.newLeads]);
+  rows.push(['Histórico', 'Contatos do SDR', analytics.current.sdrContacts, analytics.previous.sdrContacts]);
+  rows.push(['Histórico', 'Conversão geral (%)', analytics.current.overallConversion === null ? '' : analytics.current.overallConversion, analytics.previous.overallConversion === null ? '' : analytics.previous.overallConversion]);
+  rows.push(['Histórico', 'Tempo médio até o primeiro contato (horas)', analytics.current.averageFirstContactHours === null ? '' : analytics.current.averageFirstContactHours, analytics.previous.averageFirstContactHours === null ? '' : analytics.previous.averageFirstContactHours]);
+  rows.push(['Histórico', 'Follow-ups atrasados', analytics.staleCurrent, analytics.stalePrevious]);
+  analytics.current.conversions.forEach((item, index) => {
+    const prior = analytics.previous.conversions[index];
+    rows.push(['Conversão entre etapas', item.from + ' → ' + item.to, item.rate === null ? '' : item.rate, prior.rate === null ? '' : prior.rate]);
+  });
+  analytics.alerts.forEach((item) => rows.push(['Alerta', item.title, item.detail, item.severity]));
+  return { rows, periodLabel: analytics.periodLabel };
 }
 
 async function apiListUsers(token) {
@@ -470,7 +613,8 @@ async function apiApplySharedTemporaryPassword(token, password) {
 const api = {
   apiBootstrapInfo, apiBootstrapAdmin, apiLogin, apiRefresh, apiLogout, apiChangePassword,
   apiGetReferenceData, apiGetDashboard, apiListLeads, apiGetSdrHistory, apiSaveLead,
-  apiListUsers, apiSaveUser, apiResetUserPassword, apiApplySharedTemporaryPassword
+  apiListUsers, apiSaveUser, apiResetUserPassword, apiApplySharedTemporaryPassword,
+  apiListDevelopments, apiSaveDevelopment, apiPreviewLeadImport, apiImportLeads, apiExportLeads, apiExportReport
 };
 
 export default async (request) => {

@@ -45,7 +45,7 @@ test('cada corretor só consulta a própria carteira; SDR e gestão consultam to
 test('perfis recebem somente os campos editáveis previstos', () => {
   assert.deepEqual(plain(domain.editableFields(users[0], leads[0], false)), ['name', 'phone', 'developmentId', 'notes']);
   assert.deepEqual(plain(domain.editableFields(users[2], leads[0], false)), ['sdrFeedback', 'status']);
-  assert.equal(domain.editableFields(users[2], null, true).length, 0);
+  assert.deepEqual(plain(domain.editableFields(users[2], null, true)), ['name', 'phone', 'developmentId', 'notes', 'brokerId']);
   assert.deepEqual(plain(domain.editableFields(users[3], leads[0], false)), ['name', 'phone', 'developmentId', 'notes', 'sdrFeedback', 'status', 'brokerId']);
 });
 
@@ -66,6 +66,17 @@ test('corretor cria cliente com sua própria atribuição e status inicial contr
   assert.equal(result.value.brokerId, 'U1');
   assert.equal(result.value.status, 'Em contato');
   assert.equal(result.value.sdrFeedback, '');
+});
+
+test('SDR pode cadastrar cliente e atribuir corretor sem receber papel administrativo', () => {
+  const result = domain.validateLeadInput(users[2], {name:'Cliente do SDR',phone:'11999990009',developmentId:'E1',notes:'Origem SDR',brokerId:'U2'}, null, {isCreate:true});
+  assert.equal(result.ok, true);
+  assert.equal(result.value.brokerId, 'U2');
+  assert.equal(result.value.status, 'Em contato');
+  assert.equal(result.value.sdrFeedback, '');
+  assert.equal(users[2].role, 'SDR');
+  assert.deepEqual(plain(domain.editableFields(users[2], leads[0], false)), ['sdrFeedback', 'status']);
+  assert.equal(domain.validateLeadInput(users[2], {name:'Cliente sem corretor',phone:'11999990010',developmentId:'E1'}, null, {isCreate:true}).ok, false);
 });
 
 test('valida telefone, status, campos obrigatórios e limite dos textos', () => {
@@ -102,6 +113,33 @@ test('dashboard calcula indicadores, funil de 10 etapas, ranking e fila de follo
   assert.deepEqual(data.ranking[0], {id:'U1',name:'Corretora Um',active:true,total:2,statuses:{'Em atendimento':1,'Atendimento agendado':0,'Desistência':0,'Atendimento realizado':0,'Já comprou':0,'Em contato':0,'Enviando documentação':0,'Em análise documental':0,'Aprovado pela Caixa':1,'Reprovado pela Caixa':0}});
   assert.equal(data.staleCount, 3);
   assert.deepEqual(data.staleLeads.map((lead) => lead.id), ['L1','L3','L2']);
+});
+
+test('análises históricas comparam coortes, contatos SDR e conversões entre etapas', () => {
+  const historicalLeads = [
+    {...leads[0], id:'C1', status:'Em atendimento', createdAt:'2026-11-10T12:00:00Z', sdrUpdatedAt:'2026-11-10T14:00:00Z'},
+    {...leads[1], id:'C2', status:'Em atendimento', createdAt:'2026-11-09T12:00:00Z', sdrUpdatedAt:'2026-11-09T13:00:00Z'}
+  ];
+  const events = [
+    {leadId:'C1',at:'2026-11-10T12:00:00Z',eventType:'lead_created',newStatus:'Em contato'},
+    {leadId:'C1',at:'2026-11-10T13:00:00Z',eventType:'status_change',oldStatus:'Em contato',newStatus:'Em atendimento'},
+    {leadId:'C2',at:'2026-11-09T12:00:00Z',eventType:'lead_created',newStatus:'Em contato'},
+    {leadId:'C2',at:'2026-11-09T13:00:00Z',eventType:'status_change',oldStatus:'Em contato',newStatus:'Em atendimento'}
+  ];
+  const history = [
+    {leadId:'C1',at:'2026-11-10T14:00:00Z'},
+    {leadId:'C2',at:'2026-11-09T13:00:00Z'}
+  ];
+  const result = plain(domain.buildDashboard(historicalLeads, users, {dateFrom:'2026-11-10',dateTo:'2026-11-10'}, {
+    actor:users[3], today:'2026-11-11T12:00:00-03:00', staleBusinessDays:3,
+    allLeads:historicalLeads, events, sdrHistory:history
+  }));
+  assert.equal(result.analytics.current.newLeads, 1);
+  assert.equal(result.analytics.previous.newLeads, 1);
+  assert.equal(result.analytics.current.sdrContacts, 1);
+  assert.equal(result.analytics.current.averageFirstContactHours, 2);
+  assert.deepEqual(result.analytics.current.conversions[0], {from:'Em contato',to:'Em atendimento',entered:1,converted:1,rate:100});
+  assert.equal(result.analytics.conversionBasis.includes('histórico começa'), true);
 });
 
 test('paginação limita a 100 linhas e calcula total e página', () => {

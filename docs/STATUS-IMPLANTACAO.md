@@ -1,23 +1,24 @@
 # Status da implantação
 
-## Preparado para a publicação
+## Entrega preparada
 
-- Interface Mundo Apto responsiva portada para página estática Netlify.
-- API Netlify Functions com autenticação Supabase Auth, gestão de usuários, carteiras, filtros, dashboard, histórico SDR e senha inicial da equipe.
-- Migration Supabase com tabelas, índices, RLS por perfil/carteira e permissões de leitura restritas; escrita operacional pelo servidor.
-- Configuração do repositório público sanitizada para não incluir nomes/e-mails da equipe ou senhas.
-- Build e suíte de verificação executados: **49 testes passaram, 0 falharam**.
-- Projeto Netlify `mundoapto` criado no time Free; ainda não há deploy nem URL ativo.
-- `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` e `SUPABASE_SECRET_KEY` estão configuradas no contexto de produção. O segredo de bootstrap ainda precisa ser configurado.
+- CRM Mundo Apto responsivo com acesso por perfil e carteira individual dos corretores.
+- SDR consulta todos os clientes, pode cadastrar um cliente escolhendo um corretor ativo e, nos registros existentes, edita apenas feedback e status.
+- Gestão de empreendimentos, importação CSV validada e exportação de cadastros/relatórios, com operações restritas aos perfis administrativos.
+- Histórico dos contatos do SDR e histórico de mudanças de etapa para conversões e comparações.
+- Dashboard com indicadores, ranking, comparativos móveis de 7 e 30 dias, conversões, tempo até o primeiro contato, atrasos e concentrações de clientes parados.
+- Migration de análise histórica aplicada ao Supabase de produção. Os 55 clientes existentes receberam um snapshot inicial; nenhum cadastro foi apagado ou alterado.
+- `npm run check`: build e **56 testes automatizados aprovados**.
 
-## Ainda necessário antes da operação
+## Publicação e validação
 
-1. Configurar `CRM_BOOTSTRAP_SECRET` no Netlify, somente para produção.
-2. Enviar as últimas alterações ao repositório GitHub e conectar o branch principal à publicação Netlify.
-3. Fazer um único deploy de produção depois da revisão final e validar login, criação de usuário, troca de senha, isolamento de corretor, edição SDR, histórico e dashboard.
-4. Criar a conta administrativa pela tela inicial; o endpoint de bootstrap fecha automaticamente depois do primeiro cadastro.
-5. Remover a variável temporária de bootstrap na próxima publicação planejada; cadastrar a equipe e os clientes no ambiente final.
+- O código está preparado para uma atualização consolidada no repositório público `Salmeida-webdev/Mundo-APTO`, branch `main`.
+- Após o commit, confirmar a associação com o site Netlify `mundoapto`, acompanhar um único deploy até o estado `ready` e validar os fluxos principais no endereço publicado antes de liberar o uso da equipe.
+- A conta administrativa e os usuários da equipe devem ser configurados no CRM; nomes e e-mails de usuários não são armazenados no repositório.
 
-## Limites de validação
+## Limites dos dados históricos
 
-Os testes atuais são automatizados e usam dados simulados. Eles não representam um teste de autenticação real no projeto Supabase nem comprovam permissões de produção até a migration, as variáveis secretas e o deploy serem configurados. Dados reais da equipe e clientes não são incluídos no repositório público; serão cadastrados após a inicialização administrativa.
+- Os registros de etapas anteriores ao snapshot não existem na base e não podem ser reconstruídos retroativamente.
+- O histórico de contatos do SDR passa a ser formado a partir das novas atualizações registradas pelo CRM.
+- A interface atualiza os dados periodicamente, com consulta automática a cada 20 segundos enquanto estiver aberta.
+- O sistema não registra auditoria administrativa completa de todas as mudanças de todos os campos; essa funcionalidade não faz parte do escopo aprovado.

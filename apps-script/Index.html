@@ -53,6 +53,7 @@
           <button class="nav-item" data-page="leads"><span class="nav-icon">◎</span>Clientes</button>
           <button class="nav-item" data-page="followups"><span class="nav-icon">◷</span>Follow-ups <span id="stale-badge" class="nav-badge hidden"></span></button>
           <button class="nav-item hidden" data-page="users" id="users-nav"><span class="nav-icon">♙</span>Equipe</button>
+          <button class="nav-item hidden" data-page="developments" id="developments-nav"><span class="nav-icon">⌂</span>Empreendimentos</button>
         </nav>
         <div class="sidebar-bottom"><span class="live-dot"></span><span>Sincronização ativa</span></div>
       </aside>
@@ -70,9 +71,10 @@
           <div class="filter-field filter-search"><label for="filter-query">Buscar cliente</label><input id="filter-query" type="search" placeholder="Nome ou telefone"></div>
           <div class="filter-field hidden" id="broker-filter-wrap"><label for="filter-broker">Corretor</label><select id="filter-broker"><option value="">Todos</option></select></div>
           <div class="filter-field"><label for="filter-development">Empreendimento</label><select id="filter-development"><option value="">Todos</option></select></div>
-          <div class="filter-field"><label for="filter-status">Status</label><select id="filter-status"><option value="">Todos</option></select></div>
+          <div class="filter-field" id="status-filter-wrap"><label for="filter-status">Status</label><select id="filter-status"><option value="">Todos</option></select></div>
           <div class="filter-field"><label for="filter-from">Cadastro de</label><input id="filter-from" type="date"></div>
           <div class="filter-field"><label for="filter-to">Cadastro até</label><input id="filter-to" type="date"></div>
+          <div class="filter-field dashboard-only"><label for="filter-period">Análise histórica</label><select id="filter-period"><option value="week">Últimos 7 dias</option><option value="month">Últimos 30 dias</option></select></div>
           <button id="clear-filters" class="button button-text" type="button">Limpar filtros</button>
         </section>
 
@@ -82,6 +84,7 @@
 
     <dialog id="lead-dialog" class="modal"><form method="dialog" class="modal-dismiss"><button aria-label="Fechar" class="icon-button">×</button></form><div id="lead-dialog-content"></div></dialog>
     <dialog id="user-dialog" class="modal modal-narrow"><form method="dialog" class="modal-dismiss"><button aria-label="Fechar" class="icon-button">×</button></form><div id="user-dialog-content"></div></dialog>
+    <dialog id="admin-dialog" class="modal"><form method="dialog" class="modal-dismiss"><button aria-label="Fechar" class="icon-button">×</button></form><div id="admin-dialog-content"></div></dialog>
     <?!= include_('Client'); ?>
   </body>
 </html>

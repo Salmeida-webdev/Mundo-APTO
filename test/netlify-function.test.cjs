@@ -9,11 +9,13 @@ const { default: handler } = require('../netlify/functions/crm.mjs');
 const userIdSdr = '10000000-0000-4000-8000-000000000004';
 const userIdBrokerA = '10000000-0000-4000-8000-000000000005';
 const userIdBrokerB = '10000000-0000-4000-8000-000000000006';
+const userIdManager = '10000000-0000-4000-8000-000000000007';
 const rows = {
   crm_users: [
     { id: userIdSdr, name: 'SDR de teste', email: 'sdr@example.test', role: 'SDR', active: true, must_change_password: false, session_version: 0 },
     { id: userIdBrokerA, name: 'Corretor A', email: 'a@example.test', role: 'Corretor', active: true, must_change_password: false, session_version: 0 },
-    { id: userIdBrokerB, name: 'Corretor B', email: 'b@example.test', role: 'Corretor', active: true, must_change_password: false, session_version: 0 }
+    { id: userIdBrokerB, name: 'Corretor B', email: 'b@example.test', role: 'Corretor', active: true, must_change_password: false, session_version: 0 },
+    { id: userIdManager, name: 'Gestor de teste', email: 'gestao@example.test', role: 'Gerente', active: true, must_change_password: false, session_version: 0 }
   ],
   crm_developments: [{ id: 'E001', name: 'Empreendimento teste', active: true }],
   crm_leads: [
@@ -21,6 +23,7 @@ const rows = {
     { id: 'lead-b', name: 'Cliente da carteira B', phone: '11999990002', development_id: 'E001', notes: 'Nota B', sdr_feedback: '', status: 'Em contato', broker_id: userIdBrokerB, created_at: '2026-11-08T10:00:00Z', created_by: userIdBrokerB, updated_at: '2026-11-08T10:00:00Z', updated_by: userIdBrokerB, sdr_updated_at: null, sdr_updated_by: null }
   ],
   crm_sdr_history: [],
+  crm_lead_events: [],
   crm_audit: [],
   crm_settings: []
 };
@@ -35,6 +38,7 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
   process.env.CRM_BOOTSTRAP_SECRET = '';
   const token = jwtFor(role, userId, email);
   const calls = [];
+  let leadCounter = 1;
   const fakeUser = { id: userId, email, app_metadata: { role, crm_session_version: 0 } };
   const oldFetch = global.fetch;
   global.fetch = async (input, options = {}) => {
@@ -64,6 +68,11 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
       }
       if (method === 'POST') {
         const value = JSON.parse(options.body);
+        if (table === 'crm_leads') {
+          const entries = (Array.isArray(value) ? value : [value]).map((item) => ({ ...item, id: item.id || `lead-new-${leadCounter++}` }));
+          list.push(...entries);
+          return Response.json(entries);
+        }
         if (Array.isArray(value)) list.push(...value); else list.push(value);
         return Response.json(Array.isArray(value) ? value : [value]);
       }
@@ -140,12 +149,75 @@ test('SDR não altera campos do corretor e registra histórico ao atualizar feed
   assert.equal(rows.crm_sdr_history.at(-1).feedback, 'Contato realizado');
 });
 
+test('SDR cadastra cliente e atribui corretor sem obter acesso administrativo', async (t) => {
+  const originalLeads = rows.crm_leads.slice();
+  t.after(() => rows.crm_leads.splice(0, rows.crm_leads.length, ...originalLeads));
+  const { token, calls } = mockEnvironmentAndFetch(t, { role: 'SDR', userId: userIdSdr, email: 'sdr@example.test' });
+  const result = await invoke('apiSaveLead', [token, '', { name:'Novo pelo SDR', phone:'11999990003', developmentId:'E001', notes:'Atribuição feita no cadastro', brokerId:userIdBrokerB }], token);
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.ok, true);
+  assert.match(result.body.message, /atribuído ao corretor selecionado/);
+  const created = rows.crm_leads.find((lead) => lead.name === 'Novo pelo SDR');
+  assert.equal(created.broker_id, userIdBrokerB);
+  assert.equal(created.created_by, userIdSdr);
+  assert.equal(created.status, 'Em contato');
+  assert.ok(calls.some((call) => call.path === '/rest/v1/crm_leads' && call.method === 'POST'));
+  const forbidden = await invoke('apiSaveLead', [token, created.id, { name:'Tentativa de edição' }], token);
+  assert.equal(forbidden.body.ok, false);
+  assert.match(forbidden.body.message, /não permitidos/);
+});
+
+test('gestão administra empreendimentos com desativação sem apagar registro', async (t) => {
+  const original = rows.crm_developments.slice();
+  t.after(() => rows.crm_developments.splice(0, rows.crm_developments.length, ...original));
+  const { token } = mockEnvironmentAndFetch(t, { role:'Gerente', userId:userIdManager, email:'gestao@example.test' });
+  const created = await invoke('apiSaveDevelopment', [token, { name:'Novo Residencial', active:true }], token);
+  assert.equal(created.body.ok, true);
+  const id = created.body.development.id;
+  const deactivated = await invoke('apiSaveDevelopment', [token, { id, name:'Novo Residencial', active:false }], token);
+  assert.equal(deactivated.body.ok, true);
+  assert.equal(rows.crm_developments.find((row) => row.id === id).active, false);
+  assert.equal((await invoke('apiListDevelopments', [token], token)).body.some((row) => row.id === id), true);
+});
+
+test('SDR não lista empreendimentos administrativos nem exporta cadastros', async (t) => {
+  const { token } = mockEnvironmentAndFetch(t, { role:'SDR', userId:userIdSdr, email:'sdr@example.test' });
+  assert.equal((await invoke('apiListDevelopments', [token], token)).response.status, 403);
+  assert.equal((await invoke('apiExportLeads', [token, {}], token)).response.status, 403);
+});
+
+test('importação valida duplicidades e exportações ficam restritas à gestão', async (t) => {
+  const originalLeads = rows.crm_leads.slice();
+  const originalAudits = rows.crm_audit.slice();
+  t.after(() => { rows.crm_leads.splice(0, rows.crm_leads.length, ...originalLeads); rows.crm_audit.splice(0, rows.crm_audit.length, ...originalAudits); });
+  const { token } = mockEnvironmentAndFetch(t, { role:'Gerente', userId:userIdManager, email:'gestao@example.test' });
+  const duplicate = [{ name:'Duplicado', phone:'11999990001', development:'Empreendimento teste', brokerEmail:'a@example.test' }];
+  const previewDuplicate = await invoke('apiPreviewLeadImport', [token, duplicate], token);
+  assert.equal(previewDuplicate.body.errorCount, 1);
+  const blocked = await invoke('apiImportLeads', [token, duplicate], token);
+  assert.equal(blocked.body.ok, false);
+  const valid = [{ name:'Importado', phone:'11999990003', development:'Empreendimento teste', brokerEmail:'b@example.test', notes:'Teste' }];
+  const imported = await invoke('apiImportLeads', [token, valid], token);
+  assert.equal(imported.body.ok, true, JSON.stringify(imported.body));
+  assert.equal(imported.body.importedCount, 1);
+  const exported = await invoke('apiExportLeads', [token, {}], token);
+  assert.equal(exported.response.status, 200);
+  assert.ok(exported.body.some((row) => row.name === 'Importado'));
+  const report = await invoke('apiExportReport', [token, {}], token);
+  assert.equal(report.response.status, 200);
+  assert.equal(report.body.rows[0][0], 'categoria');
+});
+
 test('migration is private by default, grants only scoped reads and contains no user roster', () => {
   const sql = fs.readFileSync(path.join(root, 'supabase/migrations/202611090001_crm_schema.sql'), 'utf8');
   assert.match(sql, /enable row level security/i);
   assert.match(sql, /revoke all on public\.crm_users[\s\S]*from anon, authenticated/i);
   assert.match(sql, /create policy crm_leads_read_by_role[\s\S]*broker_id = auth\.uid\(\)/i);
   assert.match(sql, /create policy crm_sdr_history_read_by_lead/i);
+  const analyticsMigration = fs.readFileSync(path.join(root, 'supabase/migrations/20261110190050_crm_management_analytics.sql'), 'utf8');
+  assert.match(analyticsMigration, /enable row level security/i);
+  assert.match(analyticsMigration, /create policy crm_lead_events_read_by_lead/i);
+  assert.match(analyticsMigration, /after insert or update of status/i);
   assert.doesNotMatch(sql, /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
 });
 
