@@ -10,6 +10,7 @@ CRM web responsivo para gestão de atendimentos, clientes e funil comercial imob
 - Depois do cadastro, edição do SDR validada no servidor somente para feedback e status; cada contato cria histórico com responsável e data/hora.
 - Dez etapas, lista controlada e cores; cadastro, filtros, busca, dashboard, funil, ranking, follow-ups e gestão de usuários.
 - Empreendimentos podem ser cadastrados, editados, ativados ou desativados pela gestão. Desativar não apaga clientes ou históricos vinculados.
+- A gestão pode excluir e restaurar clientes e usuários. A exclusão é reversível: clientes saem das listas e indicadores ativos, enquanto cadastros, históricos e atribuições permanecem preservados; usuários perdem o acesso e podem ser restaurados com o estado de acesso anterior.
 - Importação por CSV padronizado com pré-validação de campos, corretor, empreendimento e telefones duplicados; exportação de clientes filtrados e relatórios gerenciais em CSV. Apenas perfis administrativos podem importar ou exportar.
 - Análises históricas com conversões entre etapas e geral; comparação da semana atual com a semana anterior e do mês atual com o mesmo recorte do mês anterior; contatos SDR, tempo até o primeiro contato, atrasos e concentração por etapa, corretor e empreendimento.
 - Alertas gerenciais aparecem no dashboard. A gestão pode configurar o prazo de follow-up entre 1 e 30 dias úteis; o padrão inicial é 3 dias úteis.
@@ -65,3 +66,12 @@ As análises usam semana e mês do calendário em `America/Sao_Paulo`; a compara
 A importação usa CSV UTF-8 compatível com Excel e Google Sheets, até 200 clientes por arquivo. Nome, telefone, empreendimento e e-mail do corretor são obrigatórios; telefones duplicados bloqueiam a importação para revisão.
 
 A gestão de empreendimentos preserva clientes e históricos ao desativar uma opção.
+
+## Exclusão e restauração
+
+Nas telas **Clientes** e **Equipe**, os perfis administrativos encontram os botões **Excluir** e as listas de itens excluídos. A ação exige confirmação e arquiva o registro; não apaga fisicamente os dados.
+
+- Clientes excluídos deixam de aparecer nas listas ativas, no funil, no ranking e nas exportações. A ficha e o histórico SDR continuam guardados e podem ser restaurados.
+- Usuários excluídos perdem o acesso e têm suas sessões do CRM encerradas. Seus perfis, e-mails e relações com clientes permanecem para manter o histórico; a gestão pode restaurá-los. O acesso volta ao estado ativo ou desativado que tinham antes.
+- A própria conta conectada não pode ser excluída. O sistema também preserva ao menos um perfil administrativo ativo.
+- A migration 20261111152136_crm_reversible_deletions.sql é somente de esquema: acrescenta colunas e índices nulos, sem atualizar nem excluir registros existentes.

@@ -187,7 +187,7 @@ var CrmDomain = (function () {
     var stageCounts = {};
     STATUS_NAMES.forEach(function (status) { stageCounts[status] = 0; });
     list.forEach(function (lead) { if (Object.prototype.hasOwnProperty.call(stageCounts, lead.status)) stageCounts[lead.status] += 1; });
-    var brokers = (users || []).filter(function (user) { return user.role === 'Corretor'; }).map(function (user) {
+    var brokers = (users || []).filter(function (user) { return user.role === 'Corretor' && !user.deletedAt; }).map(function (user) {
       var own = list.filter(function (lead) { return String(lead.brokerId) === String(user.id); });
       var distribution = {};
       STATUS_NAMES.forEach(function (status) { distribution[status] = 0; });

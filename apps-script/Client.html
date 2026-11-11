@@ -209,12 +209,14 @@
 
   function setActiveNav(page) {
     byId('main-nav').querySelectorAll('[data-page]').forEach((item) => item.classList.toggle('active', item.dataset.page === page));
-    const titles = { dashboard: ['PAINEL COMERCIAL', 'Visão geral'], leads: ['CARTEIRA COMERCIAL', 'Clientes'], followups: ['ACOMPANHAMENTO', 'Follow-ups'], users: ['ADMINISTRAÇÃO', 'Equipe'], developments: ['CONFIGURAÇÃO COMERCIAL', 'Empreendimentos'] };
+    const titles = { dashboard: ['PAINEL COMERCIAL', 'Visão geral'], leads: ['CARTEIRA COMERCIAL', 'Clientes'], archivedLeads: ['ADMINISTRAÇÃO', 'Clientes excluídos'], followups: ['ACOMPANHAMENTO', 'Follow-ups'], users: ['ADMINISTRAÇÃO', 'Equipe'], archivedUsers: ['ADMINISTRAÇÃO', 'Usuários excluídos'], developments: ['CONFIGURAÇÃO COMERCIAL', 'Empreendimentos'] };
     const current = titles[page] || titles.dashboard;
+    const navPage = page === 'archivedLeads' ? 'leads' : page === 'archivedUsers' ? 'users' : page;
     byId('page-kicker').textContent = current[0];
     byId('page-title').textContent = current[1];
+    byId('main-nav').querySelectorAll('[data-page]').forEach((item) => item.classList.toggle('active', item.dataset.page === navPage));
     const filters = byId('filters-panel');
-    filters.classList.toggle('hidden', page === 'users' || page === 'developments');
+    filters.classList.toggle('hidden', page === 'users' || page === 'archivedUsers' || page === 'developments');
     filters.classList.toggle('dashboard-mode', page === 'dashboard');
     if (page === 'dashboard') { byId('filter-query').value = ''; byId('filter-status').value = ''; }
   }
@@ -224,8 +226,10 @@
     if (!silent) showLoading('Atualizando ' + (state.page === 'dashboard' ? 'indicadores' : 'dados') + '…');
     if (state.page === 'dashboard') await renderDashboard();
     else if (state.page === 'leads') await renderLeads(false);
+    else if (state.page === 'archivedLeads') await renderArchivedLeads();
     else if (state.page === 'followups') await renderLeads(true);
     else if (state.page === 'users') await renderUsers();
+    else if (state.page === 'archivedUsers') await renderArchivedUsers();
     else if (state.page === 'developments') await renderDevelopments();
   }
 
@@ -411,6 +415,7 @@
       const actions = el('div', 'row-actions');
       actions.appendChild(button('+ Novo cliente', 'button-primary', () => openLeadDialog(null)));
       if (isAdmin()) {
+        actions.appendChild(button('Clientes excluídos', 'button-small', () => { state.page = 'archivedLeads'; state.pageNumber = 1; setActiveNav(state.page); refreshPage().catch(handleFailure); }));
         actions.appendChild(button('Importar CSV', 'button-small', openImportDialog));
         actions.appendChild(button('Exportar CSV', 'button-small', exportLeads));
       }
@@ -438,7 +443,10 @@
       tr.appendChild(el('td', '', lead.brokerName));
       const statusCell = el('td'); const status = el('span', 'status-pill'); const color = statusColor(lead.status); status.style.backgroundColor = color; status.appendChild(el('span', '', lead.status)); statusCell.appendChild(status); tr.appendChild(statusCell);
       tr.appendChild(el('td', lead.isStale ? 'stale-age' : '', formatDate(lead.sdrUpdatedAt || lead.createdAt)));
-      const action = el('td'); action.appendChild(button('Abrir', 'button-small', () => openLeadDialog(lead))); tr.appendChild(action);
+      const action = el('td'); const actionWrap = el('div', 'row-actions');
+      actionWrap.appendChild(button('Abrir', 'button-small', () => openLeadDialog(lead)));
+      if (isAdmin() && !staleOnly) actionWrap.appendChild(button('Excluir', 'button-small button-danger', () => archiveLead(lead)));
+      action.appendChild(actionWrap); tr.appendChild(action);
       body.appendChild(tr);
     });
     table.appendChild(body); scroll.appendChild(table); panel.appendChild(scroll);
@@ -451,6 +459,56 @@
     const next = button('Próxima', 'button-small', () => { if (result.page * result.pageSize < result.total) { state.pageNumber += 1; renderLeads(staleOnly).catch(handleFailure); } });
     previous.disabled = result.page <= 1; next.disabled = result.page * result.pageSize >= result.total;
     pageControls.append(previous, next); pageFooter.appendChild(pageControls); panel.appendChild(pageFooter); area.appendChild(panel);
+  }
+
+  async function renderArchivedLeads() {
+    if (!isAdmin()) { state.page = 'dashboard'; setActiveNav('dashboard'); return renderDashboard(); }
+    const result = await callApi('apiListArchivedLeads', state.token, readFilters(false), state.pageNumber, 100);
+    const area = byId('content-area'); area.replaceChildren();
+    const heading = el('div', 'page-heading'); const title = el('div');
+    title.append(el('h2', '', 'Clientes excluídos'), el('p', '', 'Os cadastros e históricos permanecem guardados. Restaure um cliente para devolvê-lo às listas e indicadores.'));
+    heading.append(title, button('Voltar a clientes', 'button-small', () => { state.page = 'leads'; state.pageNumber = 1; setActiveNav(state.page); refreshPage().catch(handleFailure); }));
+    area.appendChild(heading);
+    const panel = el('section', 'table-panel'); const scroll = el('div', 'table-scroll'); const table = el('table', 'data-table');
+    const thead = el('thead'); const head = el('tr');
+    ['Cliente', 'Telefone', 'Empreendimento', 'Corretor', 'Status', 'Excluído em', 'Ação'].forEach((label) => head.appendChild(el('th', '', label)));
+    thead.appendChild(head); table.appendChild(thead);
+    const body = el('tbody');
+    if (!result.items.length) {
+      const row = el('tr'); const cell = el('td', 'table-empty', 'Não há clientes excluídos para estes filtros.'); cell.colSpan = 7; row.appendChild(cell); body.appendChild(row);
+    } else result.items.forEach((lead) => {
+      const row = el('tr');
+      row.append(el('td', '', lead.name), el('td', '', lead.phone), el('td', '', lead.developmentName), el('td', '', lead.brokerName));
+      const statusCell = el('td'); const status = el('span', 'status-pill'); status.style.backgroundColor = statusColor(lead.status); status.appendChild(el('span', '', lead.status)); statusCell.appendChild(status); row.appendChild(statusCell);
+      row.appendChild(el('td', '', formatDate(lead.deletedAt)));
+      const action = el('td'); action.appendChild(button('Restaurar', 'button-small', () => restoreLead(lead))); row.appendChild(action);
+      body.appendChild(row);
+    });
+    table.appendChild(body); scroll.appendChild(table); panel.appendChild(scroll);
+    const footer = el('div', 'table-toolbar'); footer.appendChild(el('p', 'muted', result.total + ' cliente(s) excluído(s)'));
+    const controls = el('div', 'row-actions');
+    const previous = button('Anterior', 'button-small', () => { if (state.pageNumber > 1) { state.pageNumber -= 1; renderArchivedLeads().catch(handleFailure); } });
+    const next = button('Próxima', 'button-small', () => { if (result.page * result.pageSize < result.total) { state.pageNumber += 1; renderArchivedLeads().catch(handleFailure); } });
+    previous.disabled = result.page <= 1; next.disabled = result.page * result.pageSize >= result.total;
+    controls.append(previous, next); footer.appendChild(controls); panel.appendChild(footer); area.appendChild(panel);
+  }
+
+  async function archiveLead(lead) {
+    if (!isAdmin() || !window.confirm('Excluir o cliente ' + lead.name + '? O cadastro e o histórico do SDR serão preservados e poderão ser restaurados pela gestão.')) return;
+    try {
+      const result = await callApi('apiArchiveLead', state.token, lead.id);
+      if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível excluir o cliente.');
+      toast(result.message, 'success'); await refreshPage(true);
+    } catch (error) { handleFailure(error); }
+  }
+
+  async function restoreLead(lead) {
+    if (!isAdmin() || !window.confirm('Restaurar o cliente ' + lead.name + ' para as listas ativas do CRM?')) return;
+    try {
+      const result = await callApi('apiRestoreLead', state.token, lead.id);
+      if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível restaurar o cliente.');
+      toast(result.message, 'success'); state.pageNumber = 1; await refreshPage(true);
+    } catch (error) { handleFailure(error); }
   }
 
   function statusColor(statusName) {
@@ -799,6 +857,7 @@
     const heading = el('div', 'page-heading'); const title = el('div');
     title.append(el('h2', '', 'Usuários e permissões'), el('p', '', 'Cadastre, desative ou substitua pessoas sem reconstruir a estrutura. Usuários desativados permanecem no histórico.'));
     const headingActions = el('div', 'row-actions');
+    headingActions.appendChild(button('Usuários excluídos', 'button-small', () => { state.page = 'archivedUsers'; state.pageNumber = 1; setActiveNav(state.page); refreshPage().catch(handleFailure); }));
     headingActions.appendChild(button('+ Adicionar usuário', 'button-primary', () => openUserDialog(null)));
     if (state.refs.sharedTemporaryPasswordAvailable) headingActions.appendChild(button('Senha inicial da equipe', 'button-small', openSharedTemporaryPasswordDialog));
     heading.append(title, headingActions); area.appendChild(heading);
@@ -808,10 +867,55 @@
     users.forEach((user) => {
       const tr = el('tr'); tr.append(el('td', '', user.name), el('td', '', user.email), el('td', '', user.role), el('td', '', user.active ? 'Ativo' : 'Desativado'));
       const actions = el('td'); const actionWrap = el('div', 'row-actions');
-      actionWrap.append(button('Editar', 'button-small', () => openUserDialog(user)), button('Gerar senha', 'button-small', () => resetPassword(user)));
+      actionWrap.appendChild(button('Editar', 'button-small', () => openUserDialog(user)));
+      if (user.active && String(user.id) !== String(state.user.id)) actionWrap.appendChild(button('Gerar senha', 'button-small', () => resetPassword(user)));
+      if (String(user.id) !== String(state.user.id)) actionWrap.appendChild(button('Excluir', 'button-small button-danger', () => archiveUser(user)));
       actions.appendChild(actionWrap); tr.appendChild(actions); tbody.appendChild(tr);
     });
     table.appendChild(tbody); scroll.appendChild(table); panel.appendChild(scroll); area.appendChild(panel);
+  }
+
+  async function renderArchivedUsers() {
+    if (!isAdmin()) { state.page = 'dashboard'; setActiveNav('dashboard'); return renderDashboard(); }
+    const users = await callApi('apiListArchivedUsers', state.token);
+    const area = byId('content-area'); area.replaceChildren();
+    const heading = el('div', 'page-heading'); const title = el('div');
+    title.append(el('h2', '', 'Usuários excluídos'), el('p', '', 'Perfis e vínculos com clientes são preservados. Ao restaurar, o acesso volta ao estado que tinha antes da exclusão.'));
+    heading.append(title, button('Voltar à equipe', 'button-small', () => { state.page = 'users'; setActiveNav(state.page); refreshPage().catch(handleFailure); }));
+    area.appendChild(heading);
+    const panel = el('section', 'table-panel'); const scroll = el('div', 'table-scroll'); const table = el('table', 'data-table'); table.style.minWidth = '760px';
+    const thead = el('thead'); const head = el('tr');
+    ['Nome', 'E-mail', 'Perfil', 'Acesso anterior', 'Excluído em', 'Ação'].forEach((label) => head.appendChild(el('th', '', label)));
+    thead.appendChild(head); table.appendChild(thead);
+    const body = el('tbody');
+    if (!users.length) {
+      const row = el('tr'); const cell = el('td', 'table-empty', 'Não há usuários excluídos.'); cell.colSpan = 6; row.appendChild(cell); body.appendChild(row);
+    } else users.forEach((user) => {
+      const row = el('tr');
+      row.append(el('td', '', user.name), el('td', '', user.email), el('td', '', user.role), el('td', '', user.wasActive ? 'Ativo' : 'Desativado'), el('td', '', formatDate(user.deletedAt)));
+      const action = el('td'); action.appendChild(button('Restaurar', 'button-small', () => restoreUser(user))); row.appendChild(action); body.appendChild(row);
+    });
+    table.appendChild(body); scroll.appendChild(table); panel.appendChild(scroll); area.appendChild(panel);
+  }
+
+  async function archiveUser(user) {
+    if (!isAdmin() || !window.confirm('Excluir o acesso de ' + user.name + ' (' + user.role + ')? A pessoa perderá o acesso ao CRM; clientes e históricos serão preservados. O perfil poderá ser restaurado pela gestão.')) return;
+    try {
+      const result = await callApi('apiArchiveUser', state.token, user.id);
+      if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível excluir o usuário.');
+      state.refs = await callApi('apiGetReferenceData', state.token); fillFilters();
+      toast(result.message, 'success'); await refreshPage(true);
+    } catch (error) { handleFailure(error); }
+  }
+
+  async function restoreUser(user) {
+    if (!isAdmin() || !window.confirm('Restaurar o perfil de ' + user.name + '? O acesso seguirá o estado indicado na lista.')) return;
+    try {
+      const result = await callApi('apiRestoreUser', state.token, user.id);
+      if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível restaurar o usuário.');
+      state.refs = await callApi('apiGetReferenceData', state.token); fillFilters();
+      toast(result.message, 'success'); await refreshPage(true);
+    } catch (error) { handleFailure(error); }
   }
 
   function openSharedTemporaryPasswordDialog() {

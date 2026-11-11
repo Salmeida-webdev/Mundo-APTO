@@ -9,6 +9,8 @@ const ALLOWED_METHODS = new Set([
   'apiBootstrapInfo', 'apiBootstrapAdmin', 'apiLogin', 'apiRefresh', 'apiLogout',
   'apiChangePassword', 'apiGetReferenceData', 'apiGetDashboard', 'apiListLeads',
   'apiGetSdrHistory', 'apiSaveLead', 'apiListUsers', 'apiSaveUser',
+  'apiListArchivedLeads', 'apiArchiveLead', 'apiRestoreLead',
+  'apiListArchivedUsers', 'apiArchiveUser', 'apiRestoreUser',
   'apiResetUserPassword', 'apiApplySharedTemporaryPassword', 'apiListDevelopments',
   'apiSaveDevelopment', 'apiPreviewLeadImport', 'apiImportLeads', 'apiExportLeads', 'apiExportReport', 'apiSaveFollowupDays'
 ]);
@@ -90,7 +92,7 @@ async function listAll(table, query = {}) {
 
 function mapUser(row) {
   if (!row) return null;
-  return { id: row.id, name: row.name, email: row.email, role: row.role, active: row.active === true, mustChangePassword: row.must_change_password === true, sessionVersion: Number(row.session_version || 0), createdAt: row.created_at, updatedAt: row.updated_at };
+  return { id: row.id, name: row.name, email: row.email, role: row.role, active: row.active === true, mustChangePassword: row.must_change_password === true, sessionVersion: Number(row.session_version || 0), createdAt: row.created_at, updatedAt: row.updated_at, deletedAt: row.deleted_at || '', deletedBy: row.deleted_by || '', deletedPreviousActive: row.deleted_previous_active === true };
 }
 function publicUser(row) {
   const user = mapUser(row);
@@ -105,7 +107,8 @@ function mapLead(row, users, developments) {
     developmentName: development ? development.name : '', notes: row.notes || '', sdrFeedback: row.sdr_feedback || '',
     status: row.status, brokerId: row.broker_id, brokerName: broker ? broker.name : 'Corretor inativo',
     createdAt: row.created_at, createdBy: row.created_by, updatedAt: row.updated_at,
-    updatedBy: row.updated_by, sdrUpdatedAt: row.sdr_updated_at || '', sdrUpdatedBy: row.sdr_updated_by || ''
+    updatedBy: row.updated_by, sdrUpdatedAt: row.sdr_updated_at || '', sdrUpdatedBy: row.sdr_updated_by || '',
+    deletedAt: row.deleted_at || '', deletedBy: row.deleted_by || ''
   };
 }
 function leadToDb(values) {
@@ -134,7 +137,7 @@ async function verifyActor(token, allowPasswordChange = false) {
   const claims = decodeClaims(token);
   const authUser = await authRequest('user', { token });
   const profile = await getProfile(authUser && authUser.id);
-  if (!profile || profile.active !== true || normalizeEmail(profile.email) !== normalizeEmail(authUser.email)) throw new HttpError(401, 'Sessão inválida. Entre novamente.');
+  if (!profile || profile.active !== true || profile.deleted_at || normalizeEmail(profile.email) !== normalizeEmail(authUser.email)) throw new HttpError(401, 'Sessão inválida. Entre novamente.');
   const claimVersion = Number(claims.app_metadata && claims.app_metadata.crm_session_version || 0);
   if (claimVersion !== Number(profile.session_version || 0)) throw new HttpError(401, 'Sessão inválida. Entre novamente.');
   const actor = mapUser(profile);
@@ -155,7 +158,7 @@ async function authPasswordGrant(email, password) {
 async function signInResult(session, persist = true) {
   const authUser = session && session.user;
   const profile = authUser && await getProfile(authUser.id);
-  if (!profile || profile.active !== true || normalizeEmail(profile.email) !== normalizeEmail(authUser.email)) {
+  if (!profile || profile.active !== true || profile.deleted_at || normalizeEmail(profile.email) !== normalizeEmail(authUser.email)) {
     await authSignOut(session && session.access_token);
     return { ok: false, message: 'E-mail ou senha inválidos.' };
   }
@@ -243,7 +246,7 @@ async function apiRefresh(refreshToken) {
   const currentSession = Array.isArray(sessions) ? sessions[0] : null;
   if (!currentSession || new Date(currentSession.expires_at).getTime() <= Date.now()) throw new HttpError(401, 'Sessão expirada. Entre novamente.');
   const profile = await getProfile(currentSession.user_id);
-  if (!profile || profile.active !== true || Number(profile.session_version || 0) !== Number(currentSession.session_version || 0)) {
+  if (!profile || profile.active !== true || profile.deleted_at || Number(profile.session_version || 0) !== Number(currentSession.session_version || 0)) {
     await dbRequest('crm_sessions', { method: 'DELETE', query: { refresh_token_hash: `eq.${oldHash}` } }).catch(() => null);
     throw new HttpError(401, 'Sessão inválida. Entre novamente.');
   }
@@ -298,7 +301,7 @@ async function apiGetReferenceData(token) {
   return {
     systemName: CRM_CONFIG.systemName, user: publicUser(await getProfile(actor.id)), statuses: CRM_CONFIG.statuses,
     developments: (developments || []).map((item) => ({ id: item.id, name: item.name, active: item.active })),
-    brokers: (users || []).map(mapUser).filter((item) => item.role === 'Corretor').map((item) => ({ id: item.id, name: item.name, email: item.email, role: item.role, active: item.active })),
+    brokers: (users || []).map(mapUser).filter((item) => item.role === 'Corretor' && !item.deletedAt).map((item) => ({ id: item.id, name: item.name, email: item.email, role: item.role, active: item.active })),
     sharedTemporaryPasswordAvailable: isAdmin(actor) && !((await dbRequest('crm_settings', { query: { select: 'key', key: 'eq.shared_temporary_password_applied', limit: 1 } })) || []).length
   };
 }
@@ -324,9 +327,14 @@ async function apiSaveFollowupDays(token, value) {
   return { ok: true, days, message: `Prazo de follow-up atualizado para ${days} dia(s) útil(eis).` };
 }
 
-async function loadLeadContext() {
+async function loadLeadContext(options = {}) {
+  const leadQuery = options.archivedOnly
+    ? { deleted_at: 'not.is.null' }
+    : options.includeArchived
+      ? {}
+      : { deleted_at: 'is.null' };
   const [userRows, developmentRows, leadRows] = await Promise.all([
-    listAll('crm_users', { select: '*' }), listAll('crm_developments', { select: '*' }), listAll('crm_leads', { select: '*' })
+    listAll('crm_users', { select: '*' }), listAll('crm_developments', { select: '*' }), listAll('crm_leads', { select: '*', ...leadQuery })
   ]);
   return { users: userRows.map(mapUser), developments: developmentRows, leads: leadRows.map((row) => mapLead(row, userRows.map(mapUser), developmentRows)) };
 }
@@ -360,12 +368,46 @@ async function apiListLeads(token, filters, page, pageSize) {
   return { ...CrmDomain.paginate(enriched, page, pageSize), staleBusinessDays };
 }
 
+async function apiListArchivedLeads(token, filters, page, pageSize) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  const context = await loadLeadContext({ archivedOnly: true });
+  const found = CrmDomain.filterLeads(context.leads, actor, filters || {}, { today: now() });
+  found.sort((a, b) => String(b.deletedAt || '').localeCompare(String(a.deletedAt || '')));
+  return CrmDomain.paginate(found, page, pageSize);
+}
+
+async function apiArchiveLead(token, leadId) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  if (!isUuid(leadId)) return { ok: false, message: 'Cliente inválido.' };
+  const rows = await dbRequest('crm_leads', { query: { select: 'id,name,deleted_at', id: `eq.${String(leadId)}`, limit: 1 } });
+  const lead = Array.isArray(rows) ? rows[0] : null;
+  if (!lead) return { ok: false, message: 'Cliente não encontrado.' };
+  if (lead.deleted_at) return { ok: false, message: 'Este cliente já está na lista de excluídos.' };
+  const stamp = now();
+  const updated = await dbRequest('crm_leads', { method: 'PATCH', query: { id: `eq.${String(leadId)}`, deleted_at: 'is.null' }, prefer: 'return=representation', body: { deleted_at: stamp, deleted_by: actor.id } });
+  if (!Array.isArray(updated) || !updated.length) return { ok: false, message: 'O cliente já foi alterado. Atualize a lista e tente novamente.' };
+  await audit(actor, 'lead.archive', 'lead', lead.id, 'deleted_at,deleted_by');
+  return { ok: true, message: 'Cliente excluído da carteira. O cadastro e o histórico foram preservados e podem ser restaurados pela gestão.' };
+}
+
+async function apiRestoreLead(token, leadId) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  if (!isUuid(leadId)) return { ok: false, message: 'Cliente inválido.' };
+  const rows = await dbRequest('crm_leads', { query: { select: 'id,name,deleted_at', id: `eq.${String(leadId)}`, deleted_at: 'not.is.null', limit: 1 } });
+  const lead = Array.isArray(rows) ? rows[0] : null;
+  if (!lead) return { ok: false, message: 'Cliente excluído não encontrado.' };
+  const updated = await dbRequest('crm_leads', { method: 'PATCH', query: { id: `eq.${String(leadId)}`, deleted_at: 'not.is.null' }, prefer: 'return=representation', body: { deleted_at: null, deleted_by: null } });
+  if (!Array.isArray(updated) || !updated.length) return { ok: false, message: 'O cliente já foi alterado. Atualize a lista e tente novamente.' };
+  await audit(actor, 'lead.restore', 'lead', lead.id, 'deleted_at,deleted_by');
+  return { ok: true, message: 'Cliente restaurado. Os dados e o histórico foram mantidos.' };
+}
+
 async function apiGetSdrHistory(token, leadId) {
   const actor = await verifyActor(token);
   if (!isUuid(leadId)) throw new HttpError(404, 'Cliente não encontrado ou sem permissão.');
-  const rows = await dbRequest('crm_leads', { query: { select: 'id,broker_id', id: `eq.${String(leadId)}`, limit: 1 } });
+  const rows = await dbRequest('crm_leads', { query: { select: 'id,broker_id,deleted_at', id: `eq.${String(leadId)}`, limit: 1 } });
   const lead = Array.isArray(rows) ? rows[0] : null;
-  if (!lead || !CrmDomain.canReadLead(actor, { id: lead.id, brokerId: lead.broker_id })) throw new HttpError(404, 'Cliente não encontrado ou sem permissão.');
+  if (!lead || (lead.deleted_at && !isAdmin(actor)) || !CrmDomain.canReadLead(actor, { id: lead.id, brokerId: lead.broker_id })) throw new HttpError(404, 'Cliente não encontrado ou sem permissão.');
   const history = await dbRequest('crm_sdr_history', { query: { select: '*', lead_id: `eq.${lead.id}`, order: 'at.desc' } });
   return (history || []).map((item) => ({ id: item.id, at: item.at, userName: item.user_name || 'Responsável não identificado', status: item.status || '', feedback: item.feedback || '', source: item.source || '' }));
 }
@@ -479,13 +521,13 @@ async function validateImportRows(actor, inputRows, context) {
 
 async function apiPreviewLeadImport(token, rows) {
   const actor = await verifyActor(token); requireAdmin(actor);
-  const context = await loadLeadContext();
+  const context = await loadLeadContext({ includeArchived: true });
   return validateImportRows(actor, rows, context);
 }
 
 async function apiImportLeads(token, rows) {
   const actor = await verifyActor(token); requireAdmin(actor);
-  const context = await loadLeadContext();
+  const context = await loadLeadContext({ includeArchived: true });
   const preview = await validateImportRows(actor, rows, context);
   if (!preview.ok || preview.errorCount) return { ok: false, message: preview.ok ? 'Corrija os erros ou duplicidades antes de importar; nenhum cliente foi gravado.' : preview.message, preview };
   const stamp = now();
@@ -542,7 +584,55 @@ async function apiExportReport(token, filters) {
 
 async function apiListUsers(token) {
   const actor = await verifyActor(token); requireAdmin(actor);
-  return (await listAll('crm_users', { select: '*' })).map((row) => publicUser(row)).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  return (await listAll('crm_users', { select: '*', deleted_at: 'is.null' })).map((row) => publicUser(row)).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+}
+
+async function apiListArchivedUsers(token) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  return (await listAll('crm_users', { select: '*', deleted_at: 'not.is.null' }))
+    .map((row) => ({ ...publicUser(row), deletedAt: row.deleted_at, wasActive: row.deleted_previous_active === true }))
+    .sort((a, b) => String(b.deletedAt || '').localeCompare(String(a.deletedAt || '')));
+}
+
+async function apiArchiveUser(token, userId) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  if (!isUuid(userId)) return { ok: false, message: 'Usuário inválido.' };
+  if (String(userId) === String(actor.id)) return { ok: false, message: 'Você não pode excluir a própria conta conectada.' };
+  const target = await getProfile(String(userId));
+  if (!target || target.deleted_at) return { ok: false, message: 'Usuário ativo não encontrado.' };
+  const rows = await listAll('crm_users', { select: '*' });
+  if (target.active && CrmDomain.isAdmin(mapUser(target))) {
+    const otherAdmins = rows.filter((item) => String(item.id) !== String(target.id) && item.active === true && !item.deleted_at && CrmDomain.isAdmin(mapUser(item)));
+    if (!otherAdmins.length) return { ok: false, message: 'É necessário manter ao menos um perfil administrativo ativo.' };
+  }
+  const stamp = now();
+  const sessionVersion = Number(target.session_version || 0) + 1;
+  const updated = await dbRequest('crm_users', {
+    method: 'PATCH', query: { id: `eq.${String(userId)}`, deleted_at: 'is.null' }, prefer: 'return=representation',
+    body: { active: false, deleted_at: stamp, deleted_by: actor.id, deleted_previous_active: target.active === true, session_version: sessionVersion, updated_at: stamp }
+  });
+  if (!Array.isArray(updated) || !updated.length) return { ok: false, message: 'O usuário já foi alterado. Atualize a lista e tente novamente.' };
+  await dbRequest('crm_sessions', { method: 'DELETE', query: { user_id: `eq.${String(userId)}` } });
+  await updateAuthProfile(String(userId), { sessionVersion });
+  await audit(actor, 'user.archive', 'user', userId, 'active,deleted_at,deleted_by,session_version');
+  return { ok: true, message: 'Usuário excluído do acesso. O perfil e os vínculos históricos foram preservados e podem ser restaurados pela gestão.' };
+}
+
+async function apiRestoreUser(token, userId) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  if (!isUuid(userId)) return { ok: false, message: 'Usuário inválido.' };
+  const target = await getProfile(String(userId));
+  if (!target || !target.deleted_at) return { ok: false, message: 'Usuário excluído não encontrado.' };
+  const sessionVersion = Number(target.session_version || 0) + 1;
+  await updateAuthProfile(String(userId), { sessionVersion });
+  const active = target.deleted_previous_active === true;
+  const updated = await dbRequest('crm_users', {
+    method: 'PATCH', query: { id: `eq.${String(userId)}`, deleted_at: 'not.is.null' }, prefer: 'return=representation',
+    body: { active, deleted_at: null, deleted_by: null, deleted_previous_active: null, session_version: sessionVersion, updated_at: now() }
+  });
+  if (!Array.isArray(updated) || !updated.length) return { ok: false, message: 'O usuário já foi alterado. Atualize a lista e tente novamente.' };
+  await audit(actor, 'user.restore', 'user', userId, 'active,deleted_at,deleted_by,session_version');
+  return { ok: true, message: active ? 'Usuário restaurado com o acesso que tinha antes da exclusão.' : 'Perfil restaurado; o acesso continua desativado, como estava antes da exclusão.' };
 }
 
 async function apiSaveUser(token, payload) {
@@ -559,9 +649,10 @@ async function apiSaveUser(token, payload) {
   const rows = await listAll('crm_users', { select: '*' });
   const existing = rows.find((item) => String(item.id) === userId) || null;
   if (userId && !existing) return { ok: false, message: 'Usuário não encontrado.' };
+  if (existing && existing.deleted_at) return { ok: false, message: 'Restaure o usuário antes de editar seus dados.' };
   if (rows.some((item) => item.id !== userId && normalizeEmail(item.email) === email)) return { ok: false, message: 'Este e-mail já está cadastrado.' };
   if (existing && existing.id === actor.id && (!active || role !== actor.role)) return { ok: false, message: 'Você não pode desativar ou rebaixar sua própria conta.' };
-  const adminsAfter = rows.filter((item) => item.id !== userId && item.active && CrmDomain.isAdmin(mapUser(item))).length + (active && CrmDomain.isAdmin({ role, active }) ? 1 : 0);
+  const adminsAfter = rows.filter((item) => item.id !== userId && item.active && !item.deleted_at && CrmDomain.isAdmin(mapUser(item))).length + (active && CrmDomain.isAdmin({ role, active }) ? 1 : 0);
   if (adminsAfter < 1) return { ok: false, message: 'É necessário manter ao menos um administrador ativo.' };
   const stamp = now();
   if (!existing) {
@@ -592,7 +683,7 @@ async function apiResetUserPassword(token, userId) {
   if (String(userId) === String(actor.id)) return { ok: false, message: 'Use a opção “Senha” para alterar sua própria senha.' };
   if (!isUuid(userId)) return { ok: false, message: 'Usuário ativo não encontrado.' };
   const row = await getProfile(String(userId || ''));
-  if (!row || row.active !== true) return { ok: false, message: 'Usuário ativo não encontrado.' };
+  if (!row || row.active !== true || row.deleted_at) return { ok: false, message: 'Usuário ativo não encontrado.' };
   const user = mapUser(row); const temporaryPassword = newTemporaryPassword(); const sessionVersion = user.sessionVersion + 1;
   await setAuthPassword(user.id, temporaryPassword, sessionVersion);
   await dbRequest('crm_users', { method: 'PATCH', query: { id: `eq.${user.id}` }, prefer: 'return=minimal', body: { must_change_password: true, session_version: sessionVersion, updated_at: now() } });
@@ -635,7 +726,9 @@ async function apiApplySharedTemporaryPassword(token, password) {
 const api = {
   apiBootstrapInfo, apiBootstrapAdmin, apiLogin, apiRefresh, apiLogout, apiChangePassword,
   apiGetReferenceData, apiGetDashboard, apiListLeads, apiGetSdrHistory, apiSaveLead,
-  apiListUsers, apiSaveUser, apiResetUserPassword, apiApplySharedTemporaryPassword,
+  apiListUsers, apiSaveUser, apiListArchivedUsers, apiArchiveUser, apiRestoreUser,
+  apiListArchivedLeads, apiArchiveLead, apiRestoreLead,
+  apiResetUserPassword, apiApplySharedTemporaryPassword,
   apiListDevelopments, apiSaveDevelopment, apiPreviewLeadImport, apiImportLeads, apiExportLeads, apiExportReport, apiSaveFollowupDays
 };
 

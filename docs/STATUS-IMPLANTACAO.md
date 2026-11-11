@@ -8,8 +8,9 @@
 - Histórico dos contatos do SDR e histórico de mudanças de etapa para conversões e comparações.
 - Dashboard com indicadores, ranking, comparação semanal e mensal por calendário, conversões, tempo até o primeiro contato, atrasos e concentrações de clientes parados por etapa, corretor e empreendimento.
 - Prazo de follow-up configurável pela gestão entre 1 e 30 dias úteis, com padrão inicial de 3 dias úteis.
-- Migration de análise histórica aplicada ao Supabase de produção. Os 55 clientes existentes receberam um snapshot inicial; nenhum cadastro foi apagado ou alterado.
-- `npm run check`: build e **56 testes automatizados aprovados**.
+- Gestão pode arquivar e restaurar clientes e usuários de todos os perfis. A operação preserva cadastro, histórico e vínculos; usuário arquivado perde o acesso, e a conta conectada não pode ser excluída.
+- Migrations de análise histórica e de exclusão reversível aplicadas ao Supabase de produção. A migração de exclusão acrescentou apenas colunas e índices, sem comandos de atualização ou exclusão de cadastros.
+- npm run check: build e **62 testes automatizados aprovados**.
 
 ## Publicação e validação
 

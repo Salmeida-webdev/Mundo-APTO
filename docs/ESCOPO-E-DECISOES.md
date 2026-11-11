@@ -3,6 +3,7 @@
 | Requisito aprovado | Cobertura na solução |
 | --- | --- |
 | Equipe com corretores e suporte comercial | Usuários cadastráveis por perfil, com entrada/saída sem reconstruir a aplicação. A conta inicial da equipe pode ser completada pela gestão. |
+| Exclusão reversível | Perfis administrativos podem excluir e restaurar clientes e usuários. Clientes, históricos e atribuições são preservados; usuários perdem o acesso e podem ser restaurados. |
 | Carteira individual do corretor | API e RLS restringem a leitura à carteira do usuário autenticado; o servidor rejeita edição cruzada. |
 | Cadastro pelo SDR e atribuição | O SDR pode cadastrar cliente, escolher um corretor ativo no próprio formulário e iniciar o cadastro em “Em contato”. A escolha direciona o cliente à carteira do corretor; o perfil do SDR não se torna administrativo. Nos cadastros existentes, o SDR só edita feedback e status. |
 | Histórico de contatos do SDR | Cada salvamento do SDR registra nova linha com data/hora, autor, etapa e feedback. Histórico antigo sobrescrito antes da implantação não pode ser recuperado. |
@@ -30,6 +31,7 @@
 - A troca do Apps Script para Supabase Auth não migra a sessão antiga. O e-mail da conta administrativa permanece; a senha antiga pode ser digitada no setup inicial para continuar usando a mesma credencial. A senha temporária padrão da equipe nunca é armazenada no código.
 - A solução não inclui importação automática dos históricos de feedback que já foram sobrescritos nem sincronização de clientes existentes que ainda não foram recebidos/importados.
 - O histórico de contatos do SDR é distinto da auditoria administrativa detalhada de todas as alterações, que permanece fora desta lista aprovada.
+- As exclusões são arquivamentos, sem remoção física. Usuários arquivados mantêm o e-mail reservado e os vínculos com clientes; a própria conta conectada não pode ser excluída.
 
 ## Contrato dos indicadores históricos
 

@@ -25,27 +25,39 @@ const rows = {
   crm_sdr_history: [],
   crm_lead_events: [],
   crm_audit: [],
+  crm_sessions: [],
   crm_settings: []
 };
 
-const jwtFor = (role, userId, email) => `e30.${Buffer.from(JSON.stringify({ sub: userId, app_metadata: { role, crm_session_version: 0 } })).toString('base64url')}.signature`;
+const jwtFor = (role, userId, email, sessionVersion = 0) => `e30.${Buffer.from(JSON.stringify({ sub: userId, app_metadata: { role, crm_session_version: sessionVersion } })).toString('base64url')}.signature`;
 
-function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA, email = 'a@example.test' } = {}) {
+function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA, email = 'a@example.test', sessionVersion = 0 } = {}) {
   const savedEnv = { ...process.env };
   process.env.SUPABASE_URL = 'https://supabase.example.test';
   process.env.SUPABASE_PUBLISHABLE_KEY = 'public-test-key';
   process.env.SUPABASE_SECRET_KEY = 'service-test-key';
   process.env.CRM_BOOTSTRAP_SECRET = '';
-  const token = jwtFor(role, userId, email);
+  const token = jwtFor(role, userId, email, sessionVersion);
   const calls = [];
+  const authMetadata = new Map();
   let leadCounter = 1;
-  const fakeUser = { id: userId, email, app_metadata: { role, crm_session_version: 0 } };
+  const fakeUser = { id: userId, email, app_metadata: { role, crm_session_version: sessionVersion } };
   const oldFetch = global.fetch;
   global.fetch = async (input, options = {}) => {
     const url = new URL(String(input));
     const method = options.method || 'GET';
     calls.push({ path: url.pathname, method, query: Object.fromEntries(url.searchParams), headers: options.headers || {}, body: options.body ? JSON.parse(options.body) : null });
     if (url.pathname === '/auth/v1/user') return Response.json(fakeUser);
+    if (url.pathname.startsWith('/auth/v1/admin/users/')) {
+      const targetId = decodeURIComponent(url.pathname.split('/').pop());
+      const profile = rows.crm_users.find((item) => String(item.id) === targetId);
+      if (method === 'GET') return profile ? Response.json({ id: targetId, app_metadata: authMetadata.get(targetId) || { crm_session_version: Number(profile.session_version || 0) }, user_metadata: { name: profile.name } }) : Response.json({ message:'user not found' }, { status:404 });
+      if (method === 'PUT') {
+        const update = JSON.parse(options.body);
+        if (update.app_metadata) authMetadata.set(targetId, update.app_metadata);
+        return Response.json({ id: targetId, ...update });
+      }
+    }
     if (url.pathname.startsWith('/rest/v1/')) {
       const table = url.pathname.split('/').pop();
       const list = rows[table] || [];
@@ -54,9 +66,14 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
         const idFilter = url.searchParams.get('id');
         const leadFilter = url.searchParams.get('lead_id');
         const keyFilter = url.searchParams.get('key');
+        const userFilter = url.searchParams.get('user_id');
+        const deletedFilter = url.searchParams.get('deleted_at');
         if (idFilter && idFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.id) === idFilter.slice(3));
         if (leadFilter && leadFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.lead_id) === leadFilter.slice(3));
         if (keyFilter && keyFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.key) === keyFilter.slice(3));
+        if (userFilter && userFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.user_id) === userFilter.slice(3));
+        if (deletedFilter === 'is.null') filtered = filtered.filter((row) => !row.deleted_at);
+        if (deletedFilter === 'not.is.null') filtered = filtered.filter((row) => Boolean(row.deleted_at));
         if (url.searchParams.get('active') === 'eq.true') filtered = filtered.filter((row) => row.active === true);
         return Response.json(filtered);
       }
@@ -64,7 +81,8 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
         const idFilter = url.searchParams.get('id') || '';
         const id = idFilter.slice(3);
         const row = list.find((item) => String(item.id) === id);
-        if (!row) return Response.json([], { status: 200 });
+        const deletedFilter = url.searchParams.get('deleted_at');
+        if (!row || (deletedFilter === 'is.null' && row.deleted_at) || (deletedFilter === 'not.is.null' && !row.deleted_at)) return Response.json([], { status: 200 });
         Object.assign(row, JSON.parse(options.body));
         return Response.json([row]);
       }
@@ -78,12 +96,19 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
         if (Array.isArray(value)) list.push(...value); else list.push(value);
         return Response.json(Array.isArray(value) ? value : [value]);
       }
-      if (method === 'DELETE') return new Response(null, { status: 204 });
+      if (method === 'DELETE') {
+        if (table === 'crm_sessions') {
+          const userFilter = url.searchParams.get('user_id') || '';
+          const userId = userFilter.startsWith('eq.') ? userFilter.slice(3) : '';
+          rows.crm_sessions.splice(0, rows.crm_sessions.length, ...rows.crm_sessions.filter((item) => String(item.user_id) !== userId));
+        }
+        return new Response(null, { status: 204 });
+      }
     }
     return Response.json({ message: 'mock route not found' }, { status: 404 });
   };
   t.after(() => { global.fetch = oldFetch; for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key]; Object.assign(process.env, savedEnv); });
-  return { token, calls };
+  return { token, calls, authMetadata };
 }
 
 async function invoke(method, args, token) {
@@ -228,6 +253,138 @@ test('gestão configura o prazo de follow-up e o SDR não pode alterá-lo', asyn
   assert.equal(denied.response.status, 403);
 });
 
+test('exclusão de cliente é reversível e preserva os dados e o histórico do SDR', async (t) => {
+  const originalLeads = rows.crm_leads.slice();
+  const originalHistory = rows.crm_sdr_history.slice();
+  const originalEvents = rows.crm_lead_events.slice();
+  const originalAudit = rows.crm_audit.slice();
+  t.after(() => {
+    rows.crm_leads.splice(0, rows.crm_leads.length, ...originalLeads);
+    rows.crm_sdr_history.splice(0, rows.crm_sdr_history.length, ...originalHistory);
+    rows.crm_lead_events.splice(0, rows.crm_lead_events.length, ...originalEvents);
+    rows.crm_audit.splice(0, rows.crm_audit.length, ...originalAudit);
+  });
+  const id = '10000000-0000-4000-8000-000000000021';
+  const lead = { id, name:'Cliente preservado', phone:'11999990021', development_id:'E001', notes:'Observação original', sdr_feedback:'Feedback original', status:'Atendimento agendado', broker_id:userIdBrokerA, created_at:'2026-11-07T10:00:00Z', created_by:userIdBrokerA, updated_at:'2026-11-08T10:00:00Z', updated_by:userIdSdr, sdr_updated_at:'2026-11-08T10:00:00Z', sdr_updated_by:userIdSdr };
+  const originalLead = structuredClone(lead);
+  rows.crm_leads.push(lead);
+  rows.crm_sdr_history.push({ id:'history-kept', lead_id:id, at:'2026-11-08T10:00:00Z', user_id:userIdSdr, user_name:'SDR de teste', status:lead.status, feedback:lead.sdr_feedback, source:'Contato anterior' });
+  rows.crm_lead_events.push({ id:'event-kept', lead_id:id, at:'2026-11-07T10:00:00Z', actor_id:userIdBrokerA, actor_name:'Corretor A', actor_role:'Corretor', event_type:'lead_created', old_status:null, new_status:'Em contato', broker_id:userIdBrokerA, development_id:'E001' });
+  const { token, calls } = mockEnvironmentAndFetch(t, { role:'Gerente', userId:userIdManager, email:'gestao@example.test' });
+
+  const archived = await invoke('apiArchiveLead', [token,id], token);
+  assert.equal(archived.response.status, 200);
+  assert.equal(archived.body.ok, true);
+  const afterArchive = rows.crm_leads.find((item) => item.id === id);
+  const { deleted_at, deleted_by, ...preserved } = afterArchive;
+  assert.deepEqual(preserved, originalLead);
+  assert.ok(deleted_at);
+  assert.equal(deleted_by, userIdManager);
+  assert.equal(rows.crm_sdr_history.some((item) => item.id === 'history-kept'), true);
+  assert.equal(rows.crm_lead_events.some((item) => item.id === 'event-kept'), true);
+  assert.equal((await invoke('apiListLeads', [token,{},1,100], token)).body.items.some((item) => item.id === id), false);
+  assert.equal((await invoke('apiListArchivedLeads', [token,{},1,100], token)).body.items.some((item) => item.id === id), true);
+  assert.equal((await invoke('apiGetSdrHistory', [token,id], token)).body[0].feedback, 'Feedback original');
+  assert.equal(calls.some((call) => ['/rest/v1/crm_leads','/rest/v1/crm_sdr_history','/rest/v1/crm_lead_events'].includes(call.path) && call.method === 'DELETE'), false);
+
+  const restored = await invoke('apiRestoreLead', [token,id], token);
+  assert.equal(restored.body.ok, true);
+  const afterRestore = rows.crm_leads.find((item) => item.id === id);
+  const { deleted_at: restoredAt, deleted_by: restoredBy, ...restoredData } = afterRestore;
+  assert.equal(restoredAt, null);
+  assert.equal(restoredBy, null);
+  assert.deepEqual(restoredData, originalLead);
+  assert.equal((await invoke('apiListLeads', [token,{},1,100], token)).body.items.some((item) => item.id === id), true);
+});
+
+test('gestão pode excluir e restaurar usuários de todos os perfis sem apagar clientes', async (t) => {
+  const originalUsers = rows.crm_users.slice();
+  const originalLeads = rows.crm_leads.slice();
+  const originalSessions = rows.crm_sessions.slice();
+  const originalAudit = rows.crm_audit.slice();
+  t.after(() => {
+    rows.crm_users.splice(0, rows.crm_users.length, ...originalUsers);
+    rows.crm_leads.splice(0, rows.crm_leads.length, ...originalLeads);
+    rows.crm_sessions.splice(0, rows.crm_sessions.length, ...originalSessions);
+    rows.crm_audit.splice(0, rows.crm_audit.length, ...originalAudit);
+  });
+  const added = [
+    { id:'10000000-0000-4000-8000-000000000022', name:'Admin extra', email:'admin-extra@example.test', role:'Administrador', active:true, must_change_password:false, session_version:0 },
+    { id:'10000000-0000-4000-8000-000000000023', name:'Gerente extra', email:'gerente-extra@example.test', role:'Gerente', active:true, must_change_password:false, session_version:0 },
+    { id:'10000000-0000-4000-8000-000000000024', name:'Coordenador extra', email:'coord-extra@example.test', role:'Coordenador', active:true, must_change_password:false, session_version:0 },
+    { id:'10000000-0000-4000-8000-000000000025', name:'Assistente inativa', email:'assistente-inativa@example.test', role:'Assistente', active:false, must_change_password:false, session_version:0 },
+    { id:'10000000-0000-4000-8000-000000000026', name:'Assistente extra', email:'assistente-extra@example.test', role:'Assistente', active:true, must_change_password:false, session_version:0 }
+  ];
+  rows.crm_users.push(...added);
+  const rolesToArchive = [
+    rows.crm_users.find((item) => item.id === userIdSdr),
+    rows.crm_users.find((item) => item.id === userIdBrokerA),
+    ...added
+  ];
+  const wasActiveById = new Map(rolesToArchive.map((item) => [item.id, item.active === true]));
+  const initialLeads = structuredClone(rows.crm_leads);
+  const { token, calls, authMetadata } = mockEnvironmentAndFetch(t, { role:'Gerente', userId:userIdManager, email:'gestao@example.test' });
+  const self = await invoke('apiArchiveUser', [token,userIdManager], token);
+  assert.equal(self.body.ok, false);
+
+  for (const target of rolesToArchive) {
+    const wasActive = target.active;
+    const before = structuredClone(target);
+    rows.crm_sessions.push({ id:'session-'+target.id, user_id:target.id, refresh_token_hash:'hash-'+target.id, session_version:0, expires_at:'2099-01-01T00:00:00Z' });
+    const archived = await invoke('apiArchiveUser', [token,target.id], token);
+    assert.equal(archived.response.status, 200, target.role);
+    assert.equal(archived.body.ok, true, target.role);
+    assert.equal(target.active, false);
+    assert.ok(target.deleted_at);
+    assert.equal(target.deleted_by, userIdManager);
+    assert.equal(target.deleted_previous_active, wasActive);
+    assert.equal(target.name, before.name);
+    assert.equal(target.email, before.email);
+    assert.equal(target.role, before.role);
+    assert.equal(rows.crm_sessions.some((item) => item.user_id === target.id), false);
+    assert.equal(authMetadata.get(target.id).crm_session_version, 1);
+  }
+  const archivedUsers = await invoke('apiListArchivedUsers', [token], token);
+  assert.equal(archivedUsers.body.length, rolesToArchive.length);
+  assert.equal((await invoke('apiListUsers', [token], token)).body.some((item) => rolesToArchive.some((target) => target.id === item.id)), false);
+  assert.deepEqual(rows.crm_leads, initialLeads);
+  for (const target of rolesToArchive) {
+    const restored = await invoke('apiRestoreUser', [token,target.id], token);
+    assert.equal(restored.body.ok, true, target.role);
+    assert.equal(target.active, wasActiveById.get(target.id));
+    assert.equal(target.deleted_at, null);
+    assert.equal(target.deleted_by, null);
+    assert.equal(target.deleted_previous_active, null);
+    assert.equal(target.session_version, 2);
+    assert.equal(authMetadata.get(target.id).crm_session_version, 2);
+  }
+  assert.equal((await invoke('apiListArchivedUsers', [token], token)).body.length, 0);
+  const { token: revokedToken } = mockEnvironmentAndFetch(t, { role:'SDR', userId:userIdSdr, email:'sdr@example.test' });
+  assert.equal((await invoke('apiGetReferenceData', [revokedToken], revokedToken)).response.status, 401);
+  assert.ok(calls.some((call) => call.path === '/rest/v1/crm_sessions' && call.method === 'DELETE'));
+
+  const { token: brokerToken } = mockEnvironmentAndFetch(t, { role:'Corretor', userId:userIdBrokerB, email:'b@example.test' });
+  assert.equal((await invoke('apiArchiveUser', [brokerToken,userIdBrokerA], brokerToken)).response.status, 403);
+  assert.equal((await invoke('apiArchiveLead', [brokerToken,'10000000-0000-4000-8000-000000000021'], brokerToken)).response.status, 403);
+
+  const { token: sdrToken } = mockEnvironmentAndFetch(t, { role:'SDR', userId:userIdSdr, email:'sdr@example.test', sessionVersion:rows.crm_users.find((item) => item.id === userIdSdr).session_version });
+  assert.equal((await invoke('apiArchiveUser', [sdrToken,userIdBrokerA], sdrToken)).response.status, 403);
+  assert.equal((await invoke('apiArchiveLead', [sdrToken,'10000000-0000-4000-8000-000000000021'], sdrToken)).response.status, 403);
+
+  const authorizedManagers = [
+    rows.crm_users.find((item) => item.id === userIdManager),
+    ...added.filter((item) => item.active)
+  ];
+  for (const manager of authorizedManagers) {
+    const { token: managerToken } = mockEnvironmentAndFetch(t, { role:manager.role, userId:manager.id, email:manager.email, sessionVersion:manager.session_version });
+    const archived = await invoke('apiArchiveUser', [managerToken,userIdSdr], managerToken);
+    assert.equal(archived.response.status, 200, manager.role);
+    assert.equal(archived.body.ok, true, manager.role);
+    const restored = await invoke('apiRestoreUser', [managerToken,userIdSdr], managerToken);
+    assert.equal(restored.body.ok, true, manager.role);
+  }
+});
+
 test('migration is private by default, grants only scoped reads and contains no user roster', () => {
   const sql = fs.readFileSync(path.join(root, 'supabase/migrations/202611090001_crm_schema.sql'), 'utf8');
   assert.match(sql, /enable row level security/i);
@@ -239,6 +396,20 @@ test('migration is private by default, grants only scoped reads and contains no 
   assert.match(analyticsMigration, /create policy crm_lead_events_read_by_lead/i);
   assert.match(analyticsMigration, /after insert or update of status/i);
   assert.doesNotMatch(sql, /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+});
+
+test('migration de exclusões só adiciona colunas e índices sem alterar os registros existentes', () => {
+  const sql = fs.readFileSync(path.join(root, 'supabase/migrations/20261111152136_crm_reversible_deletions.sql'), 'utf8');
+  const executableSql = sql.replace(/--[^\n]*/g, '');
+  assert.match(executableSql, /alter table public\.crm_leads[\s\S]*add column if not exists deleted_at timestamptz/i);
+  assert.match(executableSql, /alter table public\.crm_users[\s\S]*add column if not exists deleted_previous_active boolean/i);
+  assert.match(executableSql, /create index if not exists crm_leads_deleted_at_idx/i);
+  assert.doesNotMatch(executableSql, /(^|\n)\s*(insert\s+into|update\s+\w+|delete\s+from|truncate\s+)/i);
+  const ui = fs.readFileSync(path.join(root, 'apps-script/Client.html'), 'utf8');
+  assert.match(ui, /apiArchiveLead/);
+  assert.match(ui, /apiArchiveUser/);
+  assert.match(ui, /apiRestoreLead/);
+  assert.match(ui, /apiRestoreUser/);
 });
 
 test('build estático não deixa marcações Apps Script nem credenciais no HTML publicado', () => {

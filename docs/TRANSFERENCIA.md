@@ -18,7 +18,11 @@
 
 ## Mudanças futuras de equipe
 
-Use **Equipe** para cadastrar novos usuários, ajustar função e desativar contas. Desativar preserva os clientes e o histórico. Um e-mail alterado no sistema deve também ser atualizado pelo administrador. A conta admin deve permanecer ativa; a aplicação impede remover ou rebaixar o último administrador.
+Use **Equipe** para cadastrar novos usuários, ajustar função e desativar contas. Desativar preserva os clientes e o histórico. Um e-mail alterado no sistema deve também ser atualizado pelo administrador. A conta conectada não pode ser excluída, e a aplicação impede remover o último perfil administrativo ativo.
+
+Para retirar um acesso, use **Excluir** na linha do usuário. A ação arquiva o perfil, encerra as sessões do CRM e mantém o e-mail e os vínculos com clientes. Para reativar o registro, abra **Usuários excluídos** e escolha **Restaurar**; a conta volta ao estado ativo ou desativado anterior.
+
+Em **Clientes**, **Excluir** retira o cadastro das listas ativas e dos indicadores. O cadastro, os dados e o histórico de contatos do SDR não são apagados. A gestão pode restaurá-lo em **Clientes excluídos**.
 
 ## Publicação e rollback
 
