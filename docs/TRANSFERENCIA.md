@@ -1,29 +1,37 @@
-# Operação, configuração e transferência
+# Operação e manutenção — Mundo Apto / Sharks Fênix
 
-## Propriedade dos serviços
+## Ambientes existentes
 
-- O projeto Supabase deve ficar em organização controlada pela incorporadora, com acesso de manutenção concedido ao responsável técnico.
-- O site Netlify deve ficar associado ao repositório GitHub do CRM e à equipe Netlify escolhida para o projeto.
-- Não compartilhe a chave secreta do Supabase, o segredo de bootstrap ou a senha administrativa em arquivo público ou canal aberto.
+- Repositório: `Salmeida-webdev/Mundo-APTO`, branch `main`.
+- Hospedagem: site Netlify existente `mundoapto`, URL `https://mundoapto.netlify.app`.
+- Dados e autenticação: projeto Supabase privado já conectado ao CRM.
 
-## Primeira configuração
+Esta consolidação reutiliza esses ambientes. Não crie outro repositório, site ou projeto Supabase para as funções Sharks, e não importe dados do Sharks Fênix. Clientes, usuários, vendas, contratos e históricos do CRM permanecem na base atual.
 
-1. Crie o projeto Supabase e aplique a migration `supabase/migrations/202611090001_crm_schema.sql`.
-2. Importe a lista de empreendimentos para `crm_developments` diretamente no banco privado, sem adicioná-la ao repositório público.
-3. Configure no Netlify as variáveis `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY` e um `CRM_BOOTSTRAP_SECRET` forte e temporário.
-4. Publique a aplicação e acesse o endereço do site.
-5. Na tela de configuração, informe o e-mail administrativo que já era usado no CRM, nome, segredo de bootstrap e a senha desejada. Para manter a senha anterior, use a mesma senha que já era utilizada no CRM Apps Script.
-6. Confirme o acesso administrativo e cadastre/valide os usuários. O endpoint de configuração inicial se bloqueia automaticamente após a criação do administrador. Como as variáveis ficam congeladas por deploy, remova `CRM_BOOTSTRAP_SECRET` na próxima publicação planejada, sem fazer outro deploy apenas para isso.
-7. No menu **Equipe**, aplique a senha inicial compartilhada uma vez. Distribua-a por canal privado; todos os usuários deverão trocá-la no primeiro acesso.
+## Permissões e equipe
 
-## Mudanças futuras de equipe
+Cadastre, edite e desative usuários pelo módulo **Equipe**. As permissões do CRM continuam relacionadas ao perfil e à carteira. As permissões de produção são próprias do módulo: corretores editam seus registros; o SDR consulta a equipe sem editar; outras funções administrativas podem consultar os painéis; apenas contas incluídas na configuração privada podem corrigir lançamentos da equipe, configurar metas e alterar frequências.
 
-Use **Equipe** para cadastrar novos usuários, ajustar função e desativar contas. Desativar preserva os clientes e o histórico. Um e-mail alterado no sistema deve também ser atualizado pelo administrador. A conta conectada não pode ser excluída, e a aplicação impede remover o último perfil administrativo ativo.
+As autorizações especiais de gestão operacional e manutenção ficam em configuração privada do ambiente. Para alterá-las, solicite manutenção técnica autorizada; não grave identificadores, e-mails, senha compartilhada ou chaves secretas no GitHub. A aplicação de senha inicial invalida sessões e exige troca individual no primeiro acesso.
 
-Para retirar um acesso, use **Excluir** na linha do usuário. A ação arquiva o perfil, encerra as sessões do CRM e mantém o e-mail e os vínculos com clientes. Para reativar o registro, abra **Usuários excluídos** e escolha **Restaurar**; a conta volta ao estado ativo ou desativado anterior.
+## Dados operacionais
 
-Em **Clientes**, **Excluir** retira o cadastro das listas ativas e dos indicadores. O cadastro, os dados e o histórico de contatos do SDR não são apagados. A gestão pode restaurá-lo em **Clientes excluídos**.
+As tabelas `crm_production_entries`, `crm_production_goals` e `crm_attendance_records` foram criadas vazias. A equipe inicia os lançamentos diários diretamente no CRM. Produção, metas e frequências não são preenchidas por importação automática do Sharks.
 
-## Publicação e rollback
+Antes de qualquer importação de clientes, use o preview disponível no CRM e corrija duplicidades e campos inválidos. A importação atual aceita CSV validado e fica restrita a perfis administrativos. Exportações também são controladas por perfil e aplicam os filtros selecionados.
 
-Faça alterações por pull request ou commits revisados no GitHub. Netlify fará build com `npm run build`; valide a suíte automatizada antes de integrar alterações. As variáveis secretas não devem ser incluídas no commit. Para reverter, publique a versão anterior do site e mantenha a migration do banco compatível com ambas as versões.
+## Migrations
+
+As migrações aplicadas ao projeto conectado estão versionadas em `supabase/migrations/`. Antes de uma mudança futura, compare os arquivos locais com a lista do projeto Supabase e aplique apenas migrations novas, em ordem. Não reaplique migrations registradas. As mudanças desta consolidação acrescentam tabelas, colunas, índices e funções; não apagam os dados históricos do CRM.
+
+## Publicação e revisão
+
+Execute `npm run check` antes de integrar alterações. Um único commit na branch `main` aciona o deploy ligado ao site Netlify existente. Acompanhe o estado do deploy no Netlify e considere a versão liberada após ficar `ready`. Evite deploy manual ou publicar uma segunda cópia do sistema.
+
+Para rollback da interface, publique a versão anterior do Netlify mantendo as migrations aditivas no Supabase. Verifique compatibilidade da API da versão anterior antes de reverter código que use colunas novas.
+
+## Segredos e documentos
+
+As variáveis `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY` e, apenas durante a configuração inicial, `CRM_BOOTSTRAP_SECRET` ficam no ambiente privado das Netlify Functions. Nunca as copie para `public/`, para arquivos versionados ou para o navegador. O armazenamento dos documentos de contratos é privado e usa links temporários emitidos pelo servidor após validar o perfil.
+
+Os modelos de contrato/termo e confissão são mantidos pela gestão. A cliente deve fornecer ou revisar o conteúdo jurídico aprovado antes de usar os arquivos gerados para assinatura. O CRM não substitui revisão jurídica nem assinatura eletrônica.

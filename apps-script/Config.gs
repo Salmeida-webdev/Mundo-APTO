@@ -1,16 +1,16 @@
 /* Gerado por npm run build a partir de config/seed-data.json. */
 var CRM_CONFIG = {
-  "systemName": "CRM Comercial — Mundo Apto",
+  "systemName": "Sharks Fênix — Gestão Comercial",
   "ownerEmail": "",
   "timezone": "America/Sao_Paulo",
   "staleBusinessDays": 3,
   "maxInitialBrokers": 20,
   "identity": {
-    "primary": "#EE7A00",
-    "primaryDark": "#B85A00",
-    "background": "#FFF4E5",
-    "text": "#2E2418",
-    "muted": "#6E6258"
+    "primary": "#93651D",
+    "primaryDark": "#76502A",
+    "background": "#F5F2EB",
+    "text": "#25231F",
+    "muted": "#625D53"
   },
   "roles": [
     "Administrador",

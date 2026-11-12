@@ -16,14 +16,17 @@ const ALLOWED_METHODS = new Set([
   'apiListArchivedLeads', 'apiArchiveLead', 'apiRestoreLead',
   'apiListArchivedUsers', 'apiArchiveUser', 'apiRestoreUser',
   'apiResetUserPassword', 'apiApplySharedTemporaryPassword', 'apiListDevelopments',
-  'apiSaveDevelopment', 'apiPreviewLeadImport', 'apiImportLeads', 'apiExportLeads', 'apiExportReport', 'apiSaveFollowupDays'
+  'apiSaveDevelopment', 'apiPreviewLeadImport', 'apiImportLeads', 'apiExportLeads', 'apiExportReport', 'apiSaveFollowupDays',
+  'apiGetOperationsDashboard', 'apiListProduction', 'apiSaveProduction', 'apiArchiveProduction',
+  'apiListOperationGoals', 'apiSaveOperationGoal', 'apiListAttendance', 'apiSetAttendance', 'apiExportOperationsReport'
 ]);
 const MUTATING_METHODS = new Set([
   'apiChangePassword', 'apiSaveFollowupDays', 'apiSaveLead', 'apiArchiveLead', 'apiRestoreLead',
   'apiAddLeadAttempt', 'apiFlagPhoneIncorrect', 'apiSaveSale', 'apiAddSaleReceipt', 'apiVoidSaleReceipt',
   'apiSaveBrokerProfile', 'apiSaveContract', 'apiGenerateContract', 'apiCreateContractUpload',
   'apiConfirmContractSigned', 'apiSaveContractTemplate', 'apiSaveDevelopment', 'apiImportLeads',
-  'apiSaveUser', 'apiArchiveUser', 'apiRestoreUser', 'apiResetUserPassword', 'apiApplySharedTemporaryPassword'
+  'apiSaveUser', 'apiArchiveUser', 'apiRestoreUser', 'apiResetUserPassword', 'apiApplySharedTemporaryPassword',
+  'apiSaveProduction', 'apiArchiveProduction', 'apiSaveOperationGoal', 'apiSetAttendance'
 ]);
 
 class HttpError extends Error {
@@ -41,6 +44,34 @@ function env() {
     throw new HttpError(503, 'O CRM ainda não está conectado ao banco de dados.');
   }
   return config;
+}
+
+let operationsSecurityPolicy = { managerIds: new Set(), sharedPasswordOperatorId: '' };
+
+async function loadOperationsSecurityPolicy() {
+  let value = {};
+  try {
+    const rows = await dbRequest('crm_settings', { query: { select: 'value', key: 'eq.operations_access_policy', limit: 1 } });
+    value = Array.isArray(rows) && rows[0] && rows[0].value && typeof rows[0].value === 'object' ? rows[0].value : {};
+  } catch (_) {
+    // Keep CRM authentication available, but fail closed for the separately
+    // controlled operations-manager and shared-password privileges.
+  }
+  const ids = Array.isArray(value.operations_manager_ids) ? value.operations_manager_ids : [];
+  operationsSecurityPolicy = {
+    managerIds: new Set(ids.map((id) => String(id).trim().toLowerCase()).filter(isUuid)),
+    sharedPasswordOperatorId: isUuid(value.shared_password_operator_id) ? String(value.shared_password_operator_id).toLowerCase() : ''
+  };
+  return operationsSecurityPolicy;
+}
+
+function isConfiguredOperationsManager(user) {
+  return Boolean(user && user.active !== false && isUuid(user.id) && operationsSecurityPolicy.managerIds.has(String(user.id).toLowerCase()) && isAdmin(user));
+}
+
+function isSharedTemporaryPasswordOperator(user) {
+  const configuredId = operationsSecurityPolicy.sharedPasswordOperatorId;
+  return Boolean(user && user.active !== false && isUuid(configuredId) && String(user.id).toLowerCase() === configuredId && isAdmin(user));
 }
 
 function normalizeEmail(value) { return String(value || '').trim().toLowerCase(); }
@@ -145,12 +176,18 @@ async function listAll(table, query = {}) {
 
 function mapUser(row) {
   if (!row) return null;
-  return { id: row.id, name: row.name, email: row.email, role: row.role, active: row.active === true, mustChangePassword: row.must_change_password === true, sessionVersion: Number(row.session_version || 0), createdAt: row.created_at, updatedAt: row.updated_at, deletedAt: row.deleted_at || '', deletedBy: row.deleted_by || '', deletedPreviousActive: row.deleted_previous_active === true };
+  const defaultOperationsAccess = row.role === 'Corretor' ? 'broker' : row.role === 'SDR' ? 'sdr' : CrmDomain.isAdmin({ role: row.role, active: row.active }) ? 'viewer' : 'none';
+  const requestedAccess = row.operations_access || defaultOperationsAccess;
+  const configuredManager = isConfiguredOperationsManager(row);
+  const operationsAccess = configuredManager ? 'manager' : requestedAccess === 'manager'
+    ? (CrmDomain.isAdmin({ role: row.role, active: row.active }) ? 'viewer' : defaultOperationsAccess)
+    : requestedAccess;
+  return { id: row.id, name: row.name, email: row.email, role: row.role, operationsAccess, active: row.active === true, mustChangePassword: row.must_change_password === true, sessionVersion: Number(row.session_version || 0), createdAt: row.created_at, updatedAt: row.updated_at, deletedAt: row.deleted_at || '', deletedBy: row.deleted_by || '', deletedPreviousActive: row.deleted_previous_active === true };
 }
 function publicUser(row) {
   const user = mapUser(row);
   if (!user) return null;
-  return { id: user.id, name: user.name, email: user.email, role: user.role, active: user.active, mustChangePassword: user.mustChangePassword };
+  return { id: user.id, name: user.name, email: user.email, role: user.role, operationsAccess: user.operationsAccess, active: user.active, mustChangePassword: user.mustChangePassword, canManageOperations: isConfiguredOperationsManager(user), canApplySharedTemporaryPassword: isSharedTemporaryPasswordOperator(user) };
 }
 function mapLead(row, users, developments) {
   const broker = users.find((item) => String(item.id) === String(row.broker_id));
@@ -194,7 +231,10 @@ async function verifyActor(token, allowPasswordChange = false) {
   if (!token || typeof token !== 'string') throw new HttpError(401, 'Sessão inválida. Entre novamente.');
   const claims = decodeClaims(token);
   const authUser = await authRequest('user', { token });
-  const profile = await getProfile(authUser && authUser.id);
+  const [profile] = await Promise.all([
+    getProfile(authUser && authUser.id),
+    loadOperationsSecurityPolicy()
+  ]);
   if (!profile || profile.active !== true || profile.deleted_at || normalizeEmail(profile.email) !== normalizeEmail(authUser.email)) throw new HttpError(401, 'Sessão inválida. Entre novamente.');
   const claimVersion = Number(claims.app_metadata && claims.app_metadata.crm_session_version || 0);
   if (claimVersion !== Number(profile.session_version || 0)) throw new HttpError(401, 'Sessão inválida. Entre novamente.');
@@ -203,11 +243,12 @@ async function verifyActor(token, allowPasswordChange = false) {
   return actor;
 }
 
-async function audit(actor, action, entityType, entityId, changedFields, beforeValues = {}, afterValues = {}) {
+async function audit(actor, action, entityType, entityId, changedFields, beforeValues = {}, afterValues = {}, module = 'crm') {
   await dbRequest('crm_audit', { method: 'POST', prefer: 'return=minimal', body: {
     user_id: actor.id, email: actor.email, actor_name: actor.name, actor_role: actor.role,
     action, entity_type: entityType, entity_id: String(entityId),
     changed_fields: Array.isArray(changedFields) ? changedFields.join(',') : String(changedFields || ''),
+    module: module === 'operations' ? 'operations' : 'crm',
     before_values: beforeValues && typeof beforeValues === 'object' ? beforeValues : {},
     after_values: afterValues && typeof afterValues === 'object' ? afterValues : {}
   } });
@@ -236,6 +277,9 @@ async function signInResult(session, persist = true) {
     await authSignOut(session.access_token);
     return { ok: false, message: 'E-mail ou senha inválidos.' };
   }
+  // `publicUser` exposes the operations permissions in the first login
+  // response. Load the private allowlist before mapping that profile.
+  await loadOperationsSecurityPolicy();
   if (persist && session.refresh_token) {
     await dbRequest('crm_sessions', { method: 'DELETE', query: { expires_at: `lt.${now()}` } }).catch(() => null);
     await dbRequest('crm_sessions', { method: 'POST', prefer: 'return=minimal', body: { user_id: profile.id, refresh_token_hash: hashRefreshToken(session.refresh_token), session_version: Number(profile.session_version || 0), expires_at: refreshExpiry() } });
@@ -429,6 +473,416 @@ async function apiGetDashboard(token, filters) {
   return dashboard;
 }
 
+const OPERATIONS_ACCESS = new Set(['none','broker','sdr','viewer','manager']);
+const OPERATIONS_METRICS = [
+  { id: 'prospections', label: 'Prospecções', column: 'prospecting_count' },
+  { id: 'interactions', label: 'Interações', column: 'interaction_count' },
+  { id: 'appointments', label: 'Agendamentos', column: 'appointment_count' },
+  { id: 'visits', label: 'Visitas', column: 'visit_count' },
+  { id: 'sales', label: 'Vendas', column: 'sale_count' }
+];
+const OPERATIONS_SHIFTS = [
+  { id: 'morning', label: 'Manhã' }, { id: 'afternoon', label: 'Tarde' }, { id: 'night', label: 'Noite' }
+];
+
+function operationsAccessOf(user) {
+  if (!user) return 'none';
+  if (OPERATIONS_ACCESS.has(user.operationsAccess)) return user.operationsAccess;
+  if (user.role === 'Corretor') return 'broker';
+  if (user.role === 'SDR') return 'sdr';
+  return isAdmin(user) ? 'viewer' : 'none';
+}
+function requireOperationsAccess(user, allowed = ['broker','sdr','viewer','manager']) {
+  if (!allowed.includes(operationsAccessOf(user))) throw new HttpError(403, 'Seu perfil não tem acesso a este módulo operacional.');
+}
+function isOperationsManager(user) { return operationsAccessOf(user) === 'manager'; }
+function operationDateString(value) {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(value));
+  const part = (type) => parts.find((item) => item.type === type)?.value || '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+function addDateOnly(dateValue, offset) {
+  const [year, month, day] = String(dateValue).split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day + offset));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2,'0')}-${String(date.getUTCDate()).padStart(2,'0')}`;
+}
+function daysBetweenDateOnly(start, end) {
+  return Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000) + 1;
+}
+function monthEndDateOnly(dateValue) {
+  const [year, month] = String(dateValue).split('-').map(Number);
+  const date = new Date(Date.UTC(year, month, 0));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2,'0')}-${String(date.getUTCDate()).padStart(2,'0')}`;
+}
+function operationsDateRange(filters = {}) {
+  const today = operationDateString(now());
+  const requestedPeriod = String(filters && filters.period || 'week');
+  const period = ['day','week','month'].includes(requestedPeriod) ? requestedPeriod : 'week';
+  let start; let end; let goalCycle = null; let goalStart = null; let goalEnd = null; let label;
+  const customFrom = String(filters && filters.dateFrom || '').trim();
+  const customTo = String(filters && filters.dateTo || '').trim();
+  if (customFrom || customTo) {
+    start = customFrom || customTo; end = customTo || today;
+    if (!isValidDateOnly(start) || !isValidDateOnly(end) || start > end || end > today) throw new HttpError(400, 'Informe um período válido, sem datas futuras.');
+    label = `${displayDateOnly(start)} a ${displayDateOnly(end)}`;
+    if (daysBetweenDateOnly(start, end) > 366) throw new HttpError(400, 'O período de consulta deve ter no máximo 366 dias.');
+    if (period === 'month') {
+      goalCycle = 'monthly'; goalStart = `${today.slice(0,7)}-01`; goalEnd = monthEndDateOnly(today);
+    } else {
+      const weekDay = new Date(`${today}T00:00:00Z`).getUTCDay();
+      goalStart = addDateOnly(today, -((weekDay + 6) % 7)); goalEnd = addDateOnly(goalStart, 6); goalCycle = 'weekly';
+    }
+  } else if (period === 'month') {
+    start = `${today.slice(0,7)}-01`; end = today;
+    goalCycle = 'monthly'; goalStart = start; goalEnd = monthEndDateOnly(today);
+    label = 'Mês atual até hoje';
+  } else if (period === 'day') {
+    start = today; end = today;
+    const weekDay = new Date(`${today}T00:00:00Z`).getUTCDay();
+    goalStart = addDateOnly(today, -((weekDay + 6) % 7)); goalEnd = addDateOnly(goalStart, 6); goalCycle = 'weekly';
+    label = `Hoje (${displayDateOnly(today)})`;
+  } else {
+    const weekDay = new Date(`${today}T00:00:00Z`).getUTCDay();
+    const daysFromMonday = (weekDay + 6) % 7;
+    start = addDateOnly(today, -daysFromMonday); end = today;
+    goalCycle = 'weekly'; goalStart = start; goalEnd = addDateOnly(start, 6);
+    label = 'Semana atual até hoje';
+  }
+  const duration = daysBetweenDateOnly(start, end);
+  let previousEnd = addDateOnly(start, -1);
+  let previousStart = addDateOnly(previousEnd, -(duration - 1));
+  if (!customFrom && !customTo && period === 'month') {
+    previousStart = previousEnd.slice(0,7) + '-01';
+    const comparableDay = Math.min(Number(today.slice(8,10)), Number(monthEndDateOnly(previousStart).slice(8,10)));
+    previousEnd = previousStart.slice(0,7) + '-' + String(comparableDay).padStart(2,'0');
+  }
+  return { start, end, label, period, goalCycle, goalStart, goalEnd, previousStart, previousEnd };
+}
+function rangeQuery(dateColumn, start, end) {
+  return { select: '*', deleted_at: 'is.null', and: `(${dateColumn}.gte.${start},${dateColumn}.lte.${end})`, order: `${dateColumn}.desc` };
+}
+function operationsUserSummary(user, users) {
+  const found = users.find((item) => String(item.id) === String(user));
+  return found ? { id: found.id, name: found.name, role: found.role, active: found.active, operationsAccess: found.operationsAccess } : { id: user, name: 'Corretor inativo', role: 'Corretor', active: false, operationsAccess: 'none' };
+}
+function blankOperationTotals() { return { prospections: 0, interactions: 0, appointments: 0, visits: 0, sales: 0, attendance: 0, morning: 0, afternoon: 0, night: 0 }; }
+function summarizeOperations(entries, attendanceRows, users, start, end, scopedBrokerId = '') {
+  const brokerRows = users.filter((user) => user.role === 'Corretor' && (!user.deletedAt || user.active));
+  const byBroker = new Map();
+  brokerRows.forEach((user) => { if (!scopedBrokerId || String(user.id) === String(scopedBrokerId)) byBroker.set(String(user.id), { ...operationsUserSummary(user.id, users), ...blankOperationTotals() }); });
+  const daily = new Map();
+  for (let day = start; day <= end; day = addDateOnly(day, 1)) daily.set(day, { date: day, ...blankOperationTotals() });
+  const totals = blankOperationTotals();
+  let latestUpdatedAt = '';
+  for (const row of entries) {
+    if (scopedBrokerId && String(row.broker_id) !== String(scopedBrokerId)) continue;
+    if (!byBroker.has(String(row.broker_id))) byBroker.set(String(row.broker_id), { ...operationsUserSummary(row.broker_id, users), ...blankOperationTotals() });
+    const broker = byBroker.get(String(row.broker_id));
+    const day = daily.get(String(row.work_date));
+    for (const metric of OPERATIONS_METRICS) {
+      const value = Number(row[metric.column] || 0);
+      const key = metric.id;
+      totals[key] += value; broker[key] += value;
+      if (day) day[key] += value;
+    }
+    if (String(row.updated_at || '') > latestUpdatedAt) latestUpdatedAt = String(row.updated_at || '');
+  }
+  for (const row of attendanceRows) {
+    if (scopedBrokerId && String(row.broker_id) !== String(scopedBrokerId)) continue;
+    if (!byBroker.has(String(row.broker_id))) byBroker.set(String(row.broker_id), { ...operationsUserSummary(row.broker_id, users), ...blankOperationTotals() });
+    const broker = byBroker.get(String(row.broker_id));
+    const shift = String(row.shift || '');
+    if (!['morning','afternoon','night'].includes(shift)) continue;
+    totals.attendance += 1; totals[shift] += 1;
+    broker.attendance += 1; broker[shift] += 1;
+    const day = daily.get(String(row.attendance_date));
+    if (day) { day.attendance += 1; day[shift] += 1; }
+    if (String(row.updated_at || '') > latestUpdatedAt) latestUpdatedAt = String(row.updated_at || '');
+  }
+  return { totals, byBroker: [...byBroker.values()].sort((a,b) => a.name.localeCompare(b.name, 'pt-BR')), daily: [...daily.values()], latestUpdatedAt };
+}
+function metricValuesFromRow(row) {
+  return { prospections: Number(row.prospecting_count || 0), interactions: Number(row.interaction_count || 0), appointments: Number(row.appointment_count || 0), visits: Number(row.visit_count || 0), sales: Number(row.sale_count || 0) };
+}
+function comparisonValues(current, previous) {
+  return Object.fromEntries([...OPERATIONS_METRICS.map((item) => item.id), 'attendance'].map((key) => {
+    const before = Number(previous[key] || 0); const after = Number(current[key] || 0);
+    return [key, { current: after, previous: before, difference: after - before, changePct: before ? Math.round(((after - before) / before) * 1000) / 10 : null }];
+  }));
+}
+function displayDateOnly(value) {
+  const [year, month, day] = String(value || '').split('-');
+  return year && month && day ? `${day}/${month}/${year}` : String(value || '');
+}
+
+async function loadOperationsSnapshot(actor, filters = {}) {
+  requireOperationsAccess(actor);
+  const access = operationsAccessOf(actor);
+  const range = operationsDateRange(filters);
+  const brokerFilter = access === 'broker' ? actor.id : (isUuid(filters && filters.brokerId) ? String(filters.brokerId) : '');
+  const attendanceBrokerFilter = access === 'broker' ? actor.id : brokerFilter;
+  const [userRows, entryRows, attendanceRows, goalRows, previousEntryRows, previousAttendanceRows] = await Promise.all([
+    listAll('crm_users', { select: '*' }),
+    listAll('crm_production_entries', rangeQuery('work_date', range.start, range.end)),
+    listAll('crm_attendance_records', rangeQuery('attendance_date', range.start, range.end)),
+    range.goalCycle ? listAll('crm_production_goals', { select: '*', is_current: 'eq.true', cycle: `eq.${range.goalCycle}`, starts_on: `eq.${range.goalStart}`, ends_on: `eq.${range.goalEnd}` }) : Promise.resolve([]),
+    listAll('crm_production_entries', rangeQuery('work_date', range.previousStart, range.previousEnd)),
+    listAll('crm_attendance_records', rangeQuery('attendance_date', range.previousStart, range.previousEnd))
+  ]);
+  const goalActualEnd = range.goalEnd && range.goalEnd < operationDateString(now()) ? range.goalEnd : operationDateString(now());
+  const goalActualRows = range.goalCycle && range.goalStart <= goalActualEnd
+    ? await listAll('crm_production_entries', rangeQuery('work_date', range.goalStart, goalActualEnd))
+    : [];
+  const users = userRows.map(mapUser);
+  const scopeEntries = (entryRows || []).filter((row) => !brokerFilter || String(row.broker_id) === String(brokerFilter));
+  const scopeAttendance = (attendanceRows || []).filter((row) => !attendanceBrokerFilter || String(row.broker_id) === String(attendanceBrokerFilter));
+  const previousEntries = (previousEntryRows || []).filter((row) => !brokerFilter || String(row.broker_id) === String(brokerFilter));
+  const previousAttendance = (previousAttendanceRows || []).filter((row) => !attendanceBrokerFilter || String(row.broker_id) === String(attendanceBrokerFilter));
+  const current = summarizeOperations(scopeEntries, scopeAttendance, users, range.start, range.end, brokerFilter);
+  const previous = summarizeOperations(previousEntries, previousAttendance, users, range.previousStart, range.previousEnd, brokerFilter);
+  const visibleGoals = (goalRows || []).filter((goal) => !brokerFilter || String(goal.broker_id) === String(brokerFilter));
+  const goalActualByBroker = new Map();
+  (goalActualRows || []).forEach((row) => {
+    const id = String(row.broker_id);
+    const totals = goalActualByBroker.get(id) || { prospections: 0, visits: 0, sales: 0 };
+    totals.prospections += Number(row.prospecting_count || 0);
+    totals.visits += Number(row.visit_count || 0);
+    totals.sales += Number(row.sale_count || 0);
+    goalActualByBroker.set(id, totals);
+  });
+  const goals = current.byBroker.map((broker) => {
+    const metricGoals = {};
+    for (const metricId of ['prospections','visits','sales']) {
+      const goal = visibleGoals.find((item) => String(item.broker_id) === String(broker.id) && item.metric === metricId);
+      const target = goal ? Number(goal.target_count) : null;
+      const actual = Number((goalActualByBroker.get(String(broker.id)) || {})[metricId] || 0);
+      metricGoals[metricId] = { target, actual, remaining: target === null ? null : Math.max(0, target - actual), exceeded: target === null ? 0 : Math.max(0, actual - target), percent: target ? Math.round(actual / target * 1000) / 10 : null, revision: goal ? Number(goal.revision) : null };
+    }
+    return { brokerId: broker.id, brokerName: broker.name, metrics: metricGoals };
+  });
+  const publicAttendanceByBroker = current.byBroker.map((broker) => ({ brokerId: broker.id, brokerName: broker.name, total: broker.attendance, morning: broker.morning, afternoon: broker.afternoon, night: broker.night }));
+  const safeAttendanceByBroker = publicAttendanceByBroker;
+  let recentOwnEntries = [];
+  if (access === 'broker') {
+    const recentRows = await dbRequest('crm_production_entries', { query: { select: '*', broker_id: `eq.${actor.id}`, deleted_at: 'is.null', order: 'work_date.desc,updated_at.desc', limit: 5 }, range: '0-4' });
+    recentOwnEntries = (Array.isArray(recentRows) ? recentRows : []).map((row) => ({
+      id: row.id, workDate: row.work_date, ...metricValuesFromRow(row), notes: row.notes || '', updatedAt: row.updated_at
+    }));
+  }
+  return {
+    period: { start: range.start, end: range.end, label: range.label, periodType: range.period, previousStart: range.previousStart, previousEnd: range.previousEnd, goalCycle: range.goalCycle, goalStart: range.goalStart, goalEnd: range.goalEnd },
+    totals: current.totals,
+    byBroker: current.byBroker,
+    daily: current.daily,
+    comparison: comparisonValues(current.totals, previous.totals),
+    goals,
+    attendanceByShift: { morning: current.totals.morning, afternoon: current.totals.afternoon, night: current.totals.night, total: current.totals.attendance },
+    attendanceByBroker: safeAttendanceByBroker,
+    latestUpdatedAt: current.latestUpdatedAt,
+    recentOwnEntries,
+    canManage: isOperationsManager(actor),
+    canExport: ['manager','viewer'].includes(access),
+    access
+  };
+}
+
+async function apiGetOperationsDashboard(token, filters = {}) {
+  const actor = await verifyActor(token);
+  return loadOperationsSnapshot(actor, filters && typeof filters === 'object' ? filters : {});
+}
+
+async function apiListProduction(token, filters = {}) {
+  const actor = await verifyActor(token); requireOperationsAccess(actor);
+  const range = operationsDateRange(filters || {});
+  const access = operationsAccessOf(actor);
+  const brokerId = access === 'broker' ? actor.id : (isUuid(filters && filters.brokerId) ? String(filters.brokerId) : '');
+  const query = rangeQuery('work_date', range.start, range.end);
+  if (brokerId) query.broker_id = `eq.${brokerId}`;
+  const [rows, users] = await Promise.all([listAll('crm_production_entries', query), listAll('crm_users', { select: '*' })]);
+  const mappedUsers = users.map(mapUser);
+  return (rows || []).map((row) => ({
+    id: row.id, brokerId: row.broker_id, brokerName: operationsUserSummary(row.broker_id, mappedUsers).name,
+    workDate: row.work_date, ...metricValuesFromRow(row), notes: row.notes || '', createdAt: row.created_at,
+    createdBy: row.created_by, updatedAt: row.updated_at, updatedBy: row.updated_by,
+    deletedAt: row.deleted_at || ''
+  })).sort((a,b) => String(b.workDate).localeCompare(String(a.workDate)) || String(b.updatedAt).localeCompare(String(a.updatedAt)));
+}
+
+function parseOperationCount(value, label) {
+  const count = Number(value);
+  if (!Number.isInteger(count) || count < 0 || count > 1000000) throw new HttpError(400, `${label} deve ser um número inteiro entre 0 e 1.000.000.`);
+  return count;
+}
+async function getActiveBroker(brokerId) {
+  if (!isUuid(brokerId)) throw new HttpError(400, 'Selecione um corretor válido.');
+  const broker = await getProfile(String(brokerId));
+  if (!broker || broker.active !== true || broker.deleted_at || broker.role !== 'Corretor') throw new HttpError(400, 'O corretor selecionado não está ativo.');
+  return mapUser(broker);
+}
+function productionValues(payload) {
+  return {
+    prospecting_count: parseOperationCount(payload.prospections, 'Prospecções'),
+    interaction_count: parseOperationCount(payload.interactions, 'Interações'),
+    appointment_count: parseOperationCount(payload.appointments, 'Agendamentos'),
+    visit_count: parseOperationCount(payload.visits, 'Visitas'),
+    sale_count: parseOperationCount(payload.sales, 'Vendas'),
+    notes: String(payload.notes || '').trim().slice(0, 1500)
+  };
+}
+function productionAuditValues(row) {
+  return row ? { brokerId: row.broker_id, workDate: row.work_date, ...metricValuesFromRow(row), notes: row.notes || '' } : {};
+}
+
+async function apiSaveProduction(token, payload = {}) {
+  const actor = await verifyActor(token); requireOperationsAccess(actor, ['broker','manager']);
+  payload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  const access = operationsAccessOf(actor);
+  const id = String(payload.id || '').trim();
+  const brokerId = access === 'broker' ? actor.id : String(payload.brokerId || '').trim();
+  const broker = await getActiveBroker(brokerId);
+  const workDate = String(payload.workDate || '').trim();
+  if (!isValidDateOnly(workDate) || workDate > operationDateString(now())) return { ok: false, message: 'Informe uma data válida, até o dia de hoje.' };
+  const values = productionValues(payload);
+  const stamp = now();
+  let beforeRow = null; let saved;
+  if (id) {
+    if (!isUuid(id)) return { ok: false, message: 'Lançamento inválido.' };
+    const oldRows = await dbRequest('crm_production_entries', { query: { select: '*', id: `eq.${id}`, deleted_at: 'is.null', limit: 1 } });
+    beforeRow = Array.isArray(oldRows) ? oldRows[0] || null : null;
+    if (!beforeRow) return { ok: false, message: 'Lançamento não encontrado ou já cancelado.' };
+    if (access !== 'manager' && String(beforeRow.broker_id) !== String(actor.id)) throw new HttpError(403, 'Você só pode editar os próprios lançamentos.');
+    if (access === 'broker' && String(brokerId) !== String(actor.id)) throw new HttpError(403, 'Você só pode lançar em seu próprio nome.');
+    if (access === 'manager' && String(brokerId) !== String(beforeRow.broker_id)) return { ok: false, message: 'Não é possível transferir um lançamento para outro corretor. Edite os dados mantendo o responsável original.' };
+    const after = { broker_id: beforeRow.broker_id, work_date: workDate, ...values, updated_at: stamp, updated_by: actor.id };
+    const result = await dbRequest('crm_production_entries', { method: 'PATCH', query: { id: `eq.${id}`, deleted_at: 'is.null' }, prefer: 'return=representation', body: after });
+    saved = Array.isArray(result) ? result[0] : null;
+    if (!saved) return { ok: false, message: 'O lançamento mudou enquanto era editado. Atualize a lista e tente novamente.' };
+  } else {
+    const result = await dbRequest('crm_production_entries', { method: 'POST', prefer: 'return=representation', body: { broker_id: broker.id, work_date: workDate, ...values, created_at: stamp, created_by: actor.id, updated_at: stamp, updated_by: actor.id } });
+    saved = Array.isArray(result) ? result[0] : null;
+  }
+  const beforeValues = productionAuditValues(beforeRow); const afterValues = productionAuditValues(saved);
+  await audit(actor, id ? 'operations.production.update' : 'operations.production.create', 'operation_production', saved && saved.id || id || 'unknown', auditChangedFields(beforeValues, afterValues), beforeValues, afterValues, 'operations');
+  return { ok: true, id: saved && saved.id, message: id ? 'Lançamento atualizado; a alteração ficou registrada no histórico.' : 'Lançamento de produção registrado.' };
+}
+
+async function apiArchiveProduction(token, entryId) {
+  const actor = await verifyActor(token); requireOperationsAccess(actor, ['broker','manager']);
+  if (!isUuid(entryId)) return { ok: false, message: 'Lançamento inválido.' };
+  const rows = await dbRequest('crm_production_entries', { query: { select: '*', id: `eq.${entryId}`, deleted_at: 'is.null', limit: 1 } });
+  const row = Array.isArray(rows) ? rows[0] : null;
+  if (!row) return { ok: false, message: 'Lançamento não encontrado ou já cancelado.' };
+  if (!isOperationsManager(actor) && String(row.broker_id) !== String(actor.id)) throw new HttpError(403, 'Você só pode cancelar os próprios lançamentos.');
+  const stamp = now();
+  const updated = await dbRequest('crm_production_entries', { method: 'PATCH', query: { id: `eq.${entryId}`, deleted_at: 'is.null' }, prefer: 'return=representation', body: { deleted_at: stamp, deleted_by: actor.id, updated_at: stamp, updated_by: actor.id } });
+  if (!Array.isArray(updated) || !updated.length) return { ok: false, message: 'O lançamento já foi alterado. Atualize a lista e tente novamente.' };
+  const beforeValues = productionAuditValues(row); const afterValues = { ...beforeValues, deletedAt: stamp };
+  await audit(actor, 'operations.production.cancel', 'operation_production', entryId, ['deletedAt'], beforeValues, afterValues, 'operations');
+  return { ok: true, message: 'Lançamento cancelado e preservado no histórico.' };
+}
+
+async function apiListOperationGoals(token, filters = {}) {
+  const actor = await verifyActor(token); requireOperationsAccess(actor);
+  const access = operationsAccessOf(actor);
+  const query = { select: '*', order: 'starts_on.desc,revision.desc' };
+  if (access === 'broker') query.broker_id = `eq.${actor.id}`;
+  else if (filters && isUuid(filters.brokerId)) query.broker_id = `eq.${filters.brokerId}`;
+  if (filters && ['weekly','monthly'].includes(filters.cycle)) query.cycle = `eq.${filters.cycle}`;
+  const [rows, users] = await Promise.all([listAll('crm_production_goals', query), listAll('crm_users', { select: '*' })]);
+  const mappedUsers = users.map(mapUser);
+  return (rows || []).map((row) => ({ id: row.id, brokerId: row.broker_id, brokerName: operationsUserSummary(row.broker_id, mappedUsers).name, metric: row.metric, cycle: row.cycle, startsOn: row.starts_on, endsOn: row.ends_on, target: Number(row.target_count), revision: Number(row.revision), supersedesId: row.supersedes_id || '', isCurrent: row.is_current === true, createdAt: row.created_at, createdBy: row.created_by }));
+}
+
+async function apiSaveOperationGoal(token, payload = {}) {
+  const actor = await verifyActor(token); requireOperationsAccess(actor, ['manager']);
+  payload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  const broker = await getActiveBroker(String(payload.brokerId || ''));
+  const metric = String(payload.metric || ''); const cycle = String(payload.cycle || '');
+  const referenceDate = String(payload.referenceDate || '').trim();
+  const target = parseOperationCount(payload.target, 'Meta');
+  if (target < 1) return { ok: false, message: 'A meta precisa ser maior que zero.' };
+  if (!['prospections','visits','sales'].includes(metric)) return { ok: false, message: 'Indicador de meta inválido.' };
+  if (!['weekly','monthly'].includes(cycle)) return { ok: false, message: 'Selecione o ciclo semanal ou mensal.' };
+  if (!isValidDateOnly(referenceDate)) return { ok: false, message: 'Informe uma data de referência válida.' };
+  let startsOn; let endsOn;
+  if (cycle === 'weekly') {
+    const weekday = new Date(`${referenceDate}T00:00:00Z`).getUTCDay();
+    startsOn = addDateOnly(referenceDate, -((weekday + 6) % 7)); endsOn = addDateOnly(startsOn, 6);
+  } else {
+    startsOn = `${referenceDate.slice(0,7)}-01`; endsOn = monthEndDateOnly(referenceDate);
+  }
+  const previousRows = await dbRequest('crm_production_goals', { query: { select: '*', broker_id: `eq.${broker.id}`, metric: `eq.${metric}`, cycle: `eq.${cycle}`, starts_on: `eq.${startsOn}`, ends_on: `eq.${endsOn}`, is_current: 'eq.true', limit: 1 } });
+  const previous = Array.isArray(previousRows) ? previousRows[0] || null : null;
+  const result = await dbRequest('rpc/crm_save_operation_goal', { method: 'POST', body: { p_broker_id: broker.id, p_metric: metric, p_cycle: cycle, p_starts_on: startsOn, p_ends_on: endsOn, p_target_count: target, p_actor_id: actor.id } });
+  const saved = Array.isArray(result) ? result[0] : result;
+  if (!saved || !saved.id) throw new HttpError(502, 'Não foi possível salvar a revisão da meta.');
+  const beforeValues = previous ? { target: previous.target_count, revision: previous.revision, isCurrent: previous.is_current } : {};
+  const afterValues = { brokerId: broker.id, metric, cycle, startsOn, endsOn, target, revision: Number(saved.revision), isCurrent: true };
+  await audit(actor, 'operations.goal.revise', 'operation_goal', saved.id, auditChangedFields(beforeValues, afterValues), beforeValues, afterValues, 'operations');
+  return { ok: true, goalId: saved.id, revision: Number(saved.revision), message: `Meta salva para ${broker.name}; versão ${saved.revision} preservada no histórico.` };
+}
+
+async function apiListAttendance(token, filters = {}) {
+  const actor = await verifyActor(token); requireOperationsAccess(actor);
+  const range = operationsDateRange(filters || {}); const access = operationsAccessOf(actor);
+  const brokerId = access === 'broker' ? actor.id : (isUuid(filters && filters.brokerId) ? String(filters.brokerId) : '');
+  const query = rangeQuery('attendance_date', range.start, range.end);
+  if (brokerId) query.broker_id = `eq.${brokerId}`;
+  const [rows, users] = await Promise.all([listAll('crm_attendance_records', query), listAll('crm_users', { select: '*' })]);
+  const mappedUsers = users.map(mapUser);
+  return (rows || []).map((row) => ({ id: row.id, brokerId: row.broker_id, brokerName: operationsUserSummary(row.broker_id, mappedUsers).name, attendanceDate: row.attendance_date, shift: row.shift, createdAt: row.created_at, createdBy: row.created_by, updatedAt: row.updated_at, updatedBy: row.updated_by }));
+}
+
+async function apiSetAttendance(token, payload = {}) {
+  const actor = await verifyActor(token); requireOperationsAccess(actor, ['manager']);
+  payload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  const broker = await getActiveBroker(String(payload.brokerId || ''));
+  const attendanceDate = String(payload.attendanceDate || '').trim();
+  const shift = String(payload.shift || ''); const present = payload.present === true;
+  if (!isValidDateOnly(attendanceDate) || attendanceDate > operationDateString(now())) return { ok: false, message: 'Informe uma data válida, até o dia de hoje.' };
+  if (!['morning','afternoon','night'].includes(shift)) return { ok: false, message: 'Selecione manhã, tarde ou noite.' };
+  const priorRows = await dbRequest('crm_attendance_records', { query: { select: '*', broker_id: `eq.${broker.id}`, attendance_date: `eq.${attendanceDate}`, shift: `eq.${shift}`, deleted_at: 'is.null', limit: 1 } });
+  const previous = Array.isArray(priorRows) ? priorRows[0] || null : null;
+  if ((present && previous) || (!present && !previous)) return { ok: true, unchanged: true, message: present ? 'A presença já estava registrada.' : 'Não havia presença ativa para cancelar.' };
+  const result = await dbRequest('rpc/crm_set_attendance', { method: 'POST', body: { p_broker_id: broker.id, p_attendance_date: attendanceDate, p_shift: shift, p_present: present, p_actor_id: actor.id } });
+  const saved = Array.isArray(result) ? result[0] : result;
+  const beforeValues = previous ? { brokerId: broker.id, attendanceDate, shift, present: true } : {};
+  const afterValues = present ? { brokerId: broker.id, attendanceDate, shift, present: true } : { brokerId: broker.id, attendanceDate, shift, present: false, deletedAt: saved && saved.deleted_at || now() };
+  await audit(actor, present ? 'operations.attendance.create' : 'operations.attendance.cancel', 'operation_attendance', saved && saved.id || previous.id, auditChangedFields(beforeValues, afterValues), beforeValues, afterValues, 'operations');
+  return { ok: true, message: present ? `Presença de ${broker.name} registrada no período ${shift === 'morning' ? 'da manhã' : shift === 'afternoon' ? 'da tarde' : 'da noite'}.` : 'Presença cancelada e preservada no histórico.' };
+}
+
+async function apiExportOperationsReport(token, filters = {}) {
+  const actor = await verifyActor(token); requireOperationsAccess(actor, ['viewer','manager']);
+  const snapshot = await loadOperationsSnapshot(actor, filters && typeof filters === 'object' ? filters : {});
+  const range = operationsDateRange(filters && typeof filters === 'object' ? filters : {});
+  const brokerId = isUuid(filters && filters.brokerId) ? String(filters.brokerId) : '';
+  const productionQuery = rangeQuery('work_date', range.start, range.end);
+  const attendanceQuery = rangeQuery('attendance_date', range.start, range.end);
+  if (brokerId) { productionQuery.broker_id = `eq.${brokerId}`; attendanceQuery.broker_id = `eq.${brokerId}`; }
+  const [productionRows, attendanceRows, userRows] = await Promise.all([
+    listAll('crm_production_entries', productionQuery), listAll('crm_attendance_records', attendanceQuery), listAll('crm_users', { select: '*' })
+  ]);
+  const users = userRows.map(mapUser);
+  const rows = snapshot.byBroker.map((broker) => ({
+    corretor: broker.name, prospeccoes: broker.prospections, interacoes: broker.interactions,
+    agendamentos: broker.appointments, visitas: broker.visits, vendas: broker.sales,
+    frequencia_total: broker.attendance, frequencia_manha: broker.morning,
+    frequencia_tarde: broker.afternoon, frequencia_noite: broker.night
+  }));
+  const production = (productionRows || []).map((row) => ({
+    date: row.work_date, broker: operationsUserSummary(row.broker_id, users).name,
+    prospeccoes: Number(row.prospecting_count || 0), interacoes: Number(row.interaction_count || 0),
+    agendamentos: Number(row.appointment_count || 0), visitas: Number(row.visit_count || 0), vendas: Number(row.sale_count || 0),
+    observacoes: row.notes || '', updatedAt: row.updated_at
+  }));
+  const attendance = (attendanceRows || []).map((row) => ({
+    date: row.attendance_date, broker: operationsUserSummary(row.broker_id, users).name,
+    shift: OPERATIONS_SHIFTS.find((item) => item.id === row.shift)?.label || row.shift, updatedAt: row.updated_at
+  }));
+  return { period: snapshot.period, totals: snapshot.totals, rows, production, attendance };
+}
+
 async function apiListLeads(token, filters, page, pageSize, segment = 'all') {
   const actor = await verifyActor(token);
   const [context, staleBusinessDays] = await Promise.all([loadLeadContext(), getFollowupBusinessDays()]);
@@ -611,6 +1065,7 @@ async function apiListAudit(token, filters = {}, requestedPage = 1, requestedPag
   const pageSize = Math.min(200, Math.max(1, Number.parseInt(requestedPageSize, 10) || 100));
   const query = { select: '*', order: 'at.desc' };
   if (filters && filters.entityType) query.entity_type = `eq.${String(filters.entityType).slice(0, 50)}`;
+  if (filters && ['crm','operations'].includes(filters.module)) query.module = `eq.${filters.module}`;
   if (filters && filters.actorId) query.user_id = `eq.${String(filters.actorId)}`;
   const dateTerms = [];
   if (filters && filters.dateFrom) {
@@ -625,7 +1080,7 @@ async function apiListAudit(token, filters = {}, requestedPage = 1, requestedPag
   if (dateTerms.length) query.and = `(${dateTerms.join(',')})`;
   const result = await dbRequest('crm_audit', { query, range: `${(page - 1) * pageSize}-${page * pageSize - 1}`, returnCount: true });
   const rows = result && Array.isArray(result.data) ? result.data : [];
-  const items = rows.map((item) => ({ id: item.id, at: item.at, userId: item.user_id || '', actorName: item.actor_name || item.email || 'Usuário não identificado', actorRole: item.actor_role || '', action: item.action, entityType: item.entity_type, entityId: item.entity_id, changedFields: item.changed_fields || '', beforeValues: item.before_values || {}, afterValues: item.after_values || {} }));
+  const items = rows.map((item) => ({ id: item.id, at: item.at, module: item.module || 'crm', userId: item.user_id || '', actorName: item.actor_name || item.email || 'Usuário não identificado', actorEmail: item.email || '', actorRole: item.actor_role || '', action: item.action, entityType: item.entity_type, entityId: item.entity_id, changedFields: item.changed_fields || '', beforeValues: item.before_values || {}, afterValues: item.after_values || {} }));
   return { items, total: result ? result.total : 0, page, pageSize };
 }
 
@@ -879,12 +1334,34 @@ const DEFAULT_CONTRACT_TEMPLATE_HTML = `<!doctype html>
 </body>
 </html>`;
 
-async function apiGetContractTemplate(token) {
+function normalizeContractDocumentKind(value) {
+  const kind = String(value || 'agreement').trim();
+  if (!['agreement', 'debt_confession'].includes(kind)) throw new HttpError(400, 'Tipo de documento contratual inválido.');
+  return kind;
+}
+
+function contractTemplateSettingKey(kind) {
+  return kind === 'debt_confession' ? 'debt_confession_template_html' : 'contract_template_html';
+}
+
+const CONTRACT_PLACEHOLDERS = [
+  '{{numero_contrato}}','{{numero_processo}}','{{numero_proposta}}','{{cliente_nome}}','{{cliente_cpf}}','{{cliente_endereco}}',
+  '{{empreendimento}}','{{unidade}}','{{valor_unidade}}','{{corretor_nome}}','{{corretor_cpf}}','{{corretor_cnpj}}',
+  '{{corretor_creci}}','{{corretor_endereco}}','{{sdr_nome}}','{{sdr_cpf}}','{{gerente_nome}}','{{percentual_comissao}}',
+  '{{base_calculo_comissao}}','{{comissao_bruta}}','{{comissao_corretor}}','{{comissao_sdr}}','{{premio_aplicavel}}',
+  '{{percentual_premio}}','{{premio_bruto}}','{{premio_corretor}}','{{premio_sdr}}','{{data_geracao}}'
+];
+
+async function apiGetContractTemplate(token, options = {}) {
   const actor = await verifyActor(token); requireAdmin(actor);
-  const rows = await dbRequest('crm_settings', { query: { select: 'value', key: 'eq.contract_template_html', limit: 1 } });
+  const kind = normalizeContractDocumentKind(typeof options === 'string' ? options : options && options.kind);
+  const key = contractTemplateSettingKey(kind);
+  const rows = await dbRequest('crm_settings', { query: { select: 'value', key: `eq.${key}`, limit: 1 } });
   const value = Array.isArray(rows) && rows[0] ? rows[0].value : '';
   const savedTemplate = typeof value === 'string' ? value : value && value.html || '';
-  return { template: savedTemplate.trim() ? savedTemplate : DEFAULT_CONTRACT_TEMPLATE_HTML, placeholders: ['{{numero_contrato}}','{{numero_proposta}}','{{cliente_nome}}','{{cliente_cpf}}','{{cliente_endereco}}','{{empreendimento}}','{{unidade}}','{{valor_unidade}}','{{corretor_nome}}','{{corretor_cpf}}','{{corretor_cnpj}}','{{corretor_creci}}','{{corretor_endereco}}','{{sdr_nome}}','{{sdr_cpf}}','{{gerente_nome}}','{{percentual_comissao}}','{{base_calculo_comissao}}','{{comissao_bruta}}','{{comissao_corretor}}','{{comissao_sdr}}','{{premio_aplicavel}}','{{percentual_premio}}','{{premio_bruto}}','{{premio_corretor}}','{{premio_sdr}}','{{data_geracao}}'] };
+  const hasSavedTemplate = Boolean(String(savedTemplate || '').trim());
+  const template = kind === 'agreement' && !hasSavedTemplate ? DEFAULT_CONTRACT_TEMPLATE_HTML : String(savedTemplate || '');
+  return { kind, template, configured: Boolean(template.trim()), source: hasSavedTemplate ? 'saved_by_admin' : kind === 'agreement' ? 'built_in_initial' : 'not_configured', placeholders: CONTRACT_PLACEHOLDERS };
 }
 
 async function apiListContractLeads(token) {
@@ -896,53 +1373,76 @@ async function apiListContractLeads(token) {
 function sanitizeContractTemplate(value) {
   const template = String(value || '').trim();
   if (!template || template.length > 100000) throw new HttpError(400, 'O modelo deve ter entre 1 e 100.000 caracteres.');
-  if (/<\s*(script|iframe|object|embed|form)\b|\son[a-z]+\s*=|javascript:/i.test(template)) throw new HttpError(400, 'O modelo contém marcação ativa não permitida.');
+  if (/<\s*(script|iframe|object|embed|form|svg|video|audio|link)\b|\son[a-z]+\s*=|javascript:|(?:src|href)\s*=\s*["']?\s*(?:https?:)?\/\/|url\s*\(|@import|<meta\b[^>]*http-equiv/i.test(template)) throw new HttpError(400, 'O modelo contém conteúdo ativo ou referência externa não permitida. Use conteúdo e estilos incorporados no próprio documento.');
   return template;
 }
 
-async function apiSaveContractTemplate(token, html) {
+async function apiSaveContractTemplate(token, payload) {
   const actor = await verifyActor(token); requireAdmin(actor);
-  const template = sanitizeContractTemplate(html);
-  const previous = await apiGetContractTemplate(token);
-  await dbRequest('crm_settings', { method: 'POST', query: { on_conflict: 'key' }, prefer: 'resolution=merge-duplicates,return=minimal', body: { key: 'contract_template_html', value: template, updated_at: now() } });
+  const options = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : { html: payload };
+  const kind = normalizeContractDocumentKind(options.kind || 'agreement');
+  const template = sanitizeContractTemplate(options.html);
+  const key = contractTemplateSettingKey(kind);
+  const previous = await apiGetContractTemplate(token, { kind });
+  await dbRequest('crm_settings', { method: 'POST', query: { on_conflict: 'key' }, prefer: 'resolution=merge-duplicates,return=minimal', body: { key, value: template, updated_at: now() } });
   const templateSnapshot = (value) => ({
     sha256: createHash('sha256').update(String(value || '')).digest('hex'),
     characters: String(value || '').length,
     content: String(value || '')
   });
-  await audit(actor, 'contract_template.update', 'setting', 'contract_template_html', ['template'], { template: templateSnapshot(previous.template) }, { template: templateSnapshot(template) });
-  return { ok: true, message: 'Modelo salvo. O texto jurídico continua sob responsabilidade e aprovação da empresa.' };
+  await audit(actor, 'contract_template.update', 'setting', key, ['template'], { kind, template: templateSnapshot(previous.template) }, { kind, template: templateSnapshot(template) });
+  return { ok: true, kind, message: `${kind === 'agreement' ? 'Modelo de contrato/termo' : 'Modelo de confissão de dívida'} salvo. O texto deve ser aprovado pela empresa antes de ser usado.` };
 }
 
 async function apiSaveContract(token, payload = {}) {
   const actor = await verifyActor(token); requireAdmin(actor);
+  payload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
   const id = String(payload.id || '').trim();
   const allowed = ['id','leadId','brokerId','sdrId','sdrCpf','managerId','buyerName','buyerCpf','buyerAddress','developmentId','unit','unitValue','proposalNumber','commissionBase','commissionRatePct','grossCommission','hasPrize','prizeRatePct','grossPrize'];
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).some((key) => !allowed.includes(key))) return { ok: false, message: 'Campos do contrato inválidos.' };
-  const leadId = String(payload.leadId || '').trim();
-  if (!isUuid(leadId)) return { ok: false, message: 'Selecione o cliente vinculado ao contrato.' };
-  const leads = await dbRequest('crm_leads', { query: { select: 'id,name,phone,broker_id,development_id,deleted_at', id: `eq.${leadId}`, limit: 1 } });
-  const lead = Array.isArray(leads) ? leads[0] : null;
-  if (!lead || lead.deleted_at) return { ok: false, message: 'Cliente não encontrado.' };
+  allowed.push('saleId','processNumber');
+  if (Object.keys(payload).some((key) => !allowed.includes(key))) return { ok: false, message: 'Campos do contrato inválidos.' };
+  const saleId = String(payload.saleId || '').trim();
+  if (saleId && !isUuid(saleId)) return { ok: false, message: 'Venda vinculada inválida.' };
+  let sale = null;
+  if (saleId) {
+    const saleRows = await dbRequest('crm_sales', { query: { select: '*', id: `eq.${saleId}`, deleted_at: 'is.null', limit: 1 } });
+    sale = Array.isArray(saleRows) ? saleRows[0] || null : null;
+    if (!sale || sale.sale_status === 'Cancelada') return { ok: false, message: 'A venda vinculada não está disponível para gerar documentos.' };
+  }
+  let lead = null;
+  let leadId = sale ? String(sale.lead_id || '').trim() : String(payload.leadId || '').trim();
+  if (sale && payload.leadId && String(payload.leadId) !== leadId) return { ok: false, message: 'O cliente vinculado precisa corresponder à venda selecionada.' };
+  if (!sale && leadId) {
+    if (!isUuid(leadId)) return { ok: false, message: 'Cliente vinculado inválido.' };
+    const leads = await dbRequest('crm_leads', { query: { select: 'id,name,phone,broker_id,development_id,deleted_at', id: `eq.${leadId}`, limit: 1 } });
+    lead = Array.isArray(leads) ? leads[0] : null;
+    if (!lead || lead.deleted_at) return { ok: false, message: 'Cliente não encontrado.' };
+  }
   const users = await listAll('crm_users', { select: 'id,name,role,active,deleted_at' });
-  const brokerId = String(payload.brokerId || lead.broker_id);
-  const broker = users.find((item) => item.id === brokerId && item.role === 'Corretor' && item.active && !item.deleted_at);
+  const brokerId = String(sale ? sale.broker_id : payload.brokerId || lead && lead.broker_id || '').trim();
+  if (sale && payload.brokerId && String(payload.brokerId) !== brokerId) return { ok: false, message: 'O corretor do contrato precisa corresponder ao corretor responsável pela venda.' };
+  const broker = users.find((item) => item.id === brokerId && item.role === 'Corretor' && !item.deleted_at && (item.active || sale && String(sale.broker_id) === brokerId));
   const sdr = users.find((item) => item.id === String(payload.sdrId || '') && item.role === 'SDR' && item.active && !item.deleted_at);
   const manager = users.find((item) => item.id === String(payload.managerId || actor.id) && item.role === 'Gerente' && item.active && !item.deleted_at);
-  if (!broker || broker.id !== lead.broker_id) return { ok: false, message: 'O corretor deve ser o responsável pela carteira do cliente.' };
+  if (!broker || lead && broker.id !== lead.broker_id) return { ok: false, message: 'Selecione o corretor responsável pela venda ou pela carteira do cliente.' };
   if (!sdr) return { ok: false, message: 'Selecione o SDR que assinará o documento.' };
   if (!manager) return { ok: false, message: 'Selecione um gerente ou administrador como signatário.' };
-  const developmentId = String(payload.developmentId || lead.development_id || '').trim();
+  const developmentId = String(sale ? sale.development_id : payload.developmentId || lead && lead.development_id || '').trim();
+  if (sale && payload.developmentId && String(payload.developmentId) !== developmentId) return { ok: false, message: 'O empreendimento do contrato precisa corresponder à venda selecionada.' };
   const developments = await listAll('crm_developments', { select: 'id,name,active' });
-  const development = developments.find((item) => item.id === developmentId && item.active);
-  if (!development) return { ok: false, message: 'Selecione um empreendimento ativo.' };
-  const unit = String(payload.unit || '').trim().slice(0, 100);
+  const development = developments.find((item) => item.id === developmentId && (item.active || sale && item.id === developmentId));
+  if (!development) return { ok: false, message: 'Selecione um empreendimento válido.' };
+  const unit = String(sale ? sale.unit : payload.unit || '').trim().slice(0, 100);
+  if (sale && payload.unit && String(payload.unit).trim() !== unit) return { ok: false, message: 'A unidade do contrato precisa corresponder à venda selecionada.' };
   if (!unit) return { ok: false, message: 'Informe a unidade escolhida.' };
-  const values = { lead_id: leadId, broker_id: broker.id, sdr_id: sdr.id, sdr_cpf: String(payload.sdrCpf || '').trim().slice(0, 30), manager_id: manager.id,
-    buyer_name: String(payload.buyerName || lead.name).trim().slice(0, 150), buyer_cpf: String(payload.buyerCpf || '').trim().slice(0, 30),
+  const saleBuyerName = sale ? sale.buyer_name : lead && lead.name;
+  const saleUnitValue = sale ? Number(sale.unit_value || 0) : null;
+  const values = { sale_id: saleId || null, lead_id: leadId || null, process_number: String(sale ? sale.process_number || '' : payload.processNumber || '').trim().slice(0, 100),
+    broker_id: broker.id, sdr_id: sdr.id, sdr_cpf: String(payload.sdrCpf || '').trim().slice(0, 30), manager_id: manager.id,
+    buyer_name: String(sale ? saleBuyerName : payload.buyerName || saleBuyerName || '').trim().slice(0, 150), buyer_cpf: String(payload.buyerCpf || '').trim().slice(0, 30),
     buyer_address: String(payload.buyerAddress || '').trim().slice(0, 500), development_id: developmentId, unit,
     proposal_number: String(payload.proposalNumber || '').trim().slice(0, 100),
-    unit_value: parseMoney(payload.unitValue, 'Valor da unidade'), commission_base: parseMoney(payload.commissionBase, 'Base de cálculo da comissão'),
+    unit_value: sale ? parseMoney(saleUnitValue, 'Valor da unidade') : parseMoney(payload.unitValue, 'Valor da unidade'), commission_base: parseMoney(payload.commissionBase, 'Base de cálculo da comissão'),
     commission_rate_pct: parseOptionalPercent(payload.commissionRatePct, 'Percentual da comissão'), gross_commission: parseMoney(payload.grossCommission, 'Comissão bruta'),
     has_prize: payload.hasPrize === true, prize_rate_pct: payload.hasPrize === true ? parseOptionalPercent(payload.prizeRatePct, 'Percentual do prêmio') : null,
     gross_prize: payload.hasPrize === true ? parseMoney(payload.grossPrize, 'Prêmio bruto') : 0, updated_at: now(), updated_by: actor.id };
@@ -957,7 +1457,7 @@ async function apiSaveContract(token, payload = {}) {
     const rows = await dbRequest('crm_contracts', { query: { select: '*', id: `eq.${id}`, limit: 1 } });
     existing = Array.isArray(rows) ? rows[0] || null : null;
     if (!existing || existing.status !== 'Rascunho') return { ok: false, message: 'Somente rascunhos podem ser editados.' };
-    beforeValues = { contractNumber: existing.contract_number, lead_id: existing.lead_id, broker_id: existing.broker_id, sdr_id: existing.sdr_id, manager_id: existing.manager_id,
+    beforeValues = { contractNumber: existing.contract_number, sale_id: existing.sale_id || null, lead_id: existing.lead_id || null, process_number: existing.process_number || '', broker_id: existing.broker_id, sdr_id: existing.sdr_id, manager_id: existing.manager_id,
       sdr_cpf: existing.sdr_cpf || '', buyer_name: existing.buyer_name, buyer_cpf: existing.buyer_cpf, buyer_address: existing.buyer_address, development_id: existing.development_id,
       unit: existing.unit, proposal_number: existing.proposal_number || '', unit_value: Number(existing.unit_value), commission_base: Number(existing.commission_base || 0), commission_rate_pct: existing.commission_rate_pct === null ? null : Number(existing.commission_rate_pct),
       gross_commission: Number(existing.gross_commission), has_prize: existing.has_prize, prize_rate_pct: existing.prize_rate_pct === null ? null : Number(existing.prize_rate_pct), gross_prize: Number(existing.gross_prize) };
@@ -969,7 +1469,7 @@ async function apiSaveContract(token, payload = {}) {
     existing = Array.isArray(result) ? result[0] : result;
   }
   if (!existing) throw new HttpError(502, 'Não foi possível salvar o contrato.');
-  const afterValues = { lead_id: values.lead_id, broker_id: values.broker_id, sdr_id: values.sdr_id, sdr_cpf: values.sdr_cpf, manager_id: values.manager_id,
+  const afterValues = { sale_id: values.sale_id, lead_id: values.lead_id, process_number: values.process_number, broker_id: values.broker_id, sdr_id: values.sdr_id, sdr_cpf: values.sdr_cpf, manager_id: values.manager_id,
     buyer_name: values.buyer_name, buyer_cpf: values.buyer_cpf, buyer_address: values.buyer_address, development_id: values.development_id,
     unit: values.unit, proposal_number: values.proposal_number, unit_value: values.unit_value, commission_base: values.commission_base, commission_rate_pct: values.commission_rate_pct,
     gross_commission: values.gross_commission, has_prize: values.has_prize, prize_rate_pct: values.prize_rate_pct, gross_prize: values.gross_prize };
@@ -981,12 +1481,15 @@ async function apiSaveContract(token, payload = {}) {
 async function apiListContracts(token) {
   const actor = await verifyActor(token);
   if (!isAdmin(actor) && !['Corretor','SDR'].includes(actor.role)) throw new HttpError(403, 'Este perfil não pode consultar contratos.');
-  const [rows, users, developments, documents] = await Promise.all([
+  const [rows, users, developments, documents, sales] = await Promise.all([
     listAll('crm_contracts', { select: '*', order: 'created_at.desc' }), listAll('crm_users', { select: 'id,name,role' }),
-    listAll('crm_developments', { select: 'id,name' }), listAll('crm_contract_documents', { select: 'id,contract_id,document_type,original_name,mime_type,size_bytes,created_at' })
+    listAll('crm_developments', { select: 'id,name' }), listAll('crm_contract_documents', { select: 'id,contract_id,document_type,document_kind,signature_confirmed_at,signature_confirmed_by,original_name,mime_type,size_bytes,created_at' }),
+    listAll('crm_sales', { select: 'id,internal_number,process_number', deleted_at: 'is.null' })
   ]);
   return (rows || []).filter((row) => isAdmin(actor) || (row.status === 'Assinado' && (actor.role === 'Corretor' ? row.broker_id === actor.id : row.sdr_id === actor.id))).map((row) => ({
-    id: row.id, contractNumber: row.contract_number, leadId: row.lead_id, brokerId: row.broker_id, brokerName: (users.find((item) => item.id === row.broker_id) || {}).name || '',
+    id: row.id, contractNumber: row.contract_number, saleId: row.sale_id || '', saleInternalNumber: (sales.find((item) => item.id === row.sale_id) || {}).internal_number || '',
+    leadId: row.lead_id || '', processNumber: row.process_number || (sales.find((item) => item.id === row.sale_id) || {}).process_number || '',
+    brokerId: row.broker_id, brokerName: (users.find((item) => item.id === row.broker_id) || {}).name || '',
     sdrId: row.sdr_id, sdrName: (users.find((item) => item.id === row.sdr_id) || {}).name || '', managerId: row.manager_id, managerName: (users.find((item) => item.id === row.manager_id) || {}).name || '',
     buyerName: row.buyer_name, buyerCpf: row.buyer_cpf || '', buyerAddress: row.buyer_address || '', developmentId: row.development_id,
     developmentName: (developments.find((item) => item.id === row.development_id) || {}).name || '', unit: row.unit, unitValue: Number(row.unit_value),
@@ -994,7 +1497,11 @@ async function apiListContracts(token) {
     grossCommission: Number(row.gross_commission), brokerCommission: Number(row.broker_commission), sdrCommission: Number(row.sdr_commission),
     hasPrize: row.has_prize === true, prizeRatePct: row.prize_rate_pct === null ? null : Number(row.prize_rate_pct), grossPrize: Number(row.gross_prize), brokerPrize: Number(row.broker_prize), sdrPrize: Number(row.sdr_prize),
     status: row.status, generatedAt: row.generated_at || '', signedAt: row.signed_at || '',
-    documents: (documents || []).filter((doc) => doc.contract_id === row.id && (isAdmin(actor) || (row.status === 'Assinado' && doc.document_type === 'signed'))).map((doc) => ({ id: doc.id, type: doc.document_type, name: doc.original_name, mimeType: doc.mime_type, sizeBytes: Number(doc.size_bytes), createdAt: doc.created_at }))
+    agreementTemplateConfigured: Boolean(row.template_snapshot), debtConfessionTemplateConfigured: Boolean(row.debt_confession_template_snapshot),
+    documents: (documents || []).filter((doc) => doc.contract_id === row.id && (isAdmin(actor) || (row.status === 'Assinado' && doc.document_type === 'signed' && Boolean(doc.signature_confirmed_at)))).map((doc) => ({
+      id: doc.id, type: doc.document_type, kind: doc.document_kind || 'agreement', signatureConfirmedAt: doc.signature_confirmed_at || '',
+      name: doc.original_name, mimeType: doc.mime_type, sizeBytes: Number(doc.size_bytes), createdAt: doc.created_at
+    }))
   }));
 }
 
@@ -1011,14 +1518,17 @@ function formatPercent(value) {
   return `${new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 4 }).format(Number(value))}%`;
 }
 
-async function apiGenerateContract(token, contractId) {
+async function apiGenerateContract(token, contractId, documentKind = 'agreement') {
   const actor = await verifyActor(token); requireAdmin(actor);
+  const kind = normalizeContractDocumentKind(documentKind);
   if (!isUuid(contractId)) return { ok: false, message: 'Contrato inválido.' };
   const contractRows = await dbRequest('crm_contracts', { query: { select: '*', id: `eq.${contractId}`, limit: 1 } });
   const contract = Array.isArray(contractRows) ? contractRows[0] : null;
-  if (!contract || contract.status === 'Cancelado' || contract.status === 'Assinado') return { ok: false, message: 'Este contrato não pode ser gerado neste estado.' };
-  const templateInfo = await apiGetContractTemplate(token);
-  if (!templateInfo.template) return { ok: false, message: 'Cadastre o modelo aprovado da empresa antes de gerar documentos.' };
+  if (!contract || contract.status === 'Cancelado' || (kind === 'agreement' && contract.status === 'Assinado')) return { ok: false, message: 'Este documento não pode ser gerado neste estado.' };
+  const priorDocuments = await listAll('crm_contract_documents', { select: 'document_kind,document_type,signature_confirmed_at', contract_id: `eq.${contract.id}` });
+  if ((priorDocuments || []).some((doc) => (doc.document_kind || 'agreement') === kind && doc.document_type === 'signed' && doc.signature_confirmed_at)) return { ok: false, message: 'A assinatura deste documento já foi confirmada. Não é possível gerar outra versão pelo fluxo atual.' };
+  const templateInfo = await apiGetContractTemplate(token, { kind });
+  if (!templateInfo.template) return { ok: false, message: `Cadastre o modelo aprovado de ${kind === 'agreement' ? 'contrato/termo' : 'confissão de dívida'} antes de gerar o documento.` };
   const [users, developments, profiles] = await Promise.all([listAll('crm_users', { select: 'id,name,email,role' }), listAll('crm_developments', { select: 'id,name' }), listAll('crm_broker_profiles', { select: '*' })]);
   const broker = users.find((item) => item.id === contract.broker_id) || {};
   const sdr = users.find((item) => item.id === contract.sdr_id) || {};
@@ -1028,7 +1538,7 @@ async function apiGenerateContract(token, contractId) {
   if (!contract.buyer_cpf || !contract.sdr_cpf) return { ok: false, message: 'Preencha o CPF do comprador e do SDR no rascunho antes de gerar o termo.' };
   if (!profile.cpf || !profile.cnpj || !profile.creci || !profile.address) return { ok: false, message: 'Complete CPF, CNPJ, CRECI e endereço no cadastro do corretor antes de gerar o termo.' };
   const values = {
-    numero_contrato: contract.contract_number, numero_proposta: contract.proposal_number || 'Não informado', cliente_nome: contract.buyer_name, cliente_cpf: contract.buyer_cpf,
+    numero_contrato: contract.contract_number, numero_processo: contract.process_number || 'Não informado', numero_proposta: contract.proposal_number || 'Não informado', cliente_nome: contract.buyer_name, cliente_cpf: contract.buyer_cpf,
     cliente_endereco: contract.buyer_address, empreendimento: development.name || '', unidade: contract.unit,
     valor_unidade: formatCurrency(contract.unit_value), corretor_nome: broker.name || '', corretor_cpf: profile.cpf || '',
     corretor_cnpj: profile.cnpj || '', corretor_creci: profile.creci || '', corretor_endereco: profile.address || '',
@@ -1042,31 +1552,46 @@ async function apiGenerateContract(token, contractId) {
     premio_sdr: contract.has_prize ? formatCurrency(contract.sdr_prize) : 'Não se aplica',
     data_geracao: new Intl.DateTimeFormat('pt-BR', { dateStyle: 'long', timeZone: 'America/Sao_Paulo' }).format(new Date())
   };
-  let html = templateInfo.template.replace(/{{([a-z_]+)}}/g, (match, key) => Object.prototype.hasOwnProperty.call(values, key) ? htmlEscape(values[key]) : '');
+  let html = templateInfo.template.replace(/{{\s*([a-z_]+)\s*}}/g, (match, key) => Object.prototype.hasOwnProperty.call(values, key) ? htmlEscape(values[key]) : match);
+  if (/{{\s*[^{}]+\s*}}/.test(html)) return { ok: false, message: 'O modelo contém campos sem correspondência. Revise os marcadores antes de gerar o documento.' };
   if (!/<!doctype\s+html/i.test(html) && !/<html[\s>]/i.test(html)) html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${htmlEscape(contract.contract_number)}</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body>${html}</body></html>`;
-  const path = `generated/${contract.id}/${randomBytes(5).toString('hex')}-${contract.contract_number}.doc`;
-  await storageRequest(`object/crm-contracts/${storageObjectPath(path)}`, { method: 'POST', body: Buffer.from(html, 'utf8'), contentType: 'application/msword', headers: { 'x-upsert': 'false' } });
-  const updated = await dbRequest('crm_contracts', { method: 'PATCH', query: { id: `eq.${contract.id}` }, prefer: 'return=representation', body: { status: 'Gerado para assinatura', generated_at: now(), generated_by: actor.id, template_snapshot: templateInfo.template, updated_at: now(), updated_by: actor.id } });
-  await dbRequest('crm_contract_documents', { method: 'POST', prefer: 'return=minimal', body: { contract_id: contract.id, document_type: 'generated', storage_path: path, original_name: `${contract.contract_number}.doc`, mime_type: 'application/msword', size_bytes: Buffer.byteLength(html), uploaded_by: actor.id } });
-  await audit(actor, 'contract.generate', 'contract', contract.id, ['status','documento'], { status: contract.status }, { status: 'Gerado para assinatura', contractNumber: contract.contract_number });
-  const url = await signedContractDownload(path, `${contract.contract_number}.doc`);
-  return { ok: true, downloadUrl: url, message: 'Documento Word compatível preparado com o modelo aprovado. Baixe, revise e encaminhe para assinatura.' };
+  const fileBytes = Buffer.from(html, 'utf8');
+  if (fileBytes.byteLength > 10485760) return { ok: false, message: 'O documento gerado ultrapassa o limite de 10 MB.' };
+  const label = kind === 'agreement' ? 'contrato' : 'confissao-de-divida';
+  const fileName = `${contract.contract_number}-${label}.doc`;
+  const path = `generated/${contract.id}/${kind}/${randomBytes(5).toString('hex')}-${fileName}`;
+  await storageRequest(`object/crm-contracts/${storageObjectPath(path)}`, { method: 'POST', body: fileBytes, contentType: 'application/msword', headers: { 'x-upsert': 'false' } });
+  const contractUpdate = kind === 'agreement'
+    ? { status: 'Gerado para assinatura', generated_at: now(), generated_by: actor.id, template_snapshot: templateInfo.template, updated_at: now(), updated_by: actor.id }
+    : { debt_confession_template_snapshot: templateInfo.template, updated_at: now(), updated_by: actor.id };
+  await dbRequest('crm_contracts', { method: 'PATCH', query: { id: `eq.${contract.id}` }, prefer: 'return=minimal', body: contractUpdate });
+  await dbRequest('crm_contract_documents', { method: 'POST', prefer: 'return=minimal', body: { contract_id: contract.id, document_kind: kind, document_type: 'generated', storage_path: path, original_name: fileName, mime_type: 'application/msword', size_bytes: fileBytes.byteLength, uploaded_by: actor.id } });
+  const beforeValues = kind === 'agreement' ? { status: contract.status } : { debtConfessionTemplateConfigured: Boolean(contract.debt_confession_template_snapshot) };
+  const afterValues = kind === 'agreement' ? { status: 'Gerado para assinatura', documentKind: kind, fileName } : { debtConfessionTemplateConfigured: true, documentKind: kind, fileName };
+  await audit(actor, kind === 'agreement' ? 'contract.generate' : 'contract.debt_confession.generate', 'contract', contract.id, ['documento','status'], beforeValues, afterValues);
+  const url = await signedContractDownload(path, fileName);
+  return { ok: true, kind, downloadUrl: url, message: `${kind === 'agreement' ? 'Contrato/termo' : 'Confissão de dívida'} gerado. Baixe, confira o conteúdo e encaminhe para as assinaturas do corretor, SDR e gerente.` };
 }
 
 async function apiCreateContractUpload(token, contractId, fileInfo = {}) {
   const actor = await verifyActor(token); requireAdmin(actor);
   if (!isUuid(contractId)) return { ok: false, message: 'Contrato inválido.' };
+  const kind = normalizeContractDocumentKind(fileInfo.documentKind);
   const rows = await dbRequest('crm_contracts', { query: { select: 'id,status,contract_number', id: `eq.${contractId}`, limit: 1 } });
   const contract = Array.isArray(rows) ? rows[0] : null;
-  if (!contract || contract.status === 'Cancelado' || contract.status === 'Assinado') return { ok: false, message: 'O contrato não está aguardando o arquivo assinado.' };
+  if (!contract || contract.status === 'Cancelado') return { ok: false, message: 'Este documento não está aguardando o arquivo assinado.' };
+  const priorDocs = await listAll('crm_contract_documents', { select: 'document_kind,document_type', contract_id: `eq.${contract.id}` });
+  if (!(priorDocs || []).some((doc) => (doc.document_kind || 'agreement') === kind && doc.document_type === 'generated')) return { ok: false, message: 'Gere este documento antes de anexar a versão assinada.' };
+  if ((priorDocs || []).some((doc) => (doc.document_kind || 'agreement') === kind && doc.document_type === 'signed' && doc.signature_confirmed_at)) return { ok: false, message: 'A assinatura deste documento já foi confirmada. Não é possível substituir o arquivo assinado por este fluxo.' };
+  if (kind === 'agreement' && contract.status === 'Assinado') return { ok: false, message: 'O contrato principal já está assinado. Não é possível substituir o arquivo por este fluxo.' };
   const originalName = safeFileName(fileInfo.name);
   const mimeType = String(fileInfo.mimeType || '').toLowerCase();
   const sizeBytes = Number(fileInfo.sizeBytes || 0);
   const allowedTypes = ['application/pdf','application/msword','application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
   const extAllowed = /\.(pdf|doc|docx)$/i.test(originalName);
   if (!extAllowed || !allowedTypes.includes(mimeType) || !Number.isInteger(sizeBytes) || sizeBytes < 1 || sizeBytes > 10485760) return { ok: false, message: 'Envie um arquivo PDF, DOC ou DOCX de até 10 MB.' };
-  const path = `signed/${contract.id}/${randomBytes(8).toString('hex')}-${originalName}`;
-  const docRows = await dbRequest('crm_contract_documents', { method: 'POST', prefer: 'return=representation', body: { contract_id: contract.id, document_type: 'signed', storage_path: path, original_name: originalName, mime_type: mimeType, size_bytes: sizeBytes, uploaded_by: actor.id } });
+  const path = `signed/${contract.id}/${kind}/${randomBytes(8).toString('hex')}-${originalName}`;
+  const docRows = await dbRequest('crm_contract_documents', { method: 'POST', prefer: 'return=representation', body: { contract_id: contract.id, document_kind: kind, document_type: 'signed', storage_path: path, original_name: originalName, mime_type: mimeType, size_bytes: sizeBytes, uploaded_by: actor.id } });
   const doc = Array.isArray(docRows) ? docRows[0] : docRows;
   const cfg = env();
   const response = await storageRequest(`object/upload/sign/crm-contracts/${storageObjectPath(path)}`, { method: 'POST', contentType: 'application/json', body: JSON.stringify({}) });
@@ -1075,24 +1600,35 @@ async function apiCreateContractUpload(token, contractId, fileInfo = {}) {
   const uploadTarget = new URL(/^https?:\/\//i.test(rawUrl) ? rawUrl : `${cfg.url}/storage/v1${rawUrl}`);
   if (response.token && !uploadTarget.searchParams.has('token')) uploadTarget.searchParams.set('token', response.token);
   const uploadUrl = uploadTarget.toString();
-  await audit(actor, 'contract.signed_upload_started', 'contract', contract.id, ['arquivo_assinado'], {}, { fileName: originalName, sizeBytes });
-  return { ok: true, documentId: doc.id, path, uploadUrl, publishableKey: cfg.publishableKey, message: 'Envio preparado.' };
+  await audit(actor, 'contract.signed_upload_started', 'contract', contract.id, ['arquivo_assinado'], {}, { documentKind: kind, fileName: originalName, sizeBytes });
+  return { ok: true, documentId: doc.id, path, kind, uploadUrl, publishableKey: cfg.publishableKey, message: 'Envio preparado.' };
 }
 
-async function apiConfirmContractSigned(token, contractId, documentId) {
+async function apiConfirmContractSigned(token, contractId, documentId, signersConfirmed) {
   const actor = await verifyActor(token); requireAdmin(actor);
   if (!isUuid(contractId) || !isUuid(documentId)) return { ok: false, message: 'Contrato ou documento inválido.' };
+  if (signersConfirmed !== true) return { ok: false, message: 'Confirme que o corretor, o SDR e o gerente assinaram o documento.' };
   const docs = await dbRequest('crm_contract_documents', { query: { select: '*', id: `eq.${documentId}`, contract_id: `eq.${contractId}`, document_type: 'eq.signed', limit: 1 } });
   const doc = Array.isArray(docs) ? docs[0] : null;
   if (!doc) return { ok: false, message: 'Documento assinado não encontrado.' };
+  const kind = normalizeContractDocumentKind(doc.document_kind || 'agreement');
   const objectInfo = await storageRequest(`object/info/crm-contracts/${storageObjectPath(doc.storage_path)}`);
   if (!objectInfo) return { ok: false, message: 'O arquivo ainda não chegou ao armazenamento. Tente novamente.' };
   const contracts = await dbRequest('crm_contracts', { query: { select: '*', id: `eq.${contractId}`, limit: 1 } });
   const contract = Array.isArray(contracts) ? contracts[0] : null;
   if (!contract) return { ok: false, message: 'Contrato não encontrado.' };
-  await dbRequest('crm_contracts', { method: 'PATCH', query: { id: `eq.${contractId}` }, prefer: 'return=minimal', body: { status: 'Assinado', signed_at: now(), signed_uploaded_by: actor.id, updated_at: now(), updated_by: actor.id } });
-  await audit(actor, 'contract.signed', 'contract', contractId, ['status','signed_at'], { status: contract.status }, { status: 'Assinado', documentName: doc.original_name });
-  return { ok: true, message: 'Documento assinado registrado. Ele agora aparece para o corretor e o SDR vinculados.' };
+  if (contract.status === 'Cancelado') return { ok: false, message: 'Não é possível confirmar assinatura de um contrato cancelado.' };
+  if (doc.signature_confirmed_at) return { ok: true, message: 'A assinatura deste documento já estava confirmada.' };
+  const stamp = now();
+  await dbRequest('crm_contract_documents', { method: 'PATCH', query: { id: `eq.${documentId}` }, prefer: 'return=minimal', body: { signature_confirmed_at: stamp, signature_confirmed_by: actor.id } });
+  if (kind === 'agreement') {
+    await dbRequest('crm_contracts', { method: 'PATCH', query: { id: `eq.${contractId}` }, prefer: 'return=minimal', body: { status: 'Assinado', signed_at: stamp, signed_uploaded_by: actor.id, updated_at: stamp, updated_by: actor.id } });
+  }
+  const action = kind === 'agreement' ? 'contract.signed' : 'contract.debt_confession.signed';
+  const beforeValues = kind === 'agreement' ? { status: contract.status } : { documentSignatureConfirmed: false };
+  const afterValues = kind === 'agreement' ? { status: 'Assinado', documentKind: kind, documentName: doc.original_name, allThreeSignersConfirmed: true } : { documentSignatureConfirmed: true, documentKind: kind, documentName: doc.original_name, allThreeSignersConfirmed: true };
+  await audit(actor, action, 'contract', contractId, kind === 'agreement' ? ['status','signed_at','signatures'] : ['confissao_assinada','signatures'], beforeValues, afterValues);
+  return { ok: true, kind, message: `${kind === 'agreement' ? 'Contrato/termo' : 'Confissão de dívida'} assinado confirmado. ${kind === 'agreement' ? 'O documento assinado fica disponível ao corretor e ao SDR vinculados.' : 'A confissão ficará disponível aos participantes depois que o contrato principal também estiver confirmado como assinado.'}` };
 }
 
 async function apiGetContractDocument(token, documentId) {
@@ -1104,7 +1640,7 @@ async function apiGetContractDocument(token, documentId) {
   const rows = await dbRequest('crm_contracts', { query: { select: 'id,status,broker_id,sdr_id', id: `eq.${doc.contract_id}`, limit: 1 } });
   const contract = Array.isArray(rows) ? rows[0] : null;
   if (!contract) throw new HttpError(404, 'Documento não encontrado.');
-  const allowed = isAdmin(actor) || (contract.status === 'Assinado' && doc.document_type === 'signed' && ((actor.role === 'Corretor' && contract.broker_id === actor.id) || (actor.role === 'SDR' && contract.sdr_id === actor.id)));
+  const allowed = isAdmin(actor) || (contract.status === 'Assinado' && doc.document_type === 'signed' && Boolean(doc.signature_confirmed_at) && ((actor.role === 'Corretor' && contract.broker_id === actor.id) || (actor.role === 'SDR' && contract.sdr_id === actor.id)));
   if (!allowed) throw new HttpError(403, 'Este documento só fica disponível aos perfis autorizados após a assinatura.');
   return { downloadUrl: await signedContractDownload(doc.storage_path, doc.original_name), expiresInSeconds: 90 };
 }
@@ -1308,7 +1844,7 @@ async function apiRestoreUser(token, userId) {
 async function apiSaveUser(token, payload) {
   const actor = await verifyActor(token); requireAdmin(actor);
   payload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
-  const allowed = ['id', 'name', 'email', 'role', 'active'];
+  const allowed = ['id', 'name', 'email', 'role', 'active', 'operationsAccess'];
   if (Object.keys(payload).some((key) => !allowed.includes(key))) return { ok: false, message: 'A solicitação contém campos não permitidos.' };
   if (Object.prototype.hasOwnProperty.call(payload, 'active') && typeof payload.active !== 'boolean') return { ok: false, message: 'Estado do usuário inválido.' };
   const name = String(payload.name || '').trim(); const email = normalizeEmail(payload.email); const role = String(payload.role || '').trim();
@@ -1322,6 +1858,21 @@ async function apiSaveUser(token, payload) {
   if (existing && existing.deleted_at) return { ok: false, message: 'Restaure o usuário antes de editar seus dados.' };
   if (rows.some((item) => item.id !== userId && normalizeEmail(item.email) === email)) return { ok: false, message: 'Este e-mail já está cadastrado.' };
   if (existing && existing.id === actor.id && (!active || role !== actor.role)) return { ok: false, message: 'Você não pode desativar ou rebaixar sua própria conta.' };
+  const defaultOperationsAccess = role === 'Corretor' ? 'broker' : role === 'SDR' ? 'sdr' : CrmDomain.isAdmin({ role, active }) ? 'viewer' : 'none';
+  const priorAccess = existing && ['none','broker','sdr','viewer','manager'].includes(existing.operations_access) ? existing.operations_access : '';
+  let operationsAccess = String(Object.prototype.hasOwnProperty.call(payload, 'operationsAccess') ? payload.operationsAccess : priorAccess || defaultOperationsAccess);
+  if (role === 'Corretor') operationsAccess = 'broker';
+  else if (role === 'SDR') operationsAccess = 'sdr';
+  else {
+    if (['broker','sdr'].includes(operationsAccess)) operationsAccess = 'viewer';
+    if (!['none','viewer','manager'].includes(operationsAccess)) return { ok: false, message: 'Acesso operacional inválido para este perfil.' };
+  }
+  if (isConfiguredOperationsManager({ id: userId, role, active })) operationsAccess = 'manager';
+  if (operationsAccess === 'manager' && !isConfiguredOperationsManager({ id: userId, role, active })) {
+    return { ok: false, message: 'A gestão operacional está reservada às contas designadas pela empresa e configuradas no ambiente seguro do CRM.' };
+  }
+  if (actor.role !== 'Administrador' && existing && Object.prototype.hasOwnProperty.call(payload, 'operationsAccess') && operationsAccess !== priorAccess) return { ok: false, message: 'Somente o perfil Administrador pode alterar o acesso operacional.' };
+  if (operationsAccess === 'manager' && actor.role !== 'Administrador' && (!existing || priorAccess !== 'manager')) return { ok: false, message: 'Somente o perfil Administrador pode conceder gestão do módulo operacional.' };
   const adminsAfter = rows.filter((item) => item.id !== userId && item.active && !item.deleted_at && CrmDomain.isAdmin(mapUser(item))).length + (active && CrmDomain.isAdmin({ role, active }) ? 1 : 0);
   if (adminsAfter < 1) return { ok: false, message: 'É necessário manter ao menos um administrador ativo.' };
   const stamp = now();
@@ -1332,23 +1883,23 @@ async function apiSaveUser(token, payload) {
     if (!user || !user.id) throw new HttpError(502, 'Não foi possível criar o acesso do usuário.');
     let inserted;
     try {
-      inserted = await dbRequest('crm_users', { method: 'POST', prefer: 'return=representation', body: { id: user.id, name, email, role, active, must_change_password: true, session_version: 0, created_at: stamp, updated_at: stamp } });
+      inserted = await dbRequest('crm_users', { method: 'POST', prefer: 'return=representation', body: { id: user.id, name, email, role, operations_access: operationsAccess, active, must_change_password: true, session_version: 0, created_at: stamp, updated_at: stamp } });
     } catch (error) {
       await authRequest(`admin/users/${encodeURIComponent(user.id)}`, { method: 'DELETE', admin: true }).catch(() => null);
       throw error;
     }
-    const afterValues = { name, email, role, active };
+    const afterValues = { name, email, role, active, operationsAccess };
     await audit(actor, 'user.create', 'user', user.id, auditChangedFields({}, afterValues), {}, afterValues);
     return { ok: true, user: publicUser(Array.isArray(inserted) ? inserted[0] : null), message: 'Usuário cadastrado. Use “Gerar senha” para definir a senha temporária de acesso.' };
   }
-  const old = mapUser(existing); const beforeValues = { name: old.name, email: old.email, role: old.role, active: old.active };
-  const afterValues = { name, email, role, active };
+  const old = mapUser(existing); const beforeValues = { name: old.name, email: old.email, role: old.role, active: old.active, operationsAccess: old.operationsAccess };
+  const afterValues = { name, email, role, active, operationsAccess };
   const changedFields = auditChangedFields(beforeValues, afterValues);
   if (!changedFields.length) return { ok: true, user: publicUser(existing), message: 'Nenhuma alteração detectada.' };
-  const changed = old.email !== email || old.role !== role || old.active !== active;
+  const changed = old.email !== email || old.role !== role || old.active !== active || old.operationsAccess !== operationsAccess;
   const sessionVersion = Number(old.sessionVersion || 0) + (changed ? 1 : 0);
   if (old.email !== email || changed || old.name !== name) await updateAuthProfile(existing.id, { email: old.email !== email ? email : undefined, name, sessionVersion });
-  const updated = await dbRequest('crm_users', { method: 'PATCH', query: { id: `eq.${existing.id}` }, prefer: 'return=representation', body: { name, email, role, active, session_version: sessionVersion, updated_at: stamp } });
+  const updated = await dbRequest('crm_users', { method: 'PATCH', query: { id: `eq.${existing.id}` }, prefer: 'return=representation', body: { name, email, role, operations_access: operationsAccess, active, session_version: sessionVersion, updated_at: stamp } });
   await audit(actor, 'user.update', 'user', existing.id, changedFields, beforeValues, afterValues);
   return { ok: true, user: publicUser(Array.isArray(updated) ? updated[0] : null), message: 'Usuário atualizado.' };
 }
@@ -1368,6 +1919,7 @@ async function apiResetUserPassword(token, userId) {
 
 async function apiApplySharedTemporaryPassword(token, password) {
   const actor = await verifyActor(token); requireAdmin(actor);
+  if (!isSharedTemporaryPasswordOperator(actor)) throw new HttpError(403, 'Somente o operador técnico configurado pode aplicar a senha inicial compartilhada.');
   password = String(password || '');
   if (password.length < 12 || password.length > 128) return { ok: false, message: 'A senha inicial deve ter de 12 a 128 caracteres.' };
   let matchingAdminSession = null;
@@ -1408,7 +1960,9 @@ const api = {
   apiListContracts, apiListContractLeads, apiSaveContract, apiGenerateContract, apiGetContractTemplate, apiSaveContractTemplate,
   apiCreateContractUpload, apiConfirmContractSigned, apiGetContractDocument,
   apiResetUserPassword, apiApplySharedTemporaryPassword,
-  apiListDevelopments, apiSaveDevelopment, apiPreviewLeadImport, apiImportLeads, apiExportLeads, apiExportReport, apiSaveFollowupDays
+  apiListDevelopments, apiSaveDevelopment, apiPreviewLeadImport, apiImportLeads, apiExportLeads, apiExportReport, apiSaveFollowupDays,
+  apiGetOperationsDashboard, apiListProduction, apiSaveProduction, apiArchiveProduction,
+  apiListOperationGoals, apiSaveOperationGoal, apiListAttendance, apiSetAttendance, apiExportOperationsReport
 };
 
 export default async (request) => {

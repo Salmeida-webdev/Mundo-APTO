@@ -33,7 +33,7 @@ function setupServer() {
   ];
   const users = [
     makeUser('U000','Administrador de Implantação','admin@example.test','Administrador',starterPassword),
-    makeUser('U001','Paulo Gerente','gerente@example.test','Gerente',starterPassword),
+    makeUser('U001','Gestor Comercial','gerente@example.test','Gerente',starterPassword),
     makeUser('U004','Luis SDR','sdr@example.test','SDR',starterPassword),
     makeUser('U005','Gabriel Corretor','gabriel@example.test','Corretor',starterPassword),
     makeUser('U006','Adriana Corretora','adriana@example.test','Corretor',starterPassword)

@@ -12,8 +12,8 @@ test('identidade visual está presente na entrada, na navegação e no cabeçalh
   assert.equal((index.match(/class="brand-logo brand-logo-login"/g) || []).length, 2);
   assert.equal((index.match(/class="brand-logo brand-logo-sidebar"/g) || []).length, 1);
   assert.equal((index.match(/class="brand-logo brand-logo-header"/g) || []).length, 1);
-  assert.match(styles, /--orange:#EE7A00/);
-  assert.match(styles, /--orange-dark:#B85A00/);
+  assert.match(styles, /--orange:#93651D/);
+  assert.match(styles, /--orange-dark:#76502A/);
 });
 
 test('há regras distintas para tablet, mobile e telas estreitas', () => {
@@ -62,7 +62,7 @@ test('alertas do SDR aparecem no topo do dashboard com destaque e sem envio exte
   assert.match(client,/não são enviados por e-mail ou WhatsApp/);
   assert.match(client,/A regra de 24 horas inclui fins de semana/);
   assert.match(styles,/\.sdr-alert-callout-urgent\{background:linear-gradient\(110deg,#FFF1F2,#FFF7ED\);border-color:#FCA5A5/);
-  assert.match(styles,/\.sdr-worklist-panel\{margin:0 0 18px;border:2px solid #F3B567/);
+  assert.match(styles,/\.sdr-worklist-panel\{margin:0 0 18px;border:2px solid #D6AD62/);
 });
 
 test('sincronização ao vivo mantém polling de segurança e informa o estado da conexão', () => {
@@ -79,4 +79,31 @@ test('histórico de recebimentos permite anulação justificada sem apagar o lan
   assert.match(client,/apiVoidSaleReceipt/);
   assert.match(client,/O recebimento ficará marcado como anulado e será preservado no histórico e na auditoria/);
   assert.match(client,/voidReason/);
+});
+
+test('módulo Sharks está integrado ao mesmo CRM, com filtros diário/semanal/mensal e visão semanal de frequência', () => {
+  assert.match(client,/value: 'day'/);
+  assert.match(client,/value: 'week'/);
+  assert.match(client,/value: 'month'/);
+  assert.match(client,/Resumo semanal/);
+  assert.match(client,/Semana anterior/);
+  assert.match(client,/Próxima semana/);
+  assert.match(client,/apiSetAttendance/);
+  assert.match(client,/campos|Frequência do dia selecionado/i);
+  assert.match(styles,/\.ops-week-navigation/);
+  assert.match(styles,/\.ops-freshness/);
+});
+
+test('corretor tem acesso rápido aos próprios lançamentos e pode cancelar com trilha preservada', () => {
+  assert.match(client,/Meus lançamentos recentes/);
+  assert.match(client,/recentOwnEntries/);
+  assert.match(client,/Cancelar/);
+  assert.match(client,/apiArchiveProduction/);
+  assert.match(client,/preservado no histórico administrativo/);
+});
+
+test('auditoria informa e-mail do autor e tela administrativa de senha respeita operador autorizado', () => {
+  assert.match(client,/Autor: '\+\(item\.actorEmail/);
+  assert.match(client,/state\.user\.canApplySharedTemporaryPassword/);
+  assert.match(client,/user\.canManageOperations/);
 });

@@ -8,8 +8,8 @@
     <div id="toast-region" class="toast-region" aria-live="polite"></div>
     <main id="login-view" class="login-shell">
       <section id="login-card" class="login-card">
-        <img class="brand-logo brand-logo-login" src="__MUNDO_APTO_LOGO_DATA_URI__" alt="Mundo Apto">
-        <p class="eyebrow">MUNDO APTO · GESTÃO COMERCIAL</p>
+        <img class="brand-logo brand-logo-login" src="__SHARKS_FENIX_LOGO_DATA_URI__" alt="Sharks Fênix — Diretoria Fênix e Mundo Apto">
+        <p class="eyebrow">DIRETORIA FÊNIX · MUNDO APTO</p>
         <h1><?= systemName ?></h1>
         <p class="muted">Entre com seu e-mail cadastrado para acessar sua área.</p>
         <form id="login-form" class="stack">
@@ -22,10 +22,10 @@
           <p id="login-error" class="form-error" role="alert"></p>
           <button id="login-submit" class="button button-primary button-wide" type="submit">Entrar no sistema</button>
         </form>
-        <p class="login-footnote">Acesso individual. Se ainda não recebeu uma senha, solicite à gestão.</p>
+        <p class="login-footnote">Acesso individual à plataforma integrada. Se ainda não recebeu uma senha, solicite à gestão.</p>
       </section>
       <section id="bootstrap-card" class="login-card hidden">
-        <img class="brand-logo brand-logo-login" src="__MUNDO_APTO_LOGO_DATA_URI__" alt="Mundo Apto">
+        <img class="brand-logo brand-logo-login" src="__SHARKS_FENIX_LOGO_DATA_URI__" alt="Sharks Fênix — Diretoria Fênix e Mundo Apto">
         <p class="eyebrow">CONFIGURAÇÃO INICIAL</p>
         <h1>Ativar acesso administrador</h1>
         <p class="muted">Crie a conta administrativa do CRM. Use o mesmo e-mail e, se desejar manter a senha, a mesma senha que já utiliza.</p>
@@ -39,25 +39,35 @@
         </form>
         <p class="login-footnote">A configuração fica disponível apenas enquanto o banco estiver sem usuários e será encerrada automaticamente após a criação do administrador.</p>
       </section>
-      <div class="login-aside"><span class="aside-orb"></span><span class="aside-orb aside-orb-small"></span><div><p class="eyebrow">PIPELINE EM FOCO</p><h2>Atendimento organizado.<br>Decisões mais claras.</h2><p>Clientes, acompanhamentos e resultados em um só painel.</p></div></div>
+      <div class="login-aside"><div class="login-aside-content"><img class="brand-logo brand-logo-hero" src="__SHARKS_FENIX_LOGO_DATA_URI__" alt=""><div><p class="eyebrow">PLATAFORMA COMERCIAL INTEGRADA</p><h2>Relacionamento e operação em um só lugar.</h2><p>Clientes, produção, metas, frequência, vendas e repasses com acesso conforme cada função.</p></div></div></div>
     </main>
 
     <div id="app-view" class="app-shell hidden">
       <aside class="sidebar">
         <div class="sidebar-brand">
-          <div class="brand-logo-wrap"><img class="brand-logo brand-logo-sidebar" src="__MUNDO_APTO_LOGO_DATA_URI__" alt="Mundo Apto"></div>
-          <small>CRM Comercial</small>
+          <div class="brand-logo-wrap"><img class="brand-logo brand-logo-sidebar" src="__SHARKS_FENIX_LOGO_DATA_URI__" alt=""></div>
+          <div><strong>Sharks Fênix</strong><small>Plataforma Comercial</small></div>
         </div>
         <nav id="main-nav" class="main-nav" aria-label="Navegação principal">
+          <p class="nav-group-label">Visão geral</p>
           <button class="nav-item active" data-page="dashboard"><span class="nav-icon">▦</span>Visão geral</button>
+          <p class="nav-group-label">Relacionamento</p>
           <button class="nav-item" data-page="leads"><span class="nav-icon">◎</span>Clientes</button>
           <button class="nav-item hidden" data-page="newLeads" id="new-leads-nav"><span class="nav-icon">✦</span>Novos cadastros <span id="new-leads-badge" class="nav-badge hidden"></span></button>
           <button class="nav-item hidden" data-page="sdrAlerts" id="sdr-alerts-nav"><span class="nav-icon">⚑</span>Alertas SDR <span id="sdr-alert-badge" class="nav-badge hidden"></span></button>
           <button class="nav-item" data-page="followups"><span class="nav-icon">◷</span>Follow-ups <span id="stale-badge" class="nav-badge hidden"></span></button>
-          <button class="nav-item hidden" data-page="users" id="users-nav"><span class="nav-icon">♙</span>Equipe</button>
-          <button class="nav-item hidden" data-page="developments" id="developments-nav"><span class="nav-icon">⌂</span>Empreendimentos</button>
+          <p class="nav-group-label hidden" id="sales-docs-nav">Vendas e documentos</p>
           <button class="nav-item hidden" data-page="sales" id="sales-nav"><span class="nav-icon">▤</span>Vendas e repasses</button>
           <button class="nav-item hidden" data-page="contracts" id="contracts-nav"><span class="nav-icon">▧</span>Contratos</button>
+          <p class="nav-group-label operations-nav hidden">Produção &amp; frequência</p>
+          <button class="nav-item operations-nav hidden" data-page="operationsDashboard" id="operations-dashboard-nav"><span class="nav-icon">◈</span>Resultados</button>
+          <button class="nav-item operations-nav hidden" data-page="production" id="production-nav"><span class="nav-icon">↗</span>Lançamentos</button>
+          <button class="nav-item operations-nav hidden" data-page="goals" id="goals-nav"><span class="nav-icon">◎</span>Metas</button>
+          <button class="nav-item operations-nav hidden" data-page="attendance" id="attendance-nav"><span class="nav-icon">◷</span>Plantões</button>
+          <button class="nav-item operations-nav hidden" data-page="operationsReports" id="operations-reports-nav"><span class="nav-icon">▤</span>Relatórios</button>
+          <p class="nav-group-label admin-nav hidden">Administração</p>
+          <button class="nav-item hidden" data-page="users" id="users-nav"><span class="nav-icon">♙</span>Equipe</button>
+          <button class="nav-item hidden" data-page="developments" id="developments-nav"><span class="nav-icon">⌂</span>Empreendimentos</button>
           <button class="nav-item hidden" data-page="audit" id="audit-nav"><span class="nav-icon">◉</span>Auditoria</button>
         </nav>
         <div class="sidebar-bottom"><span id="sync-dot" class="live-dot sync-dot-connecting"></span><span id="sync-label" role="status">Atualização automática ativa</span></div>
@@ -66,8 +76,9 @@
       <section class="workspace">
         <header class="topbar">
           <div class="topbar-heading">
-            <img class="brand-logo brand-logo-header" src="__MUNDO_APTO_LOGO_DATA_URI__" alt="Mundo Apto">
-            <div><p id="page-kicker" class="eyebrow">PAINEL COMERCIAL</p><h1 id="page-title">Visão geral</h1></div>
+            <button id="menu-toggle" class="button button-quiet mobile-menu-toggle" type="button" aria-label="Abrir menu" aria-expanded="false">☰</button>
+            <img class="brand-logo brand-logo-header" src="__SHARKS_FENIX_LOGO_DATA_URI__" alt="Sharks Fênix">
+            <div><p id="page-kicker" class="eyebrow">PLATAFORMA COMERCIAL</p><h1 id="page-title">Visão geral</h1></div>
           </div>
           <div class="topbar-actions"><button id="refresh-button" class="button button-quiet" type="button">↻ <span>Atualizar</span></button><div class="user-menu"><div class="avatar" id="user-avatar">MA</div><div><strong id="user-name"></strong><small id="user-role"></small></div><button id="change-password-button" class="button button-quiet button-logout" type="button">Senha</button><button id="logout-button" class="button button-quiet button-logout" type="button">Sair</button></div></div>
         </header>
@@ -85,6 +96,7 @@
 
         <main id="content-area" class="content-area" tabindex="-1"></main>
       </section>
+      <button id="nav-scrim" class="nav-scrim hidden" type="button" aria-label="Fechar menu"></button>
     </div>
 
     <dialog id="lead-dialog" class="modal"><form method="dialog" class="modal-dismiss"><button aria-label="Fechar" class="icon-button">×</button></form><div id="lead-dialog-content"></div></dialog>

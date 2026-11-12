@@ -5,8 +5,8 @@ const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const styles = read('apps-script/Styles.html').replace(/^\s*<style>/, '').replace(/<\/style>\s*$/, '');
 const client = read('apps-script/Client.html');
-const logo = fs.readFileSync(path.join(root, 'apps-script/assets/mundo-apto-logo.jpg')).toString('base64');
-const systemName = 'CRM Comercial — Mundo Apto';
+const logo = fs.readFileSync(path.join(root, 'apps-script/assets/sharks-fenix-logo.jpeg')).toString('base64');
+const systemName = JSON.parse(read('config/seed-data.json')).systemName;
 
 let html = read('apps-script/Index.html');
 html = html
@@ -14,8 +14,8 @@ html = html
   .replace('<?!= include_(\'Styles\'); ?>', `<style>${styles}</style>`)
   .replace('<?!= include_(\'Client\'); ?>', client)
   .replace('<?= systemName ?>', systemName)
-  .replaceAll('__MUNDO_APTO_LOGO_DATA_URI__', `data:image/jpeg;base64,${logo}`)
-  .replace('<meta charset="utf-8">', `<meta charset="utf-8"><meta name="theme-color" content="#EE7A00"><meta name="description" content="CRM comercial da equipe Mundo Apto"><title>${systemName}</title>`);
+  .replaceAll('__SHARKS_FENIX_LOGO_DATA_URI__', `data:image/jpeg;base64,${logo}`)
+  .replace('<meta charset="utf-8">', `<meta charset="utf-8"><meta name="theme-color" content="#171613"><meta name="description" content="Plataforma integrada de relacionamento, produção e gestão comercial da Diretoria Fênix"><title>${systemName}</title>`);
 
 if (html.includes('<?') || html.includes('__MUNDO_APTO_LOGO_DATA_URI__')) {
   throw new Error('O HTML ainda contém marcações não resolvidas.');

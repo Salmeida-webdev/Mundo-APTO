@@ -1,7 +1,7 @@
 <script>
 (() => {
   'use strict';
-  const state = { token: '', refreshToken: '', user: null, refs: null, page: 'dashboard', pageNumber: 1, lastDashboard: null, pollId: null, queryTimer: null, realtimeClient: null, realtimeChannel: null, realtimeTimer: null };
+  const state = { token: '', refreshToken: '', user: null, refs: null, page: 'dashboard', pageNumber: 1, lastDashboard: null, pollId: null, queryTimer: null, realtimeClient: null, realtimeChannel: null, realtimeTimer: null, operationsPeriod: 'week', operationsBrokerId: '', operationsDateFrom: '', operationsDateTo: '', operationsQuery: '', operationsAttendanceDay: '' };
   const byId = (id) => document.getElementById(id);
   const ADMIN_ROLES = ['Administrador', 'Gerente', 'Coordenador', 'Assistente'];
   const ROLE_LIST = ['Administrador', 'Gerente', 'Coordenador', 'Assistente', 'SDR', 'Corretor'];
@@ -128,6 +128,16 @@
 
   function isAdmin() { return Boolean(state.user && ADMIN_ROLES.includes(state.user.role)); }
   function isManagerOrSdr() { return Boolean(state.user && (isAdmin() || state.user.role === 'SDR')); }
+  function operationsAccess() {
+    if (!state.user) return 'none';
+    if (state.user.operationsAccess) return state.user.operationsAccess;
+    if (state.user.role === 'Corretor') return 'broker';
+    if (state.user.role === 'SDR') return 'sdr';
+    return isAdmin() ? 'viewer' : 'none';
+  }
+  function canReadOperations() { return ['broker','sdr','viewer','manager'].includes(operationsAccess()); }
+  function canManageOperations() { return operationsAccess() === 'manager'; }
+  function isOperationsTeamReader() { return ['sdr','viewer','manager'].includes(operationsAccess()); }
   function escapeDisplay(value) { return String(value === undefined || value === null || value === '' ? '—' : value); }
 
   async function handleFailure(error) {
@@ -206,9 +216,15 @@
     byId('developments-nav').classList.toggle('hidden', !isAdmin());
     byId('sales-nav').classList.toggle('hidden', !isAdmin());
     byId('audit-nav').classList.toggle('hidden', !isAdmin());
-    byId('contracts-nav').classList.toggle('hidden', !(isAdmin() || ['Corretor','SDR'].includes(state.user.role)));
+    const canSeeContracts = isAdmin() || ['Corretor','SDR'].includes(state.user.role);
+    byId('contracts-nav').classList.toggle('hidden', !canSeeContracts);
+    byId('sales-docs-nav').classList.toggle('hidden', !canSeeContracts);
     byId('new-leads-nav').classList.toggle('hidden', !(isAdmin() || state.user.role === 'SDR'));
     byId('sdr-alerts-nav').classList.toggle('hidden', state.user.role !== 'SDR');
+    document.querySelectorAll('.operations-nav').forEach((item) => item.classList.toggle('hidden', !canReadOperations()));
+    document.querySelectorAll('.admin-nav').forEach((item) => item.classList.toggle('hidden', !isAdmin()));
+    byId('menu-toggle').onclick = () => setMobileMenu(true);
+    byId('nav-scrim').onclick = () => setMobileMenu(false);
     byId('broker-filter-wrap').classList.toggle('hidden', !isManagerOrSdr());
     fillFilters();
     bindNavigation();
@@ -267,6 +283,7 @@
     byId('main-nav').querySelectorAll('[data-page]').forEach((item) => {
       item.onclick = () => {
         if (item.classList.contains('hidden')) return;
+        setMobileMenu(false);
         state.page = item.dataset.page;
         state.pageNumber = 1;
         setActiveNav(state.page);
@@ -275,16 +292,28 @@
     });
   }
 
+  function setMobileMenu(open) {
+    const sidebar = document.querySelector('.sidebar');
+    const toggle = byId('menu-toggle');
+    const scrim = byId('nav-scrim');
+    if (!sidebar || !toggle || !scrim) return;
+    sidebar.classList.toggle('is-open', Boolean(open));
+    scrim.classList.toggle('hidden', !open);
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    toggle.setAttribute('aria-label', open ? 'Fechar menu' : 'Abrir menu');
+    document.body.classList.toggle('menu-open', Boolean(open));
+  }
+
   function setActiveNav(page) {
     byId('main-nav').querySelectorAll('[data-page]').forEach((item) => item.classList.toggle('active', item.dataset.page === page));
-    const titles = { dashboard: ['PAINEL COMERCIAL', 'Visão geral'], leads: ['CARTEIRA COMERCIAL', 'Clientes'], newLeads: ['TRIAGEM COMERCIAL', 'Novos cadastros'], sdrAlerts: ['ACOMPANHAMENTO SDR', 'Alertas SDR'], archivedLeads: ['ADMINISTRAÇÃO', 'Clientes excluídos'], followups: ['ACOMPANHAMENTO', 'Follow-ups'], users: ['ADMINISTRAÇÃO', 'Equipe'], archivedUsers: ['ADMINISTRAÇÃO', 'Usuários excluídos'], developments: ['CONFIGURAÇÃO COMERCIAL', 'Empreendimentos'], sales: ['CONTROLE FINANCEIRO', 'Vendas e repasses'], contracts: ['DOCUMENTOS COMERCIAIS', 'Contratos'], audit: ['ADMINISTRAÇÃO', 'Histórico de alterações'] };
+    const titles = { dashboard: ['PLATAFORMA COMERCIAL', 'Visão geral'], leads: ['RELACIONAMENTO', 'Clientes'], newLeads: ['RELACIONAMENTO', 'Novos cadastros'], sdrAlerts: ['RELACIONAMENTO', 'Alertas SDR'], archivedLeads: ['ADMINISTRAÇÃO', 'Clientes excluídos'], followups: ['RELACIONAMENTO', 'Follow-ups'], users: ['ADMINISTRAÇÃO', 'Equipe'], archivedUsers: ['ADMINISTRAÇÃO', 'Usuários excluídos'], developments: ['ADMINISTRAÇÃO', 'Empreendimentos'], sales: ['VENDAS & REPASSES', 'Vendas e repasses'], contracts: ['VENDAS & DOCUMENTOS', 'Contratos'], operationsDashboard: ['PRODUÇÃO & FREQUÊNCIA', 'Resultados da equipe'], production: ['PRODUÇÃO & FREQUÊNCIA', 'Lançamentos'], goals: ['PRODUÇÃO & FREQUÊNCIA', 'Metas'], attendance: ['PRODUÇÃO & FREQUÊNCIA', 'Plantões'], operationsReports: ['PRODUÇÃO & FREQUÊNCIA', 'Relatórios'], audit: ['ADMINISTRAÇÃO', 'Histórico de alterações'] };
     const current = titles[page] || titles.dashboard;
     const navPage = page === 'archivedLeads' ? 'leads' : page === 'archivedUsers' ? 'users' : page;
     byId('page-kicker').textContent = current[0];
     byId('page-title').textContent = current[1];
     byId('main-nav').querySelectorAll('[data-page]').forEach((item) => item.classList.toggle('active', item.dataset.page === navPage));
     const filters = byId('filters-panel');
-    filters.classList.toggle('hidden', ['users','archivedUsers','developments','sales','contracts','audit'].includes(page));
+    filters.classList.toggle('hidden', ['users','archivedUsers','developments','sales','contracts','audit','operationsDashboard','production','goals','attendance','operationsReports'].includes(page));
     filters.classList.toggle('dashboard-mode', page === 'dashboard');
     if (page === 'dashboard') { byId('filter-query').value = ''; byId('filter-status').value = ''; }
   }
@@ -293,6 +322,11 @@
     if (!state.token) return;
     if (!silent) showLoading('Atualizando ' + (state.page === 'dashboard' ? 'indicadores' : 'dados') + '…');
     if (state.page === 'dashboard') await renderDashboard();
+    else if (state.page === 'operationsDashboard') await renderOperationsDashboard();
+    else if (state.page === 'production') await renderProduction();
+    else if (state.page === 'goals') await renderOperationGoals();
+    else if (state.page === 'attendance') await renderAttendance();
+    else if (state.page === 'operationsReports') await renderOperationsReports();
     else if (state.page === 'leads') await renderLeads(false);
     else if (state.page === 'newLeads') await renderLeads(false, 'new');
     else if (state.page === 'sdrAlerts') await renderSdrAlertsPage();
@@ -314,8 +348,308 @@
     return card;
   }
 
+  const OPERATION_METRICS = [
+    { id: 'prospections', label: 'Prospecções', color: '#93651D' },
+    { id: 'interactions', label: 'Interações', color: '#76502A' },
+    { id: 'appointments', label: 'Agendamentos', color: '#A98647' },
+    { id: 'visits', label: 'Visitas', color: '#B9944D' },
+    { id: 'sales', label: 'Vendas (quantidade)', color: '#25231F' }
+  ];
+  const OPERATION_SHIFTS = [
+    { id: 'morning', label: 'Manhã' }, { id: 'afternoon', label: 'Tarde' }, { id: 'night', label: 'Noite' }
+  ];
+  function operationFilters() {
+    return { period: state.operationsPeriod || 'week', brokerId: state.operationsBrokerId || '', dateFrom: state.operationsDateFrom || '', dateTo: state.operationsDateTo || '' };
+  }
+  function operationFilterBar(onChange) {
+    const bar = el('div', 'ops-filterbar');
+    const period = makeSelect([{ label: 'Hoje', value: 'day' }, { label: 'Semana atual', value: 'week' }, { label: 'Mês atual', value: 'month' }], state.operationsPeriod || 'week');
+    period.setAttribute('aria-label', 'Período operacional');
+    const periodWrap = el('label', 'filter-field'); periodWrap.append(el('span', '', 'Período'), period); bar.appendChild(periodWrap);
+    if (isOperationsTeamReader()) {
+      const broker = makeSelect([{ label: 'Toda a equipe', value: '' }, ...state.refs.brokers.map((item) => ({ label: item.name, value: item.id }))], state.operationsBrokerId || '');
+      broker.setAttribute('aria-label', 'Filtrar por corretor');
+      const brokerWrap = el('label', 'filter-field'); brokerWrap.append(el('span', '', 'Corretor'), broker); bar.appendChild(brokerWrap);
+      broker.onchange = () => { state.operationsBrokerId = broker.value; onChange(); };
+    }
+    const from = document.createElement('input'); from.type = 'date'; from.value = state.operationsDateFrom || ''; from.max = todayBrazil(); from.setAttribute('aria-label', 'Data inicial');
+    const fromWrap = el('label', 'filter-field'); fromWrap.append(el('span', '', 'De'), from); bar.appendChild(fromWrap);
+    const to = document.createElement('input'); to.type = 'date'; to.value = state.operationsDateTo || ''; to.max = todayBrazil(); to.setAttribute('aria-label', 'Data final');
+    const toWrap = el('label', 'filter-field'); toWrap.append(el('span', '', 'Até'), to); bar.appendChild(toWrap);
+    const applyCustom = () => { state.operationsDateFrom = from.value; state.operationsDateTo = to.value; onChange(); };
+    from.onchange = applyCustom; to.onchange = applyCustom;
+    period.onchange = () => { state.operationsPeriod = period.value; state.operationsDateFrom = ''; state.operationsDateTo = ''; onChange(); };
+    const hint = el('span', 'ops-filter-hint', 'Dia: hoje · semana: segunda a domingo · mês: do primeiro ao último dia.'); bar.appendChild(hint);
+    return bar;
+  }
+  function operationsHeader(title, description, actions) {
+    const head = el('div', 'page-heading ops-page-header'); const copy = el('div');
+    copy.append(el('h2', '', title), el('p', '', description)); head.appendChild(copy);
+    if (actions) head.appendChild(actions);
+    return head;
+  }
+  function operationsTable(headers, rows, minWidth) {
+    const wrapper = el('div', 'ops-table-wrap'); const table = el('table', 'ops-table');
+    if (minWidth) table.style.minWidth = minWidth;
+    const thead = el('thead'); const headRow = el('tr'); headers.forEach((header) => headRow.appendChild(el('th', header.numeric ? 'numeric' : '', header.label || header)));
+    thead.appendChild(headRow); table.appendChild(thead); const body = el('tbody');
+    if (!rows.length) { const row = el('tr'); const cell = el('td', 'ops-empty', 'Nenhum registro encontrado neste período.'); cell.colSpan = headers.length; row.appendChild(cell); body.appendChild(row); }
+    else rows.forEach((values) => { const row = el('tr'); values.forEach((value, index) => { const cell = el('td', headers[index] && headers[index].numeric ? 'numeric' : ''); if (value instanceof Node) cell.appendChild(value); else cell.textContent = String(value === undefined || value === null ? '—' : value); row.appendChild(cell); }); body.appendChild(row); });
+    table.appendChild(body); wrapper.appendChild(table); return wrapper;
+  }
+  function operationComparisonText(item) {
+    if (!item || item.previous === 0) return 'Sem base anterior para comparar';
+    const sign = item.difference > 0 ? '+' : '';
+    const percent = item.changePct === null ? '' : ' (' + (item.changePct > 0 ? '+' : '') + item.changePct + '%)';
+    return sign + item.difference + ' vs. período anterior' + percent;
+  }
+  function formatDateOnly(value) { return String(value || '').split('-').reverse().join('/') || '—'; }
+  function operationsPage(onChange) {
+    const page = el('div', 'ops-page');
+    page.appendChild(operationFilterBar(onChange));
+    return page;
+  }
+
+  async function renderOperationsDashboard() {
+    if (!canReadOperations()) { state.page = 'dashboard'; setActiveNav('dashboard'); return renderDashboard(); }
+    const data = await callApi('apiGetOperationsDashboard', state.token, operationFilters());
+    const area = byId('content-area'); area.replaceChildren();
+    const page = operationsPage(() => renderOperationsDashboard().catch(handleFailure));
+    page.prepend(operationsHeader('Resultados da equipe', 'Produção, metas e frequências em painéis próprios. Estes números não representam quantidade de leads nem valores financeiros.'));
+    const freshness = el('div', 'ops-freshness');
+    freshness.append(el('strong', '', 'Última atualização'), el('span', '', data.latestUpdatedAt ? formatDate(data.latestUpdatedAt) : 'Sem lançamentos registrados'));
+    freshness.setAttribute('aria-live', 'polite');
+    page.appendChild(freshness);
+    const cards = el('section', 'ops-kpi-grid');
+    OPERATION_METRICS.forEach((metric) => cards.appendChild(kpi(metric.label, data.totals[metric.id], operationComparisonText(data.comparison[metric.id]), metric.color)));
+    cards.appendChild(kpi('Frequências em plantões', data.attendanceByShift.total, operationComparisonText(data.comparison.attendance), '#76502A'));
+    page.appendChild(cards);
+
+    const dailyPanel = el('section', 'panel');
+    const dailyHead = el('div', 'panel-header'); const dailyTitle = el('div');
+    dailyTitle.append(el('h3', '', 'Evolução diária da produção'), el('p', '', 'Prospecções, visitas e vendas em quantidade no período selecionado.'));
+    dailyHead.append(dailyTitle, el('span', 'panel-chip', data.period.label)); dailyPanel.appendChild(dailyHead);
+    const chartScroll = el('div', 'ops-chart-scroll'); const chart = el('div', 'ops-chart');
+    const maxima = { prospections: 1, visits: 1, sales: 1 };
+    data.daily.forEach((day) => { maxima.prospections = Math.max(maxima.prospections, day.prospections); maxima.visits = Math.max(maxima.visits, day.visits); maxima.sales = Math.max(maxima.sales, day.sales); });
+    data.daily.forEach((day) => {
+      const column = el('div', 'ops-chart-column'); const track = el('div', 'ops-chart-track');
+      [['prospections','prospections'],['visits','visits'],['sales','sales']].forEach(([key, className]) => {
+        const bar = el('span', 'ops-chart-bar ' + className); const value = Number(day[key] || 0);
+        bar.style.height = Math.max(2, Math.round(value / maxima[key] * 132)) + 'px'; bar.title = key + ': ' + value + ' em ' + formatDateOnly(day.date); track.appendChild(bar);
+      });
+      column.append(track, el('span', 'ops-chart-value', String(day.prospections + day.visits + day.sales)), el('span', 'ops-chart-date', day.date.slice(8,10) + '/' + day.date.slice(5,7)));
+      chart.appendChild(column);
+    });
+    chartScroll.appendChild(chart); dailyPanel.appendChild(chartScroll);
+    const legend = el('div', 'ops-legend'); [['Prospecções','ops-legend-prospections'],['Visitas','ops-legend-visits'],['Vendas','ops-legend-sales']].forEach(([label, cls]) => { const item = el('span', 'ops-legend-item'); item.append(el('i', cls), el('span', '', label)); legend.appendChild(item); });
+    dailyPanel.appendChild(legend); page.appendChild(dailyPanel);
+
+    const goalPanel = el('section', 'panel'); const goalHead = el('div', 'panel-header'); const goalTitle = el('div');
+    goalTitle.append(el('h3', '', 'Progresso das metas'), el('p', '', 'Metas configuradas por corretor para prospecções, visitas e vendas.'));
+    goalHead.append(goalTitle, el('span', 'panel-chip', data.period.goalCycle === 'monthly' ? 'Mensal' : 'Semanal')); goalPanel.appendChild(goalHead);
+    const goalRows = [];
+    data.goals.forEach((broker) => ['prospections','visits','sales'].forEach((metricId) => {
+      const metric = OPERATION_METRICS.find((item) => item.id === metricId); const item = broker.metrics[metricId];
+      let progress = 'Meta não configurada';
+      if (item.target !== null) { const pct = item.percent === null ? 0 : item.percent; progress = item.actual + ' / ' + item.target + ' · ' + pct + '% · ' + (item.remaining ? 'faltam ' + item.remaining : item.exceeded ? 'superada em ' + item.exceeded : 'concluída'); }
+      goalRows.push([broker.brokerName, metric.label, progress, item.revision ? 'v' + item.revision : '—']);
+    }));
+    goalPanel.appendChild(operationsTable([{label:'Corretor'},{label:'Indicador'},{label:'Realizado / meta'},{label:'Versão'}], goalRows, '650px'));
+    page.appendChild(goalPanel);
+
+    const shiftPanel = el('section', 'panel'); const shiftHead = el('div', 'panel-header'); const shiftTitle = el('div');
+    shiftTitle.append(el('h3', '', 'Frequência dos plantões'), el('p', '', 'Cada presença em manhã, tarde ou noite conta como uma frequência.'));
+    shiftHead.append(shiftTitle, el('span', 'panel-chip', 'Sem controle de jornada')); shiftPanel.appendChild(shiftHead);
+    const shifts = el('div', 'ops-shift-grid'); OPERATION_SHIFTS.forEach((shift) => shifts.appendChild(el('div', 'ops-shift-card', '')));
+    OPERATION_SHIFTS.forEach((shift, index) => { const card = shifts.children[index]; card.replaceChildren(el('span', '', shift.label), el('strong', '', String(data.attendanceByShift[shift.id] || 0)), el('small', '', 'presenças no período')); });
+    shifts.appendChild((() => { const card = el('div','ops-shift-card'); card.append(el('span','','Total'),el('strong','',String(data.attendanceByShift.total)),el('small','','frequências')); return card; })());
+    shiftPanel.appendChild(shifts); page.appendChild(shiftPanel);
+
+    const rankPanel = el('section', 'panel'); const rankHead = el('div', 'panel-header'); const rankTitle = el('div');
+    rankTitle.append(el('h3', '', 'Produção por corretor'), el('p', '', 'Contagens acumuladas do período, sem somar valores monetários.'));
+    rankHead.append(rankTitle, el('span', 'panel-chip', data.byBroker.length + ' corretores')); rankPanel.appendChild(rankHead);
+    const rankRows = data.byBroker.map((row) => [row.name + (row.active ? '' : ' · inativo'), row.prospections, row.interactions, row.appointments, row.visits, row.sales, row.attendance === null ? 'Restrito' : row.attendance]);
+    rankPanel.appendChild(operationsTable([{label:'Corretor'},{label:'Prospecções',numeric:true},{label:'Interações',numeric:true},{label:'Agendamentos',numeric:true},{label:'Visitas',numeric:true},{label:'Vendas',numeric:true},{label:'Frequências',numeric:true}], rankRows, '850px'));
+    page.appendChild(rankPanel);
+
+    if (operationsAccess() === 'broker') {
+      const recentPanel = el('section', 'panel');
+      const recentHead = el('div', 'panel-header'); const recentTitle = el('div');
+      recentTitle.append(el('h3', '', 'Meus lançamentos recentes'), el('p', '', 'Acesso rápido às suas últimas informações, inclusive as datas anteriores.'));
+      recentHead.append(recentTitle, button('Ver todos', 'button-small', () => navigateOperation('production')));
+      recentPanel.appendChild(recentHead);
+      const recentRows = (data.recentOwnEntries || []).map((row) => [
+        formatDateOnly(row.workDate), row.prospections, row.interactions, row.appointments, row.visits, row.sales,
+        row.notes || '—', formatDate(row.updatedAt)
+      ]);
+      recentPanel.appendChild(operationsTable([{label:'Data'},{label:'Prospecções',numeric:true},{label:'Interações',numeric:true},{label:'Agendamentos',numeric:true},{label:'Visitas',numeric:true},{label:'Vendas',numeric:true},{label:'Observações'},{label:'Última alteração'}], recentRows, '900px'));
+      page.appendChild(recentPanel);
+    }
+
+    const actions = el('div', 'ops-actions');
+    actions.append(button('Lançamentos de produção','button-small',()=>navigateOperation('production')),button('Metas','button-small',()=>navigateOperation('goals')),button('Plantões','button-small',()=>navigateOperation('attendance')),button('Relatórios','button-small',()=>navigateOperation('operationsReports')));
+    page.appendChild(actions); area.appendChild(page);
+  }
+
+  function navigateOperation(page) { state.page = page; state.pageNumber = 1; setActiveNav(page); refreshPage().catch(handleFailure); }
+
+  async function renderProduction() {
+    if (!canReadOperations()) { state.page = 'dashboard'; setActiveNav('dashboard'); return renderDashboard(); }
+    const filters = operationFilters(); const rows = await callApi('apiListProduction', state.token, filters);
+    const area = byId('content-area'); area.replaceChildren(); const actions = el('div','ops-actions');
+    if (canManageOperations() || operationsAccess() === 'broker') actions.appendChild(button('+ Novo lançamento','button-primary',()=>openProductionDialog(null)));
+    const page = operationsPage(() => renderProduction().catch(handleFailure));
+    page.prepend(operationsHeader('Lançamentos de produção', 'Cada lançamento é individual e pode ser feito mais de uma vez no mesmo dia. Corretores editam apenas os próprios registros; contas de gestão designadas podem corrigir os registros da equipe.', actions));
+    page.appendChild(el('div','ops-note','Os dados informam quantidade de atividades: prospecções, interações, agendamentos, visitas e vendas. Alterações ficam registradas no histórico administrativo do CRM.'));
+    const toolbar=el('div','ops-toolbar');const search=document.createElement('input');search.type='search';search.value=state.operationsQuery||'';search.placeholder='Buscar corretor ou observação';search.setAttribute('aria-label','Buscar lançamentos por corretor ou observação');search.className='ops-search';toolbar.append(search,el('p','','A busca inclui corretor, observações e data.'));page.appendChild(toolbar);
+    const query=(state.operationsQuery||'').trim().toLocaleLowerCase('pt-BR');const visibleRows=rows.filter((row)=>!query||[row.brokerName,row.notes,row.workDate].some((value)=>String(value||'').toLocaleLowerCase('pt-BR').includes(query)));
+    search.oninput=()=>{state.operationsQuery=search.value;window.clearTimeout(state.operationsSearchTimer);state.operationsSearchTimer=window.setTimeout(()=>renderProduction().catch(handleFailure),250);};
+    const values = visibleRows.map((row) => {
+      const actionsCell = el('div','ops-actions');
+      if (canManageOperations() || (operationsAccess() === 'broker' && String(row.brokerId) === String(state.user.id))) {
+        actionsCell.appendChild(button('Editar','button-small',()=>openProductionDialog(row)));
+        actionsCell.appendChild(button('Cancelar','button-small button-danger',()=>archiveProduction(row)));
+      }
+      return [formatDateOnly(row.workDate), row.brokerName, row.prospections, row.interactions, row.appointments, row.visits, row.sales, formatDate(row.updatedAt), actionsCell.children.length ? actionsCell : 'Somente leitura'];
+    });
+    page.appendChild(operationsTable([{label:'Data'},{label:'Corretor'},{label:'Prospecções',numeric:true},{label:'Interações',numeric:true},{label:'Agendamentos',numeric:true},{label:'Visitas',numeric:true},{label:'Vendas',numeric:true},{label:'Última alteração'},{label:'Ação'}], values, '980px'));
+    area.appendChild(page);
+  }
+
+  function openProductionDialog(entry) {
+    if (!(canManageOperations() || operationsAccess() === 'broker')) return;
+    const dialog = byId('admin-dialog'); const content = byId('admin-dialog-content'); content.replaceChildren();
+    const box = el('div','modal-content'); box.append(el('h2','',entry?'Editar lançamento':'Novo lançamento de produção'),el('p','muted','É permitido registrar vários lançamentos na mesma data. Cada alteração será auditada.'));
+    const form = document.createElement('form'); const grid = el('div','form-grid');
+    const brokerSelect = makeSelect(state.refs.brokers.map((item)=>({label:item.name,value:item.id})), entry ? entry.brokerId : operationsAccess()==='broker' ? state.user.id : '');
+    if (operationsAccess()==='broker') { brokerSelect.value=state.user.id; brokerSelect.disabled=true; }
+    addField(grid,'Corretor responsável',brokerSelect,true);
+    const date = document.createElement('input'); date.type='date'; date.required=true; date.max=todayBrazil(); date.value=entry?entry.workDate:todayBrazil(); addField(grid,'Data do lançamento',date,true);
+    const controls = {};
+    [['prospections','Prospecções'],['interactions','Interações'],['appointments','Agendamentos'],['visits','Visitas'],['sales','Vendas (quantidade)']].forEach(([key,label])=>{const input=document.createElement('input');input.type='number';input.min='0';input.max='1000000';input.step='1';input.required=true;input.value=entry?String(entry[key]||0):'0';controls[key]=input;addField(grid,label,input);});
+    const notes=document.createElement('textarea');notes.maxLength=1500;notes.rows=3;notes.value=entry?entry.notes||'':'';addField(grid,'Observações (opcional)',notes,true);
+    form.appendChild(grid);const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary',entry?'Salvar alterações':'Registrar lançamento');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const payload={id:entry?entry.id:'',brokerId:entry?entry.brokerId:brokerSelect.value,workDate:date.value,notes:notes.value};Object.entries(controls).forEach(([key,input])=>payload[key]=input.value);const result=await callApi('apiSaveProduction',state.token,payload);if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar.');dialog.close();toast(result.message,'success');await renderProduction();}catch(err){error.textContent=err.message||'Não foi possível salvar.';}finally{save.disabled=false;}});
+    dialog.showModal();
+  }
+
+  async function archiveProduction(entry) {
+    if (!(canManageOperations() || (operationsAccess() === 'broker' && String(entry.brokerId) === String(state.user.id)))) return;
+    if (!window.confirm('Cancelar este lançamento de produção? Ele sairá dos totais, mas ficará preservado no histórico administrativo.')) return;
+    try {
+      const result = await callApi('apiArchiveProduction', state.token, entry.id);
+      if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível cancelar o lançamento.');
+      toast(result.message, 'success');
+      await renderProduction();
+    } catch (error) { handleFailure(error); }
+  }
+
+  async function renderOperationGoals() {
+    if (!canReadOperations()) { state.page='dashboard';setActiveNav('dashboard');return renderDashboard(); }
+    const filters=operationFilters();filters.cycle=state.operationsGoalCycle||'';
+    const goals=await callApi('apiListOperationGoals',state.token,filters);
+    const area=byId('content-area');area.replaceChildren();const actions=el('div','ops-actions');
+    const cycle=makeSelect([{label:'Todos os ciclos',value:''},{label:'Semanal',value:'weekly'},{label:'Mensal',value:'monthly'}],state.operationsGoalCycle||'');cycle.setAttribute('aria-label','Filtrar metas por ciclo');cycle.onchange=()=>{state.operationsGoalCycle=cycle.value;renderOperationGoals().catch(handleFailure);};
+    actions.appendChild(cycle);if(canManageOperations())actions.appendChild(button('+ Configurar meta','button-primary',()=>openOperationGoalDialog()));
+    const page=operationsPage(()=>renderOperationGoals().catch(handleFailure));page.prepend(operationsHeader('Metas de produção','Metas individuais configuradas para prospecções, visitas e vendas, por semana (segunda a domingo) ou mês calendário.',actions));
+    page.appendChild(el('div','ops-note','Ajustar uma meta cria uma nova versão e mantém as versões anteriores para consulta e auditoria.'));
+    const values=goals.map((goal)=>[goal.brokerName,goal.metric==='prospections'?'Prospecções':goal.metric==='visits'?'Visitas':'Vendas',goal.cycle==='weekly'?'Semanal':'Mensal',formatDateOnly(goal.startsOn)+' – '+formatDateOnly(goal.endsOn),goal.target,'v'+goal.revision,goal.isCurrent?'Atual':'Histórico']);
+    page.appendChild(operationsTable([{label:'Corretor'},{label:'Indicador'},{label:'Ciclo'},{label:'Período'},{label:'Meta',numeric:true},{label:'Versão'},{label:'Situação'}],values,'820px'));area.appendChild(page);
+  }
+
+  function openOperationGoalDialog() {
+    if(!canManageOperations())return;const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();
+    const box=el('div','modal-content');box.append(el('h2','','Configurar meta de produção'),el('p','muted','Se já existir uma meta para o corretor, indicador e período, será criada uma revisão preservando a anterior.'));
+    const form=document.createElement('form');const grid=el('div','form-grid');const broker=makeSelect(state.refs.brokers.map((item)=>({label:item.name,value:item.id})),'');addField(grid,'Corretor',broker,true);
+    const metric=makeSelect([{label:'Prospecções',value:'prospections'},{label:'Visitas',value:'visits'},{label:'Vendas (quantidade)',value:'sales'}],'prospections');addField(grid,'Indicador',metric);
+    const cycle=makeSelect([{label:'Semanal (segunda a domingo)',value:'weekly'},{label:'Mensal (mês calendário)',value:'monthly'}],'weekly');addField(grid,'Ciclo',cycle);
+    const reference=document.createElement('input');reference.type='date';reference.required=true;reference.value=todayBrazil();reference.setAttribute('aria-label','Data dentro do período da meta');addField(grid,'Data dentro do período',reference);
+    const target=document.createElement('input');target.type='number';target.min='1';target.max='1000000';target.step='1';target.required=true;target.setAttribute('aria-label','Meta total do período');addField(grid,'Quantidade alvo',target);
+    form.appendChild(grid);const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar meta');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveOperationGoal',state.token,{brokerId:broker.value,metric:metric.value,cycle:cycle.value,referenceDate:reference.value,target:target.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar.');dialog.close();toast(result.message,'success');await renderOperationGoals();}catch(err){error.textContent=err.message||'Não foi possível salvar.';}finally{save.disabled=false;}});dialog.showModal();
+  }
+
+  function shiftOperationDate(value, offset) {
+    const [year, month, day] = String(value).split('-').map(Number);
+    const date = new Date(Date.UTC(year, month - 1, day + offset));
+    return date.toISOString().slice(0, 10);
+  }
+  function mondayOfOperationWeek(value) {
+    const weekday = new Date(value + 'T00:00:00Z').getUTCDay();
+    return shiftOperationDate(value, -((weekday + 6) % 7));
+  }
+
+  async function renderAttendance() {
+    if(!canReadOperations()){state.page='dashboard';setActiveNav('dashboard');return renderDashboard();}
+    const filters=operationFilters();
+    const rows=await callApi('apiListAttendance',state.token,filters);
+    const selectedDay=state.operationsAttendanceDay&&state.operationsAttendanceDay<=todayBrazil()?state.operationsAttendanceDay:todayBrazil();
+    const weekStart=mondayOfOperationWeek(selectedDay);const weekEnd=shiftOperationDate(weekStart,6);
+    const weekRows=await callApi('apiListAttendance',state.token,{dateFrom:weekStart,dateTo:weekEnd});
+    const selectedDayRows=weekRows.filter((row)=>row.attendanceDate===selectedDay);
+    const area=byId('content-area');area.replaceChildren();
+    const page=operationsPage(()=>renderAttendance().catch(handleFailure));
+    page.prepend(operationsHeader('Frequência nos plantões','Consulte os totais por período e acompanhe a semana de segunda a domingo. Cada turno conta separadamente; este módulo não controla jornada.'));
+    const summary={morning:0,afternoon:0,night:0};rows.forEach((row)=>{if(summary[row.shift]!==undefined)summary[row.shift]+=1;});
+    const summaryCards=el('section','ops-shift-grid');OPERATION_SHIFTS.forEach((shift)=>{const card=el('div','ops-shift-card');card.append(el('span','',shift.label),el('strong','',String(summary[shift.id])),el('small','','presenças no período selecionado'));summaryCards.appendChild(card);});
+    const totalCard=el('div','ops-shift-card');totalCard.append(el('span','','Total'),el('strong','',String(rows.length)),el('small','','frequências registradas'));summaryCards.appendChild(totalCard);page.appendChild(summaryCards);
+
+    const weekPanel=el('section','panel');const weekHead=el('div','panel-header');const weekTitle=el('div');
+    weekTitle.append(el('h3','','Resumo semanal'),el('p','',formatDateOnly(weekStart)+' a '+formatDateOnly(weekEnd)+' · semana de segunda a domingo.'));
+    const weekActions=el('div','ops-week-navigation');const currentWeekStart=mondayOfOperationWeek(todayBrazil());
+    const previousWeek=button('‹ Semana anterior','button-small',()=>{state.operationsAttendanceDay=shiftOperationDate(selectedDay,-7);renderAttendance().catch(handleFailure);});
+    const nextWeek=button('Próxima semana ›','button-small',()=>{state.operationsAttendanceDay=shiftOperationDate(selectedDay,7);renderAttendance().catch(handleFailure);});
+    nextWeek.disabled=weekStart>=currentWeekStart;weekActions.append(previousWeek,nextWeek);weekHead.append(weekTitle,weekActions);weekPanel.appendChild(weekHead);
+    const totalsByDay=new Map();weekRows.forEach((row)=>{const item=totalsByDay.get(row.attendanceDate)||{morning:0,afternoon:0,night:0,total:0};item[row.shift]=(item[row.shift]||0)+1;item.total+=1;totalsByDay.set(row.attendanceDate,item);});
+    const weekdayLabels=['Domingo','Segunda','Terça','Quarta','Quinta','Sexta','Sábado'];
+    const weekValues=[];for(let date=weekStart;date<=weekEnd;date=shiftOperationDate(date,1)){const metrics=totalsByDay.get(date)||{morning:0,afternoon:0,night:0,total:0};const weekday=new Date(date+'T00:00:00Z').getUTCDay();weekValues.push([weekdayLabels[weekday]+' · '+formatDateOnly(date),metrics.morning,metrics.afternoon,metrics.night,metrics.total]);}
+    weekPanel.appendChild(operationsTable([{label:'Dia'},{label:'Manhã',numeric:true},{label:'Tarde',numeric:true},{label:'Noite',numeric:true},{label:'Total',numeric:true}],weekValues,'520px'));page.appendChild(weekPanel);
+
+    const dayPanel=el('section','panel');const dayHead=el('div','panel-header');const dayTitle=el('div');
+    dayTitle.append(el('h3','',canManageOperations()?'Conferir e lançar frequência':'Frequência do dia selecionado'),el('p','',canManageOperations()?'Contas de gestão designadas podem lançar e corrigir os registros da equipe.':'A frequência é somente para consulta no seu próprio perfil.'));
+    const dayInput=document.createElement('input');dayInput.type='date';dayInput.max=todayBrazil();dayInput.value=selectedDay;dayInput.setAttribute('aria-label','Selecionar dia da frequência');
+    const dayLabel=el('label','filter-field');dayLabel.append(el('span','','Dia'),dayInput);dayHead.append(dayTitle,dayLabel);dayPanel.appendChild(dayHead);
+    if(canManageOperations()){
+      const matrix=el('div','ops-table-wrap');const table=el('table','ops-table');table.style.minWidth='620px';const thead=el('thead');const headRow=el('tr');['Corretor','Manhã','Tarde','Noite','Total do dia'].forEach((label)=>headRow.appendChild(el('th','',label)));thead.appendChild(headRow);table.appendChild(thead);const body=el('tbody');const active=new Set(selectedDayRows.map((row)=>[row.brokerId,row.shift].join(':')));
+      state.refs.brokers.forEach((broker)=>{const row=el('tr');row.appendChild(el('td','',broker.name));let dailyTotal=0;OPERATION_SHIFTS.forEach((shift)=>{const cell=el('td','ops-attendance-cell');const present=active.has([broker.id,shift.id].join(':'));if(present)dailyTotal+=1;const toggle=button(present?'Presente':'Marcar presença','ops-attendance-toggle'+(present?' is-present':''),async()=>{toggle.disabled=true;try{const result=await callApi('apiSetAttendance',state.token,{brokerId:broker.id,attendanceDate:selectedDay,shift:shift.id,present:!present});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível atualizar.');toast(result.message,'success');await renderAttendance();}catch(err){toggle.disabled=false;handleFailure(err);}});toggle.setAttribute('aria-pressed',present?'true':'false');cell.appendChild(toggle);row.appendChild(cell);});row.appendChild(el('td','numeric',String(dailyTotal)));body.appendChild(row);});
+      table.appendChild(body);matrix.appendChild(table);dayPanel.appendChild(matrix);
+    } else {
+      const dayRows=selectedDayRows.map((row)=>[row.brokerName,OPERATION_SHIFTS.find((item)=>item.id===row.shift)?.label||row.shift,formatDate(row.updatedAt)]);
+      dayPanel.appendChild(operationsTable([{label:'Corretor'},{label:'Período'},{label:'Última alteração'}],dayRows,'520px'));
+    }
+    dayInput.onchange=()=>{if(dayInput.value&&dayInput.value<=todayBrazil()){state.operationsAttendanceDay=dayInput.value;renderAttendance().catch(handleFailure);}};
+    page.appendChild(dayPanel);
+    const historyPanel=el('section','panel');const historyHead=el('div','panel-header');const historyTitle=el('div');historyTitle.append(el('h3','','Registros no período filtrado'),el('p','',canManageOperations()?'A auditoria administrativa mantém o autor, horário e alterações.':'Você visualiza apenas os registros permitidos ao seu perfil.'));historyHead.append(historyTitle,el('span','panel-chip',rows.length+' presenças'));historyPanel.appendChild(historyHead);
+    const values=rows.map((row)=>[formatDateOnly(row.attendanceDate),row.brokerName,OPERATION_SHIFTS.find((item)=>item.id===row.shift)?.label||row.shift,formatDate(row.updatedAt)]);
+    historyPanel.appendChild(operationsTable([{label:'Data'},{label:'Corretor'},{label:'Período'},{label:'Última alteração'}],values,'620px'));page.appendChild(historyPanel);area.appendChild(page);
+  }
+
+  async function renderOperationsReports() {
+    if(!canReadOperations()){state.page='dashboard';setActiveNav('dashboard');return renderDashboard();}
+    const filters=operationFilters();const data=await callApi('apiGetOperationsDashboard',state.token,filters);const area=byId('content-area');area.replaceChildren();const actions=el('div','ops-actions');
+    if(data.canExport)actions.appendChild(button('Exportar CSV','button-primary',()=>exportOperationsReport(filters)));
+    const page=operationsPage(()=>renderOperationsReports().catch(handleFailure));page.prepend(operationsHeader('Relatórios de produção e frequência','Consolidação para consulta e comparação por semana, mês, corretor ou período personalizado.',actions));
+    const cards=el('section','ops-kpi-grid');OPERATION_METRICS.forEach((metric)=>cards.appendChild(kpi(metric.label,data.totals[metric.id],operationComparisonText(data.comparison[metric.id]),metric.color)));cards.appendChild(kpi('Frequências',data.totals.attendance,operationComparisonText(data.comparison.attendance),'#76502A'));page.appendChild(cards);
+    const rows=data.byBroker.map((item)=>[item.name,item.prospections,item.interactions,item.appointments,item.visits,item.sales,item.attendance===null?'Restrito':item.attendance,item.morning===null?'Restrito':item.morning,item.afternoon===null?'Restrito':item.afternoon,item.night===null?'Restrito':item.night]);
+    page.appendChild(operationsTable([{label:'Corretor'},{label:'Prospecções',numeric:true},{label:'Interações',numeric:true},{label:'Agendamentos',numeric:true},{label:'Visitas',numeric:true},{label:'Vendas',numeric:true},{label:'Frequência total',numeric:true},{label:'Manhã',numeric:true},{label:'Tarde',numeric:true},{label:'Noite',numeric:true}],rows,'1000px'));
+    page.appendChild(el('div','ops-note','Os relatórios contam lançamentos e frequências registrados no sistema. Os registros históricos da ferramenta anterior só poderão ser importados se forem fornecidos em arquivo ou exportação compatível.'));
+    area.appendChild(page);
+  }
+
+  async function exportOperationsReport(filters) {
+    try { const report=await callApi('apiExportOperationsReport',state.token,filters);const headers=['tipo_registro','data','corretor','prospeccoes','interacoes','agendamentos','visitas','vendas_quantidade','frequencia_total','frequencia_manha','frequencia_tarde','frequencia_noite','periodo_plantao','observacoes','ultima_atualizacao'];const values=[];report.rows.forEach((row)=>values.push(['Resumo do período',report.period.start+' a '+report.period.end,row.corretor,row.prospeccoes,row.interacoes,row.agendamentos,row.visitas,row.vendas,row.frequencia_total,row.frequencia_manha,row.frequencia_tarde,row.frequencia_noite,'','', '']));report.production.forEach((row)=>values.push(['Produção',row.date,row.broker,row.prospeccoes,row.interacoes,row.agendamentos,row.visitas,row.vendas,'','','','','',row.observacoes,row.updatedAt]));report.attendance.forEach((row)=>values.push(['Frequência',row.date,row.broker,'','','','','','','','','',row.shift,'',row.updatedAt]));downloadCsv('relatorio-operacao-'+report.period.start+'-'+report.period.end+'.csv',headers,values);toast(values.length+' linha(s) de resumo, produção e frequência exportadas para CSV.','success'); }
+    catch(error){handleFailure(error);}
+  }
+
+  function buildOperationsOverview() {
+    if(!canReadOperations())return null;
+    const panel=el('section','panel ops-overview');const head=el('div','panel-header');const title=el('div');title.append(el('h3','','Produção e frequência'),el('p','','Painel separado do funil de clientes e do financeiro.'));head.append(title,button('Abrir resultados','button-small button-primary',()=>navigateOperation('operationsDashboard')));panel.appendChild(head);
+    return callApi('apiGetOperationsDashboard',state.token,{period:byId('filter-period').value==='month'?'month':'week'}).then((data)=>{const cards=el('div','ops-mini-grid');[['Prospecções',data.totals.prospections],['Visitas',data.totals.visits],['Vendas (qtd.)',data.totals.sales],['Frequências',data.totals.attendance]].forEach(([label,value])=>cards.appendChild(kpi(label,value,'Período atual','#93651D')));panel.appendChild(cards);return panel;});
+  }
+
   async function renderDashboard() {
-    const data = await callApi('apiGetDashboard', state.token, readFilters(false));
+    const [data, operationsOverview] = await Promise.all([callApi('apiGetDashboard', state.token, readFilters(false)), canReadOperations() ? buildOperationsOverview() : Promise.resolve(null)]);
     const sdrWorklist = state.user.role === 'SDR' ? await callApi('apiGetSdrWorklist', state.token) : null;
     state.lastDashboard = data;
     byId('stale-badge').textContent = data.staleCount > 99 ? '99+' : String(data.staleCount || '');
@@ -418,6 +752,7 @@
     else stalePanel.appendChild(buildStalePreview(data.staleLeads));
     area.appendChild(stalePanel);
     area.appendChild(buildAnalyticsPanel(data.analytics));
+    if (operationsOverview) area.appendChild(operationsOverview);
   }
 
   function buildSdrAlerts(worklist) {
@@ -953,8 +1288,9 @@
 
   function exportContractsCsv(rows) {
     if (!isAdmin()) return;
-    const headers = ['numero_contrato','numero_proposta_pasta','cliente','empreendimento','unidade_torre','corretor','sdr','gerente','valor_venda','base_calculo_comissao','percentual_comissao','comissao_bruta','comissao_corretor','comissao_sdr','premio_aplicavel','percentual_premio','premio_bruto','premio_corretor','premio_sdr','status','documentos_disponiveis','gerado_em','assinado_em'];
-    const values = rows.map((item) => [item.contractNumber,item.proposalNumber,item.buyerName,item.developmentName,item.unit,item.brokerName,item.sdrName,item.managerName,item.unitValue,item.commissionBase,item.commissionRatePct===null?'':item.commissionRatePct,item.grossCommission,item.brokerCommission,item.sdrCommission,item.hasPrize?'Sim':'Não',item.prizeRatePct===null?'':item.prizeRatePct,item.grossPrize,item.brokerPrize,item.sdrPrize,item.status,(item.documents||[]).map((doc)=>doc.name).join(' | '),item.generatedAt,item.signedAt]);
+    const statusFor=(item,kind)=>{const docs=item.documents||[];if(docs.some((doc)=>doc.kind===kind&&doc.type==='signed'&&doc.signatureConfirmedAt))return 'Assinado';if(docs.some((doc)=>doc.kind===kind&&doc.type==='generated'))return 'Gerado para assinatura';return 'Não gerado';};
+    const headers = ['numero_contrato','numero_processo','numero_venda','lead_crm_id','numero_proposta_pasta','cliente','empreendimento','unidade_torre','corretor','sdr','gerente','valor_venda','base_calculo_comissao','percentual_comissao','comissao_bruta','comissao_corretor','comissao_sdr','premio_aplicavel','percentual_premio','premio_bruto','premio_corretor','premio_sdr','status_contrato','status_confissao','documentos_disponiveis','gerado_em','contrato_assinado_em'];
+    const values = rows.map((item) => [item.contractNumber,item.processNumber,item.saleInternalNumber,item.leadId,item.proposalNumber,item.buyerName,item.developmentName,item.unit,item.brokerName,item.sdrName,item.managerName,item.unitValue,item.commissionBase,item.commissionRatePct===null?'':item.commissionRatePct,item.grossCommission,item.brokerCommission,item.sdrCommission,item.hasPrize?'Sim':'Não',item.prizeRatePct===null?'':item.prizeRatePct,item.grossPrize,item.brokerPrize,item.sdrPrize,statusFor(item,'agreement'),statusFor(item,'debt_confession'),(item.documents||[]).map((doc)=>`${doc.kind==='debt_confession'?'confissao':'contrato'}:${doc.type}:${doc.name}`).join(' | '),item.generatedAt,item.signedAt]);
     downloadCsv('contratos-mundo-apto-'+new Date().toISOString().slice(0,10)+'.csv',headers,values);
     toast(rows.length+' contrato(s) exportado(s).','success');
   }
@@ -1079,13 +1415,13 @@
     const headingActions = el('div', 'row-actions');
     headingActions.appendChild(button('Usuários excluídos', 'button-small', () => { state.page = 'archivedUsers'; state.pageNumber = 1; setActiveNav(state.page); refreshPage().catch(handleFailure); }));
     headingActions.appendChild(button('+ Adicionar usuário', 'button-primary', () => openUserDialog(null)));
-    if (state.refs.sharedTemporaryPasswordAvailable) headingActions.appendChild(button('Senha inicial da equipe', 'button-small', openSharedTemporaryPasswordDialog));
+    if (state.user.canApplySharedTemporaryPassword && state.refs.sharedTemporaryPasswordAvailable) headingActions.appendChild(button('Senha inicial da equipe', 'button-small', openSharedTemporaryPasswordDialog));
     heading.append(title, headingActions); area.appendChild(heading);
-    const panel = el('section', 'table-panel'); const scroll = el('div', 'table-scroll'); const table = el('table', 'data-table'); table.style.minWidth = '720px';
-    const thead = el('thead'); const trHead = el('tr'); ['Nome', 'E-mail', 'Perfil', 'Acesso', 'Ações'].forEach((label) => trHead.appendChild(el('th', '', label))); thead.appendChild(trHead); table.appendChild(thead);
+    const panel = el('section', 'table-panel'); const scroll = el('div', 'table-scroll'); const table = el('table', 'data-table'); table.style.minWidth = '900px';
+    const thead = el('thead'); const trHead = el('tr'); ['Nome', 'E-mail', 'Perfil CRM', 'Acesso operacional', 'Situação', 'Ações'].forEach((label) => trHead.appendChild(el('th', '', label))); thead.appendChild(trHead); table.appendChild(thead);
     const tbody = el('tbody');
     users.forEach((user) => {
-      const tr = el('tr'); tr.append(el('td', '', user.name), el('td', '', user.email), el('td', '', user.role), el('td', '', user.active ? 'Ativo' : 'Desativado'));
+      const tr = el('tr'); tr.append(el('td', '', user.name), el('td', '', user.email), el('td', '', user.role), el('td', '', operationsAccessLabel(user.operationsAccess)), el('td', '', user.active ? 'Ativo' : 'Desativado'));
       const actions = el('td'); const actionWrap = el('div', 'row-actions');
       actionWrap.appendChild(button('Editar', 'button-small', () => openUserDialog(user)));
       if (user.active && String(user.id) !== String(state.user.id)) actionWrap.appendChild(button('Gerar senha', 'button-small', () => resetPassword(user)));
@@ -1093,6 +1429,10 @@
       actions.appendChild(actionWrap); tr.appendChild(actions); tbody.appendChild(tr);
     });
     table.appendChild(tbody); scroll.appendChild(table); panel.appendChild(scroll); area.appendChild(panel);
+  }
+
+  function operationsAccessLabel(access) {
+    return ({ broker:'Corretor: próprios lançamentos e frequência', sdr:'Consulta da equipe', viewer:'Consulta da equipe', manager:'Gestão operacional', none:'Sem acesso operacional' })[access] || 'Sem acesso operacional';
   }
 
   async function renderArchivedUsers() {
@@ -1179,16 +1519,35 @@
     const name = document.createElement('input'); name.required = true; name.maxLength = 150; name.value = user ? user.name : '';
     const email = document.createElement('input'); email.type = 'email'; email.required = true; email.value = user ? user.email : '';
     const role = makeSelect(ROLE_LIST.map((value) => ({label:value,value})), user ? user.role : 'Corretor');
+    const operationsPermission = makeSelect([], '');
+    const accessHint = el('small','ops-access-hint','Corretores e SDR recebem as permissões próprias de seu perfil. A gestão de produção, metas e frequências é concedida apenas às contas operacionais designadas.');
     const active = document.createElement('input'); active.type = 'checkbox'; active.checked = user ? user.active : true;
     const activeLabel = el('label', 'checkbox-row'); activeLabel.append(active, el('span', '', 'Usuário ativo'));
-    addField(grid, 'Nome completo', name); addField(grid, 'E-mail de acesso', email); addField(grid, 'Perfil', role); grid.appendChild(activeLabel);
+    addField(grid, 'Nome completo', name); addField(grid, 'E-mail de acesso', email); addField(grid, 'Perfil CRM', role);
+    const accessField=el('label','field field-full');accessField.append(el('span','','Permissão no módulo de produção e frequência'),operationsPermission,accessHint);grid.appendChild(accessField);grid.appendChild(activeLabel);
+    const updateOperationsPermission=()=>{
+      if(role.value==='Corretor'){operationsPermission.replaceChildren(new Option('Corretor · próprios lançamentos e frequência','broker'));operationsPermission.value='broker';operationsPermission.disabled=true;accessHint.textContent='O corretor registra e edita somente os próprios lançamentos e consulta apenas a própria frequência.';}
+      else if(role.value==='SDR'){operationsPermission.replaceChildren(new Option('SDR · consulta da equipe','sdr'));operationsPermission.value='sdr';operationsPermission.disabled=true;accessHint.textContent='O SDR consulta a produção e as frequências da equipe, sem permissão para editar esses registros.';}
+      else{
+        const options=[{label:'Sem acesso ao módulo operacional',value:'none'},{label:'Consulta da equipe',value:'viewer'}];
+        if(user&&user.canManageOperations)options.push({label:'Gestão operacional (conta autorizada)',value:'manager'});
+        const preferred=user?user.operationsAccess||'viewer':'viewer';
+        operationsPermission.replaceChildren(...options.map((option)=>new Option(option.label,option.value)));
+        operationsPermission.value=options.some((option)=>option.value===preferred)?preferred:'viewer';
+        operationsPermission.disabled=Boolean(state.user.role!=='Administrador'&&user&&user.operationsAccess==='manager');
+        accessHint.textContent=state.user.role==='Administrador'?'Somente as contas operacionais designadas podem ter gestão operacional. Os demais perfis administrativos permanecem em consulta.':'Seu perfil não pode conceder gestão operacional. A permissão atual será mantida.';
+      }
+    };
+    role.onchange=updateOperationsPermission;updateOperationsPermission();
     form.appendChild(grid); const error = el('p', 'form-error'); error.setAttribute('role','alert'); form.appendChild(error);
     const actions = el('div', 'modal-actions'); actions.append(button('Cancelar', '', () => dialog.close()));
     const save = el('button', 'button button-primary', 'Salvar usuário'); save.type='submit'; actions.appendChild(save); form.appendChild(actions); box.appendChild(form); content.appendChild(box);
     form.addEventListener('submit', async (event) => {
       event.preventDefault(); error.textContent=''; save.disabled=true;
       try {
-        const result = await callApi('apiSaveUser', state.token, {id:user ? user.id : '',name:name.value,email:email.value,role:role.value,active:active.checked});
+        const payload={id:user ? user.id : '',name:name.value,email:email.value,role:role.value,active:active.checked};
+        if(state.user.role==='Administrador')payload.operationsAccess=operationsPermission.value;
+        const result = await callApi('apiSaveUser', state.token, payload);
         if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível salvar.');
         dialog.close(); toast(result.message, 'success'); await renderUsers();
       } catch (err) { error.textContent=err.message; }
@@ -1373,44 +1732,63 @@
   async function renderContracts() {
     const admin=isAdmin();const [contracts,brokerProfiles]=await Promise.all([callApi('apiListContracts',state.token),admin?callApi('apiListBrokerProfiles',state.token):Promise.resolve([])]); const area=byId('content-area');area.replaceChildren();
     const heading=el('div','page-heading');const title=el('div');
-    title.append(el('h2','','Contratos de venda'),el('p','',admin?'Rascunhos e documentos ficam restritos à gestão. Corretor e SDR só consultam o arquivo depois que a gestão registrar a assinatura.':'Você vê apenas contratos assinados vinculados à sua carteira ou atuação como SDR.'));
+    title.append(el('h2','','Contratos e documentos'),el('p','',admin?'Registre documentos a partir de uma venda manual ou lead. Contrato/termo e confissão de dívida têm geração, assinatura e arquivo próprios.':'Você vê somente documentos assinados de vendas vinculadas à sua carteira ou atuação como SDR.'));
     const actions=el('div','row-actions');
-    if(admin){actions.append(button('Exportar contratos CSV','button-small',()=>exportContractsCsv(contracts)),button('+ Novo contrato','button-primary',()=>openContractDialog(null)),button('Modelo do documento','button-small',openContractTemplateDialog),button('Cadastro dos corretores','button-small',renderBrokerProfiles));}
+    if(admin){actions.append(button('Exportar contratos CSV','button-small',()=>exportContractsCsv(contracts)),button('+ Novo contrato','button-primary',()=>openContractDialog(null)),button('Modelos dos documentos','button-small',openContractTemplateDialog),button('Cadastro dos corretores','button-small',renderBrokerProfiles));}
     heading.append(title,actions);area.appendChild(heading);
     if(admin){
       const incomplete=brokerProfiles.filter((profile)=>!profile.cpf||!profile.cnpj||!profile.creci||!profile.address).length;
       const readiness=el('section','contract-readiness '+(incomplete?'contract-readiness-pending':'contract-readiness-ready'));
-      readiness.append(el('strong','',incomplete?incomplete+' cadastro(s) de corretor incompleto(s) para geração de contrato':'Cadastros dos corretores completos'));
-      readiness.appendChild(el('p','',incomplete?'Preencha CPF, CNPJ, CRECI e endereço em “Cadastro dos corretores”. O rascunho também exige CPF do comprador e do SDR. Revise e aprove o texto do modelo com a empresa antes de gerar.':'Confira CPF do comprador e do SDR em cada rascunho e mantenha o texto do modelo aprovado pela empresa. A assinatura continua externa; depois, anexe e confirme o documento assinado no CRM.'));
+      readiness.append(el('strong','',incomplete?incomplete+' cadastro(s) de corretor incompleto(s) para geração':'Cadastros dos corretores completos'));
+      readiness.appendChild(el('p','',incomplete?'Preencha CPF, CNPJ, CRECI e endereço em “Cadastro dos corretores”. Cada documento também exige CPF do comprador e do SDR.':'Confira os CPFs e os dados do corretor antes de gerar. A assinatura é externa; a gestão anexa cada arquivo assinado e confirma as três assinaturas.'));
       area.appendChild(readiness);
     }
     const panel=el('section','table-panel');const scroll=el('div','table-scroll');const table=el('table','data-table');const thead=el('thead');const h=el('tr');
-    ['Documento','Cliente','Empreendimento / unidade','Corretor','Comissão total (50/50)','Prêmio (50/50)','Situação','Arquivos','Ações'].forEach((label)=>h.appendChild(el('th','',label)));thead.appendChild(h);table.appendChild(thead);const body=el('tbody');
-    if(!contracts.length){const tr=el('tr');const td=el('td','table-empty',admin?'Nenhum contrato cadastrado.':'Nenhum contrato assinado foi disponibilizado para você.');td.colSpan=9;tr.appendChild(td);body.appendChild(tr);}
+    ['Registro / processo','Cliente','Empreendimento / unidade','Corretor','Comissão (50/50)','Prêmio (50/50)','Contrato / termo','Confissão de dívida','Arquivos','Ações'].forEach((label)=>h.appendChild(el('th','',label)));thead.appendChild(h);table.appendChild(thead);const body=el('tbody');
+    if(!contracts.length){const tr=el('tr');const td=el('td','table-empty',admin?'Nenhum contrato cadastrado.':'Nenhum contrato assinado foi disponibilizado para você.');td.colSpan=10;tr.appendChild(td);body.appendChild(tr);}
     contracts.forEach((item)=>{
-      const tr=el('tr');tr.append(el('td','',item.contractNumber+(item.proposalNumber?'\nProposta: '+item.proposalNumber:'')),el('td','',item.buyerName),el('td','',item.developmentName+' · '+item.unit),el('td','',item.brokerName),
+      const documentState=(kind)=>{const docs=(item.documents||[]).filter((doc)=>doc.kind===kind);if(docs.some((doc)=>doc.type==='signed'&&doc.signatureConfirmedAt))return 'Assinado';if(docs.some((doc)=>doc.type==='signed'))return 'Arquivo enviado · confirmação pendente';if(docs.some((doc)=>doc.type==='generated'))return 'Gerado para assinatura';return 'Não gerado';};
+      const agreementState=documentState('agreement');const confessionState=documentState('debt_confession');
+      const tr=el('tr');tr.append(el('td','',item.contractNumber+(item.processNumber?'\nProcesso: '+item.processNumber:'')+(item.saleInternalNumber?'\nVenda: '+item.saleInternalNumber:'')),el('td','',item.buyerName),el('td','',item.developmentName+' · '+item.unit),el('td','',item.brokerName),
         el('td','',brl(item.grossCommission)+'\nCorretor '+brl(item.brokerCommission)+' · SDR '+brl(item.sdrCommission)),
-        el('td','',item.hasPrize?brl(item.grossPrize)+'\nCorretor '+brl(item.brokerPrize)+' · SDR '+brl(item.sdrPrize):'Sem prêmio'),el('td','',item.status));
-      const docs=el('td');(item.documents||[]).forEach((doc)=>docs.appendChild(button(doc.type==='signed'?'Assinado':'Gerado', 'button-small',()=>downloadContractDocument(doc))));tr.appendChild(docs);
+        el('td','',item.hasPrize?brl(item.grossPrize)+'\nCorretor '+brl(item.brokerPrize)+' · SDR '+brl(item.sdrPrize):'Sem prêmio'),el('td','',agreementState),el('td','',confessionState));
+      const docs=el('td');(item.documents||[]).forEach((doc)=>{const fileState=doc.type==='generated'?'Gerado':doc.signatureConfirmedAt?'Assinado':'Envio pendente';const label=(doc.kind==='debt_confession'?'Confissão':'Contrato')+' · '+fileState;docs.appendChild(button(label,'button-small',()=>downloadContractDocument(doc)));});tr.appendChild(docs);
       const actionsCell=el('td');const buttons=el('div','row-actions');
       if(admin){
         if(item.status==='Rascunho')buttons.append(button('Editar','button-small',()=>openContractDialog(item)));
-        if(item.status==='Rascunho'||item.status==='Gerado para assinatura')buttons.append(button('Gerar documento','button-small button-primary',()=>generateContract(item)));
-        if(item.status==='Gerado para assinatura')buttons.append(button('Anexar assinado','button-small',()=>chooseSignedContractFile(item)));
+        const agreementDocs=(item.documents||[]).filter((doc)=>doc.kind==='agreement');const confessionDocs=(item.documents||[]).filter((doc)=>doc.kind==='debt_confession');
+        const pendingAgreement=agreementDocs.find((doc)=>doc.type==='signed'&&!doc.signatureConfirmedAt);const pendingConfession=confessionDocs.find((doc)=>doc.type==='signed'&&!doc.signatureConfirmedAt);
+        if(item.status!=='Cancelado'&&item.status!=='Assinado'&&!agreementDocs.some((doc)=>doc.type==='generated')&&!pendingAgreement)buttons.append(button('Gerar contrato/termo','button-small button-primary',()=>generateContract(item,'agreement')));
+        if(item.status!=='Cancelado'&&confessionState!=='Assinado'&&!confessionDocs.some((doc)=>doc.type==='generated')&&!pendingConfession)buttons.append(button('Gerar confissão','button-small',()=>generateContract(item,'debt_confession')));
+        if(agreementState==='Gerado para assinatura')buttons.append(button('Anexar contrato assinado','button-small',()=>chooseSignedContractFile(item,'agreement')));
+        if(confessionState==='Gerado para assinatura')buttons.append(button('Anexar confissão assinada','button-small',()=>chooseSignedContractFile(item,'debt_confession')));
+        if(pendingAgreement){buttons.append(button('Confirmar contrato enviado','button-small button-primary',()=>confirmUploadedContractSignature(item,pendingAgreement)));buttons.append(button('Enviar contrato novamente','button-small',()=>chooseSignedContractFile(item,'agreement')));}
+        if(pendingConfession){buttons.append(button('Confirmar confissão enviada','button-small button-primary',()=>confirmUploadedContractSignature(item,pendingConfession)));buttons.append(button('Enviar confissão novamente','button-small',()=>chooseSignedContractFile(item,'debt_confession')));}
       }
       actionsCell.appendChild(buttons);tr.appendChild(actionsCell);body.appendChild(tr);
     });
     table.appendChild(body);scroll.appendChild(table);panel.appendChild(scroll);area.appendChild(panel);
-    if(admin){const hint=el('p','field-hint','O modelo inicial segue o termo em branco fornecido para o Mundo Apto; o exemplo preenchido serve de referência e seus dados não são reutilizados. A gestão pode revisar e ajustar o modelo aprovado. O documento é baixado para assinatura externa; a gestão anexa e confirma o arquivo assinado. O corretor e o SDR vinculados só podem consultar e baixar esse arquivo após a confirmação. A exportação CSV contém metadados do registro, sem anexar documentos.');area.appendChild(hint);}
+    if(admin){const hint=el('p','field-hint','A venda pode estar ligada a um lead ou ter sido lançada manualmente, sem cadastro na carteira do CRM. Contrato/termo e confissão são documentos independentes: gerar ou assinar um não altera o estado do outro. A gestão deve verificar as assinaturas do corretor, SDR e gerente em cada arquivo. Corretor e SDR só recebem arquivos assinados após a confirmação do contrato principal. O CSV contém metadados, não o conteúdo dos arquivos.');area.appendChild(hint);}
   }
 
   async function openContractDialog(contract) {
-    const [leads,profiles]=await Promise.all([callApi('apiListContractLeads',state.token),callApi('apiListBrokerProfiles',state.token)]);
-    const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');box.append(el('h2','',contract?'Editar rascunho de contrato':'Novo contrato'),el('p','muted','A comissão e o prêmio são informados pelo valor total; a divisão em 50% para corretor e 50% para SDR é calculada pelo sistema.'));
-    const form=el('form');const grid=el('div','form-grid');const lead=makeSelect([{label:'Selecione o cliente do CRM',value:''},...leads.map((item)=>({label:item.name+' · '+item.phone+' · '+item.brokerName,value:item.id}))],contract?contract.leadId:'');
-    const buyer=document.createElement('input');buyer.required=true;buyer.maxLength=150;buyer.value=contract?contract.buyerName:'';const cpf=document.createElement('input');cpf.maxLength=30;cpf.value=contract?contract.buyerCpf:'';const sdrCpf=document.createElement('input');sdrCpf.maxLength=30;sdrCpf.value=contract?contract.sdrCpf:'';const proposal=document.createElement('input');proposal.maxLength=100;proposal.value=contract?contract.proposalNumber:'';const address=document.createElement('textarea');address.maxLength=500;address.value=contract?contract.buyerAddress:'';
-    const development=makeSelect([{label:'Selecione o empreendimento',value:''},...state.refs.developments.map((item)=>({label:item.name,value:item.id}))],contract?contract.developmentId:'');
-    const broker=makeSelect([{label:'Selecione o corretor',value:''},...state.refs.brokers.filter((item)=>item.active).map((item)=>({label:item.name,value:item.id}))],contract?contract.brokerId:'');
+    const [leads,sales]=await Promise.all([callApi('apiListContractLeads',state.token),callApi('apiListSales',state.token)]);
+    const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');
+    box.append(el('h2','',contract?'Editar rascunho de contrato':'Novo contrato'),el('p','muted','Use uma venda já lançada em “Vendas e repasses” ou preencha os dados manualmente. A divisão de comissão e prêmio é calculada em 50% para o corretor e 50% para o SDR.'));
+    const form=el('form');const grid=el('div','form-grid');
+    const sale=makeSelect([{label:'Sem venda vinculada — preencher manualmente',value:''},...sales.map((item)=>({label:item.internalNumber+(item.processNumber?' · Processo '+item.processNumber:'')+' · '+item.buyerName+' · '+item.developmentName+' / '+item.unit,value:item.id}))],contract?contract.saleId||'':'');
+    const lead=makeSelect([{label:'Sem lead vinculado (venda externa/manual)',value:''},...leads.map((item)=>({label:item.name+' · '+item.phone+' · '+item.brokerName,value:item.id}))],contract?contract.leadId||'':'');
+    const buyer=document.createElement('input');buyer.required=true;buyer.maxLength=150;buyer.value=contract?contract.buyerName:'';
+    const cpf=document.createElement('input');cpf.maxLength=30;cpf.value=contract?contract.buyerCpf:'';
+    const sdrCpf=document.createElement('input');sdrCpf.maxLength=30;sdrCpf.value=contract?contract.sdrCpf:'';
+    const proposal=document.createElement('input');proposal.maxLength=100;proposal.value=contract?contract.proposalNumber:'';
+    const process=document.createElement('input');process.maxLength=100;process.value=contract?contract.processNumber||'':'';
+    const address=document.createElement('textarea');address.maxLength=500;address.value=contract?contract.buyerAddress:'';
+    const developmentOptions=state.refs.developments.map((item)=>({label:item.name,value:item.id}));
+    const development=makeSelect([{label:'Selecione o empreendimento',value:''},...developmentOptions],contract?contract.developmentId:'');
+    const brokerOptions=state.refs.brokers.filter((item)=>item.active).map((item)=>({label:item.name,value:item.id}));
+    if(contract&&contract.brokerId&&!brokerOptions.some((item)=>item.value===contract.brokerId))brokerOptions.push({label:contract.brokerName+' · inativo',value:contract.brokerId});
+    const broker=makeSelect([{label:'Selecione o corretor',value:''},...brokerOptions],contract?contract.brokerId:'');
     const sdr=makeSelect([{label:'Selecione o SDR',value:''},...(state.refs.sdrs||[]).map((item)=>({label:item.name,value:item.id}))],contract?contract.sdrId:'');
     const managerOptions=state.refs.managers||[];const defaultManager=contract?contract.managerId:(state.user.role==='Gerente'?state.user.id:(managerOptions[0]||{}).id||'');const manager=makeSelect([{label:'Selecione o gerente signatário',value:''},...managerOptions.map((item)=>({label:item.name,value:item.id}))],defaultManager);
     const unit=document.createElement('input');unit.required=true;unit.maxLength=100;unit.value=contract?contract.unit:'';
@@ -1421,23 +1799,38 @@
     const hasPrize=document.createElement('input');hasPrize.type='checkbox';hasPrize.checked=contract?contract.hasPrize:false;const prizeLabel=el('label','checkbox-row');prizeLabel.append(hasPrize,el('span','','Há prêmio nesta venda'));
     const prizeRate=document.createElement('input');prizeRate.type='number';prizeRate.step='0.0001';prizeRate.min='0';prizeRate.max='100';prizeRate.value=contract&&contract.prizeRatePct!==null?contract.prizeRatePct:'';
     const prize=document.createElement('input');prize.type='number';prize.step='0.01';prize.min='0.01';prize.value=contract?contract.grossPrize:'';
-    addField(grid,'Cliente vinculado',lead,true);addField(grid,'Nome do comprador',buyer);addField(grid,'CPF do comprador (obrigatório para gerar)',cpf);addField(grid,'CPF do SDR (obrigatório para gerar)',sdrCpf);addField(grid,'Endereço do comprador',address,true);
+    addField(grid,'Venda já registrada (opcional)',sale,true);addField(grid,'Lead do CRM (opcional)',lead,true);addField(grid,'Número do processo (manual, quando não houver venda vinculada)',process,true);
+    addField(grid,'Nome do comprador',buyer);addField(grid,'CPF do comprador (necessário para gerar)',cpf);addField(grid,'CPF do SDR (necessário para gerar)',sdrCpf);addField(grid,'Endereço do comprador',address,true);
     addField(grid,'Empreendimento',development);addField(grid,'Corretor responsável',broker);addField(grid,'SDR signatário',sdr);addField(grid,'Gerente signatário',manager);
-    addField(grid,'Unidade / torre',unit);addField(grid,'Valor da venda (R$)',unitValue);addField(grid,'Nº da proposta / pasta',proposal);addField(grid,'Base de cálculo da comissão (R$)',commissionBase);addField(grid,'Percentual de comissão (%)',commissionRate);addField(grid,'Comissão bruta total (R$)',commission);grid.appendChild(prizeLabel);addField(grid,'Percentual do prêmio (%)',prizeRate);addField(grid,'Prêmio bruto total (R$)',prize);
-    const splitHint=el('p','field-hint','O total bruto da comissão e do prêmio é informado pela gestão; o CRM divide cada valor em 50% para o corretor e 50% para o SDR. Base e percentuais podem ficar em branco quando não se aplicarem ao produto. O CPF do comprador e do SDR, além do CPF, CNPJ, CRECI e endereço do corretor, serão necessários para gerar o termo.');grid.appendChild(splitHint);
-    lead.addEventListener('change',()=>{const chosen=leads.find((item)=>item.id===lead.value);if(!chosen)return;buyer.value=chosen.name;development.value=chosen.developmentId;broker.value=chosen.brokerId;});
+    addField(grid,'Unidade / torre',unit);addField(grid,'Valor da unidade (R$)',unitValue);addField(grid,'Nº da proposta / pasta',proposal);addField(grid,'Base de cálculo da comissão (R$)',commissionBase);addField(grid,'Percentual de comissão (%)',commissionRate);addField(grid,'Comissão bruta total (R$)',commission);grid.appendChild(prizeLabel);addField(grid,'Percentual do prêmio (%)',prizeRate);addField(grid,'Prêmio bruto total (R$)',prize);
+    const splitHint=el('p','field-hint','Quando uma venda for selecionada, comprador, processo, empreendimento, corretor, unidade e valor da unidade vêm do registro de venda e ficam bloqueados neste formulário. Para corrigir esses dados, atualize a venda em “Vendas e repasses”. Percentuais e valores de comissão/prêmio podem variar por produto. Os documentos não são assinados digitalmente pelo CRM.');grid.appendChild(splitHint);
+    function applySaleSelection() {
+      const chosen=sales.find((item)=>item.id===sale.value);const locked=Boolean(chosen);
+      [buyer,process,unit,unitValue].forEach((input)=>{input.readOnly=locked;});
+      development.disabled=locked;broker.disabled=locked;lead.disabled=locked&&Boolean(chosen.leadId);
+      if(chosen){buyer.value=chosen.buyerName;process.value=chosen.processNumber||'';development.value=chosen.developmentId;broker.value=chosen.brokerId;unit.value=chosen.unit;unitValue.value=chosen.unitValue;lead.value=chosen.leadId||'';}
+      else if(contract&&contract.saleId){buyer.value=contract.buyerName;process.value=contract.processNumber||'';development.value=contract.developmentId;broker.value=contract.brokerId;unit.value=contract.unit;unitValue.value=contract.unitValue;lead.value=contract.leadId||'';}
+    }
+    sale.addEventListener('change',applySaleSelection);
+    lead.addEventListener('change',()=>{if(sale.value)return;const chosen=leads.find((item)=>item.id===lead.value);if(!chosen)return;buyer.value=chosen.name;development.value=chosen.developmentId;broker.value=chosen.brokerId;});
+    if(sale.value)applySaleSelection();
     form.appendChild(grid);const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar rascunho');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
-    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveContract',state.token,{id:contract?contract.id:'',leadId:lead.value,brokerId:broker.value,sdrId:sdr.value,sdrCpf:sdrCpf.value,managerId:manager.value,buyerName:buyer.value,buyerCpf:cpf.value,buyerAddress:address.value,developmentId:development.value,unit:unit.value,proposalNumber:proposal.value,unitValue:unitValue.value,commissionBase:commissionBase.value,commissionRatePct:commissionRate.value,grossCommission:commission.value,hasPrize:hasPrize.checked,prizeRatePct:prizeRate.value,grossPrize:prize.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar o contrato.');dialog.close();toast(result.message,'success');await renderContracts();}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveContract',state.token,{id:contract?contract.id:'',saleId:sale.value,leadId:lead.value,processNumber:process.value,brokerId:broker.value,sdrId:sdr.value,sdrCpf:sdrCpf.value,managerId:manager.value,buyerName:buyer.value,buyerCpf:cpf.value,buyerAddress:address.value,developmentId:development.value,unit:unit.value,proposalNumber:proposal.value,unitValue:unitValue.value,commissionBase:commissionBase.value,commissionRatePct:commissionRate.value,grossCommission:commission.value,hasPrize:hasPrize.checked,prizeRatePct:prizeRate.value,grossPrize:prize.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar o contrato.');dialog.close();toast(result.message,'success');await renderContracts();}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});
     dialog.showModal();
   }
 
   async function openContractTemplateDialog() {
-    const data=await callApi('apiGetContractTemplate',state.token);const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');
-    box.append(el('h2','','Modelo de contrato'),el('p','muted','O termo em branco enviado pela empresa já está carregado como modelo inicial. Revise e ajuste a estrutura conforme necessário, preservando as cláusulas aprovadas. Os marcadores abaixo são preenchidos a partir do CRM; a gestão deve validar o texto jurídico antes de gerar documentos.'));
-    const placeholders=el('div','contract-placeholders');placeholders.textContent=data.placeholders.join(' · ');box.appendChild(placeholders);
-    const form=el('form');const template=document.createElement('textarea');template.className='template-editor';template.maxLength=100000;template.required=true;template.value=data.template;addField(form,'Modelo HTML aprovado',template,true);
-    const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar modelo');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
-    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveContractTemplate',state.token,template.value);if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar.');dialog.close();toast(result.message,'success');}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});dialog.showModal();
+    const [agreementData,confessionData]=await Promise.all([callApi('apiGetContractTemplate',state.token,{kind:'agreement'}),callApi('apiGetContractTemplate',state.token,{kind:'debt_confession'})]);
+    const templates={agreement:agreementData,debt_confession:confessionData};
+    const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');
+    box.append(el('h2','','Modelos dos documentos'),el('p','muted','Contrato/termo de remuneração e confissão de dívida são documentos separados. Use o texto aprovado pela empresa, mantenha as cláusulas sem alterações não autorizadas e revise cada arquivo antes de gerar.'));
+    const form=el('form');const grid=el('div','form-grid');const kind=makeSelect([{label:'Contrato / termo de remuneração',value:'agreement'},{label:'Confissão de dívida',value:'debt_confession'}],'agreement');
+    const template=document.createElement('textarea');template.className='template-editor';template.maxLength=100000;template.required=true;
+    const placeholders=el('div','contract-placeholders');const status=el('p','field-hint');
+    function showTemplate(selectedKind){const item=templates[selectedKind];template.value=item.template||'';placeholders.textContent=(item.placeholders||[]).join(' · ');status.textContent=item.source==='built_in_initial'?'O contrato usa a estrutura inicial do CRM. A gestão deve conferir e salvar o modelo aprovado pela empresa antes da geração.':item.source==='not_configured'?'O modelo de confissão ainda não está configurado. Insira o conteúdo do modelo aprovado pela empresa; o CRM não cria cláusulas jurídicas.':'Modelo salvo pela gestão. Alterações futuras não modificam arquivos já gerados.';}
+    addField(grid,'Documento',kind);addField(grid,'Conteúdo HTML aprovado',template,true);form.appendChild(grid);form.appendChild(placeholders);form.appendChild(status);showTemplate(kind.value);kind.addEventListener('change',()=>showTemplate(kind.value));
+    const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar modelo selecionado');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveContractTemplate',state.token,{kind:kind.value,html:template.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar.');dialog.close();toast(result.message,'success');}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});dialog.showModal();
   }
 
   async function renderBrokerProfiles() {
@@ -1453,21 +1846,27 @@
     form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveBrokerProfile',state.token,{brokerId:profile.brokerId,cpf:cpf.value,cnpj:cnpj.value,creci:creci.value,address:address.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar.');dialog.close();toast(result.message,'success');await onSaved();}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});dialog.showModal();
   }
 
-  async function generateContract(contract) {
+  async function generateContract(contract, kind) {
     const tab=window.open('about:blank','_blank');
-    try{const result=await callApi('apiGenerateContract',state.token,contract.id);if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível gerar o documento.');if(tab)tab.location=result.downloadUrl;else window.location.href=result.downloadUrl;toast(result.message,'success');await renderContracts();}
+    try{const result=await callApi('apiGenerateContract',state.token,contract.id,kind||'agreement');if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível gerar o documento.');if(tab)tab.location=result.downloadUrl;else window.location.href=result.downloadUrl;toast(result.message,'success');await renderContracts();}
     catch(error){if(tab)tab.close();handleFailure(error);}
   }
 
-  async function chooseSignedContractFile(contract) {
+  async function chooseSignedContractFile(contract, kind) {
     const input=document.createElement('input');input.type='file';input.accept='.pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-    input.addEventListener('change',async()=>{const file=input.files&&input.files[0];if(!file)return;try{
-      const prepared=await callApi('apiCreateContractUpload',state.token,contract.id,{name:file.name,mimeType:file.type,sizeBytes:file.size});if(!prepared||prepared.ok!==true)throw new Error(prepared&&prepared.message?prepared.message:'Não foi possível preparar o envio.');
+    input.addEventListener('change',async()=>{const file=input.files&&input.files[0];if(!file)return;const documentLabel=kind==='debt_confession'?'confissão de dívida':'contrato/termo';if(!window.confirm('Antes de anexar, confirme que o '+documentLabel+' foi assinado pelo corretor, pelo SDR e pelo gerente. O CRM não valida assinaturas digitais.'))return;try{
+      const prepared=await callApi('apiCreateContractUpload',state.token,contract.id,{documentKind:kind||'agreement',name:file.name,mimeType:file.type,sizeBytes:file.size});if(!prepared||prepared.ok!==true)throw new Error(prepared&&prepared.message?prepared.message:'Não foi possível preparar o envio.');
       const upload=await fetch(prepared.uploadUrl,{method:'PUT',headers:{apikey:prepared.publishableKey,'Content-Type':file.type,'x-upsert':'false'},body:file});
       if(!upload.ok)throw new Error('O arquivo não foi enviado. Tente novamente.');
-      const confirmed=await callApi('apiConfirmContractSigned',state.token,contract.id,prepared.documentId);if(!confirmed||confirmed.ok!==true)throw new Error(confirmed&&confirmed.message?confirmed.message:'Não foi possível confirmar a assinatura.');
+      const confirmed=await callApi('apiConfirmContractSigned',state.token,contract.id,prepared.documentId,true);if(!confirmed||confirmed.ok!==true)throw new Error(confirmed&&confirmed.message?confirmed.message:'Não foi possível confirmar a assinatura.');
       toast(confirmed.message,'success');await renderContracts();
     }catch(error){handleFailure(error);}});input.click();
+  }
+
+  async function confirmUploadedContractSignature(contract, documentInfo) {
+    const label=documentInfo.kind==='debt_confession'?'confissão de dívida':'contrato/termo';
+    if(!window.confirm('Confirme que o arquivo enviado corresponde ao '+label+' e contém as assinaturas do corretor, do SDR e do gerente. O CRM verifica se o arquivo chegou ao armazenamento, mas não valida assinaturas digitais.'))return;
+    try{const result=await callApi('apiConfirmContractSigned',state.token,contract.id,documentInfo.id,true);if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível confirmar as assinaturas.');toast(result.message,'success');await renderContracts();}catch(error){handleFailure(error);}
   }
 
   async function downloadContractDocument(documentInfo) {
@@ -1476,12 +1875,17 @@
 
   async function renderAudit() {
     if(!isAdmin()){state.page='dashboard';setActiveNav('dashboard');return renderDashboard();}
-    const area=byId('content-area');area.replaceChildren();const heading=el('div','page-heading');const title=el('div');title.append(el('h2','','Histórico administrativo detalhado'),el('p','','Mostra autor, data, ação, campos alterados e valores anteriores e novos a partir da implantação desta melhoria.'));
-    const filters=el('div','row-actions');const from=document.createElement('input');from.type='date';from.setAttribute('aria-label','A partir de');const to=document.createElement('input');to.type='date';to.setAttribute('aria-label','Até');const entity=makeSelect([{label:'Todos os registros',value:''},...['lead','user','development','sale','contract','broker_profile','setting'].map((value)=>({label:value,value}))],'');
-    const apply=button('Filtrar','button-small button-primary',()=>{state.pageNumber=1;load();});filters.append(from,to,entity,apply);heading.append(title,filters);area.appendChild(heading);
-    const list=el('section','audit-list');list.appendChild(el('div','loading','Carregando histórico…'));area.appendChild(list);
-    const footer=el('div','table-toolbar');area.appendChild(footer);
-    async function load(){list.replaceChildren(el('div','loading','Carregando histórico…'));try{const result=await callApi('apiListAudit',state.token,{dateFrom:from.value,dateTo:to.value,entityType:entity.value},state.pageNumber,100);list.replaceChildren();footer.replaceChildren();if(!result||result.ok===false)throw new Error(result&&result.message?result.message:'Não foi possível carregar o histórico.');if(!result.items.length){list.appendChild(el('div','empty-state','Nenhuma alteração encontrada neste recorte.'));footer.appendChild(el('p','muted','0 alterações'));return;}result.items.forEach((item)=>{const details=document.createElement('details');details.className='audit-entry';const summary=document.createElement('summary');summary.append(el('strong','',item.actorName+' · '+item.actorRole),el('span','',formatDate(item.at)+' · '+item.action+' · '+item.entityType));details.appendChild(summary);const body=el('div','audit-values');body.append(el('div','', 'Registro: '+item.entityId),el('div','','Campos: '+(item.changedFields||'—')));const values=el('div','audit-value-grid');const before=el('div','audit-value-box');before.append(el('strong','','Antes'),el('pre','',JSON.stringify(item.beforeValues,null,2)));const after=el('div','audit-value-box');after.append(el('strong','','Depois'),el('pre','',JSON.stringify(item.afterValues,null,2)));values.append(before,after);body.appendChild(values);details.appendChild(body);list.appendChild(details);});const first=(result.page-1)*result.pageSize+1;const last=Math.min(result.total,result.page*result.pageSize);footer.appendChild(el('p','muted','Exibindo '+first+'–'+last+' de '+result.total+' alterações'));const controls=el('div','row-actions');const previous=button('Anterior','button-small',()=>{if(state.pageNumber>1){state.pageNumber-=1;load();}});const next=button('Próxima','button-small',()=>{if(state.pageNumber*result.pageSize<result.total){state.pageNumber+=1;load();}});previous.disabled=result.page<=1;next.disabled=result.page*result.pageSize>=result.total;controls.append(previous,next);footer.appendChild(controls);}catch(error){list.replaceChildren(el('div','empty-state','Não foi possível carregar o histórico.'));footer.replaceChildren();handleFailure(error);}}
+    const [activeUsers, archivedUsers] = await Promise.all([callApi('apiListUsers',state.token),callApi('apiListArchivedUsers',state.token)]);
+    const allUsers=[...activeUsers,...archivedUsers].sort((a,b)=>a.name.localeCompare(b.name,'pt-BR'));
+    const area=byId('content-area');area.replaceChildren();const heading=el('div','page-heading');const title=el('div');title.append(el('h2','','Histórico administrativo'),el('p','','Rastreia autor, data e hora, módulo, ação, campos e valores anteriores e novos. Os eventos começam a ser registrados após a implantação de cada módulo.'));
+    const filters=el('div','row-actions');const from=document.createElement('input');from.type='date';from.max=todayBrazil();from.setAttribute('aria-label','A partir de');const to=document.createElement('input');to.type='date';to.max=todayBrazil();to.setAttribute('aria-label','Até');
+    const moduleFilter=makeSelect([{label:'CRM + operação',value:''},{label:'Relacionamento, vendas e contratos',value:'crm'},{label:'Produção, metas e frequência',value:'operations'}],'');moduleFilter.setAttribute('aria-label','Módulo');
+    const entityOptions=[['','Todas as categorias'],['lead','Cliente'],['user','Usuário'],['development','Empreendimento'],['sale','Venda / repasse'],['contract','Contrato'],['broker_profile','Cadastro do corretor'],['setting','Configuração'],['operation_production','Lançamento de produção'],['operation_goal','Meta'],['operation_attendance','Frequência']];
+    const entity=makeSelect(entityOptions.map(([value,label])=>({label,value})), '');entity.setAttribute('aria-label','Tipo de registro');
+    const actor=makeSelect([{label:'Todos os autores',value:''},...allUsers.map((user)=>({label:user.name+' · '+user.role,value:user.id}))],'');actor.setAttribute('aria-label','Autor da alteração');
+    const apply=button('Filtrar','button-small button-primary',()=>{state.pageNumber=1;load();});filters.append(from,to,moduleFilter,entity,actor,apply);heading.append(title,filters);area.appendChild(heading);
+    const list=el('section','audit-list');list.appendChild(el('div','loading','Carregando histórico…'));area.appendChild(list);const footer=el('div','table-toolbar');area.appendChild(footer);
+    async function load(){list.replaceChildren(el('div','loading','Carregando histórico…'));try{const result=await callApi('apiListAudit',state.token,{dateFrom:from.value,dateTo:to.value,entityType:entity.value,module:moduleFilter.value,actorId:actor.value},state.pageNumber,100);list.replaceChildren();footer.replaceChildren();if(!result||result.ok===false)throw new Error(result&&result.message?result.message:'Não foi possível carregar o histórico.');if(!result.items.length){list.appendChild(el('div','empty-state','Nenhuma alteração encontrada neste recorte.'));footer.appendChild(el('p','muted','0 alterações'));return;}result.items.forEach((item)=>{const details=document.createElement('details');details.className='audit-entry';const summary=document.createElement('summary');summary.append(el('strong','',item.actorName+' · '+item.actorRole),el('span','',(item.module==='operations'?'Produção & frequência':'CRM')+' · '+formatDate(item.at)+' · '+item.action+' · '+(entityOptions.find(([key])=>key===item.entityType)||[item.entityType,item.entityType])[1]));details.appendChild(summary);const body=el('div','audit-values');body.append(el('div','', 'Autor: '+(item.actorEmail||'—')),el('div','', 'Registro: '+item.entityId),el('div','','Campos alterados: '+(item.changedFields||'—')));const values=el('div','audit-value-grid');const before=el('div','audit-value-box');before.append(el('strong','','Antes'),el('pre','',JSON.stringify(item.beforeValues,null,2)));const after=el('div','audit-value-box');after.append(el('strong','','Depois'),el('pre','',JSON.stringify(item.afterValues,null,2)));values.append(before,after);body.appendChild(values);details.appendChild(body);list.appendChild(details);});const first=(result.page-1)*result.pageSize+1;const last=Math.min(result.total,result.page*result.pageSize);footer.appendChild(el('p','muted','Exibindo '+first+'–'+last+' de '+result.total+' alterações'));const controls=el('div','row-actions');const previous=button('Anterior','button-small',()=>{if(state.pageNumber>1){state.pageNumber-=1;load();}});const next=button('Próxima','button-small',()=>{if(state.pageNumber*result.pageSize<result.total){state.pageNumber+=1;load();}});previous.disabled=result.page<=1;next.disabled=result.page*result.pageSize>=result.total;controls.append(previous,next);footer.appendChild(controls);}catch(error){list.replaceChildren(el('div','empty-state','Não foi possível carregar o histórico.'));footer.replaceChildren();handleFailure(error);}}
     await load();
   }
 

@@ -22,5 +22,6 @@ test('dados comerciais detalhados não são publicados; papéis, paleta e os dez
   ]);
   assert.ok(config.statuses.every((item) => /^#[0-9A-F]{6}$/i.test(item.color)));
   assert.deepEqual(config.roles, ['Administrador','Gerente','Coordenador','Assistente','SDR','Corretor']);
-  assert.equal(config.identity.primary, '#EE7A00');
+  assert.equal(config.identity.primary, '#93651D');
+  assert.equal(config.identity.primaryDark, '#76502A');
 });
