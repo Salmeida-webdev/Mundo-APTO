@@ -146,6 +146,11 @@
     byId('user-avatar').textContent = state.user.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
     byId('users-nav').classList.toggle('hidden', !isAdmin());
     byId('developments-nav').classList.toggle('hidden', !isAdmin());
+    byId('sales-nav').classList.toggle('hidden', !isAdmin());
+    byId('audit-nav').classList.toggle('hidden', !isAdmin());
+    byId('contracts-nav').classList.toggle('hidden', !(isAdmin() || ['Corretor','SDR'].includes(state.user.role)));
+    byId('new-leads-nav').classList.toggle('hidden', !(isAdmin() || state.user.role === 'SDR'));
+    byId('sdr-alerts-nav').classList.toggle('hidden', state.user.role !== 'SDR');
     byId('broker-filter-wrap').classList.toggle('hidden', !isManagerOrSdr());
     fillFilters();
     bindNavigation();
@@ -155,7 +160,10 @@
     else await refreshPage();
     if (state.pollId) window.clearInterval(state.pollId);
     state.pollId = state.user.mustChangePassword ? null : window.setInterval(() => {
-      if (!document.hidden && state.token) refreshPage(true).catch(handleFailure);
+      if (!document.hidden && state.token) {
+        refreshPage(true).catch(handleFailure);
+        if (state.user && state.user.role === 'SDR' && !['dashboard','sdrAlerts'].includes(state.page)) updateSdrNavigation().catch(handleFailure);
+      }
     }, 20000);
     if (state.user.mustChangePassword) openPasswordDialog(true);
     else if (!restored) toast('Bem-vindo, ' + state.user.name.split(' ')[0] + '.', 'success');
@@ -209,14 +217,14 @@
 
   function setActiveNav(page) {
     byId('main-nav').querySelectorAll('[data-page]').forEach((item) => item.classList.toggle('active', item.dataset.page === page));
-    const titles = { dashboard: ['PAINEL COMERCIAL', 'Visão geral'], leads: ['CARTEIRA COMERCIAL', 'Clientes'], archivedLeads: ['ADMINISTRAÇÃO', 'Clientes excluídos'], followups: ['ACOMPANHAMENTO', 'Follow-ups'], users: ['ADMINISTRAÇÃO', 'Equipe'], archivedUsers: ['ADMINISTRAÇÃO', 'Usuários excluídos'], developments: ['CONFIGURAÇÃO COMERCIAL', 'Empreendimentos'] };
+    const titles = { dashboard: ['PAINEL COMERCIAL', 'Visão geral'], leads: ['CARTEIRA COMERCIAL', 'Clientes'], newLeads: ['TRIAGEM COMERCIAL', 'Novos cadastros'], sdrAlerts: ['ACOMPANHAMENTO SDR', 'Alertas SDR'], archivedLeads: ['ADMINISTRAÇÃO', 'Clientes excluídos'], followups: ['ACOMPANHAMENTO', 'Follow-ups'], users: ['ADMINISTRAÇÃO', 'Equipe'], archivedUsers: ['ADMINISTRAÇÃO', 'Usuários excluídos'], developments: ['CONFIGURAÇÃO COMERCIAL', 'Empreendimentos'], sales: ['CONTROLE FINANCEIRO', 'Vendas e repasses'], contracts: ['DOCUMENTOS COMERCIAIS', 'Contratos'], audit: ['ADMINISTRAÇÃO', 'Histórico de alterações'] };
     const current = titles[page] || titles.dashboard;
     const navPage = page === 'archivedLeads' ? 'leads' : page === 'archivedUsers' ? 'users' : page;
     byId('page-kicker').textContent = current[0];
     byId('page-title').textContent = current[1];
     byId('main-nav').querySelectorAll('[data-page]').forEach((item) => item.classList.toggle('active', item.dataset.page === navPage));
     const filters = byId('filters-panel');
-    filters.classList.toggle('hidden', page === 'users' || page === 'archivedUsers' || page === 'developments');
+    filters.classList.toggle('hidden', ['users','archivedUsers','developments','sales','contracts','audit'].includes(page));
     filters.classList.toggle('dashboard-mode', page === 'dashboard');
     if (page === 'dashboard') { byId('filter-query').value = ''; byId('filter-status').value = ''; }
   }
@@ -226,11 +234,16 @@
     if (!silent) showLoading('Atualizando ' + (state.page === 'dashboard' ? 'indicadores' : 'dados') + '…');
     if (state.page === 'dashboard') await renderDashboard();
     else if (state.page === 'leads') await renderLeads(false);
+    else if (state.page === 'newLeads') await renderLeads(false, 'new');
+    else if (state.page === 'sdrAlerts') await renderSdrAlertsPage();
     else if (state.page === 'archivedLeads') await renderArchivedLeads();
     else if (state.page === 'followups') await renderLeads(true);
     else if (state.page === 'users') await renderUsers();
     else if (state.page === 'archivedUsers') await renderArchivedUsers();
     else if (state.page === 'developments') await renderDevelopments();
+    else if (state.page === 'sales') await renderSales();
+    else if (state.page === 'contracts') await renderContracts();
+    else if (state.page === 'audit') await renderAudit();
   }
 
   function kpi(label, value, sub, color) {
@@ -243,6 +256,7 @@
 
   async function renderDashboard() {
     const data = await callApi('apiGetDashboard', state.token, readFilters(false));
+    const sdrWorklist = state.user.role === 'SDR' ? await callApi('apiGetSdrWorklist', state.token) : null;
     state.lastDashboard = data;
     byId('stale-badge').textContent = data.staleCount > 99 ? '99+' : String(data.staleCount || '');
     byId('stale-badge').classList.toggle('hidden', !data.staleCount);
@@ -339,7 +353,72 @@
     if (!data.staleLeads.length) stalePanel.appendChild(el('div', 'empty-state', 'Tudo em dia. Não há clientes vencidos para follow-up.'));
     else stalePanel.appendChild(buildStalePreview(data.staleLeads));
     area.appendChild(stalePanel);
+    if (sdrWorklist) {
+      updateSdrBadges(sdrWorklist);
+      area.appendChild(buildSdrAlerts(sdrWorklist));
+    }
     area.appendChild(buildAnalyticsPanel(data.analytics));
+  }
+
+  function buildSdrAlerts(worklist) {
+    const panel = el('section', 'panel sdr-worklist-panel');
+    const head = el('div', 'panel-header'); const title = el('div');
+    title.append(el('h3', '', 'Fila de ação do SDR'), el('p', '', 'Avisos internos no painel; não são enviados por e-mail ou WhatsApp. A regra de 24 horas inclui fins de semana.'));
+    head.append(title, el('span', 'panel-chip', 'Acompanhamento diário')); panel.appendChild(head);
+    const cards = el('div', 'sdr-alert-summary');
+    cards.append(kpi('Novos cadastros', worklist.newLeads.length, 'Ainda sem primeiro contato', '#EE7A00'),
+      kpi('Aguardando há 24h+', worklist.followupAlerts.length, 'Desde o último contato ou cadastro', '#f59e0b'),
+      kpi('7ª tentativa sem avanço', worklist.sevenAttemptAlerts.length, 'Revisar possível desistência', '#dc2626'),
+      kpi('Telefone para corrigir', worklist.phoneCorrections.length, 'Pendente para o corretor', '#7c3aed'));
+    panel.appendChild(cards);
+    const groups = [
+      ['Aguardando contato há 24 horas ou mais', worklist.followupAlerts, 'O prazo é contínuo, inclusive aos sábados e domingos.'],
+      ['Leads para revisar após a 7ª tentativa', worklist.sevenAttemptAlerts, 'O sistema não altera o status automaticamente. Abra o cadastro e decida se cabe “Desistência”.'],
+      ['Telefones marcados como incorretos', worklist.phoneCorrections, 'A solicitação aparece na carteira do corretor responsável para correção.']
+    ];
+    groups.forEach(([label, items, hint]) => {
+      const section = el('div', 'sdr-alert-group'); const groupHead = el('div', 'sdr-alert-group-head');
+      groupHead.append(el('h4', '', label), el('span', 'panel-chip', String(items.length)));
+      section.append(groupHead, el('p', 'muted', hint));
+      if (!items.length) section.appendChild(el('div', 'sdr-history-empty', 'Nenhum registro nesta fila.'));
+      else {
+        const list = el('div', 'sdr-alert-list');
+        items.slice(0, 6).forEach((lead) => {
+          const row = el('div', 'sdr-alert-row'); const info = el('div');
+          info.append(el('strong', '', lead.name), el('small', '', lead.brokerName + ' · ' + lead.developmentName));
+          const action = button('Abrir', 'button-small', () => openLeadDialog(lead));
+          row.append(info, action); list.appendChild(row);
+        });
+        section.appendChild(list);
+        if (items.length > 6) section.appendChild(el('p', 'muted', 'Mais ' + (items.length - 6) + ' registro(s) nesta fila.'));
+      }
+      panel.appendChild(section);
+    });
+    const footer = el('div', 'row-actions');
+    footer.append(button('Abrir novos cadastros', 'button-small button-primary', () => { state.page = 'newLeads'; state.pageNumber = 1; setActiveNav(state.page); refreshPage().catch(handleFailure); }));
+    panel.appendChild(footer);
+    return panel;
+  }
+
+  function updateSdrBadges(worklist) {
+    const newCount = worklist.newLeads.length;
+    const attentionCount = worklist.followupAlerts.length + worklist.sevenAttemptAlerts.length + worklist.phoneCorrections.length;
+    const newBadge = byId('new-leads-badge'); newBadge.textContent = newCount > 99 ? '99+' : String(newCount || ''); newBadge.classList.toggle('hidden', !newCount);
+    const alertBadge = byId('sdr-alert-badge'); alertBadge.textContent = attentionCount > 99 ? '99+' : String(attentionCount || ''); alertBadge.classList.toggle('hidden', !attentionCount);
+  }
+
+  async function updateSdrNavigation() {
+    if (!state.user || state.user.role !== 'SDR' || !state.token) return;
+    const worklist = await callApi('apiGetSdrWorklist', state.token);
+    updateSdrBadges(worklist);
+  }
+
+  async function renderSdrAlertsPage() {
+    if (state.user.role !== 'SDR') { state.page = 'dashboard'; setActiveNav('dashboard'); return renderDashboard(); }
+    const worklist = await callApi('apiGetSdrWorklist', state.token); updateSdrBadges(worklist);
+    const area = byId('content-area'); area.replaceChildren();
+    area.appendChild(el('div','page-heading', 'Os alertas são exibidos apenas dentro do CRM. Nenhum e-mail ou WhatsApp é enviado.'));
+    area.appendChild(buildSdrAlerts(worklist));
   }
 
   function buildAnalyticsPanel(analytics) {
@@ -404,12 +483,14 @@
     table.appendChild(body); wrap.appendChild(table); return wrap;
   }
 
-  async function renderLeads(staleOnly) {
+  async function renderLeads(staleOnly, requestedSegment) {
     const filters = readFilters(staleOnly);
-    const result = await callApi('apiListLeads', state.token, filters, state.pageNumber, 100);
+    const segment = requestedSegment || (state.user.role === 'SDR' ? 'followed' : 'all');
+    const result = await callApi('apiListLeads', state.token, filters, state.pageNumber, 100, segment);
     const area = byId('content-area'); area.replaceChildren();
     const heading = el('div', 'page-heading'); const title = el('div');
-    title.append(el('h2', '', staleOnly ? 'Clientes que precisam de acompanhamento' : 'Carteira de clientes'), el('p', '', staleOnly ? 'Ordenados pelo maior tempo sem atualização do SDR.' : 'A busca considera nome, telefone, corretor, empreendimento, status e período de cadastro.'));
+    const newOnly = segment === 'new';
+    title.append(el('h2', '', staleOnly ? 'Clientes que precisam de acompanhamento' : newOnly ? 'Leads que ainda não receberam o primeiro contato do SDR' : 'Carteira de clientes'), el('p', '', staleOnly ? 'Ordenados pelo maior tempo sem atualização do SDR.' : newOnly ? 'Esta fila fica separada dos clientes que já têm um contato do SDR registrado.' : state.user.role === 'SDR' ? 'Exibe os clientes após o primeiro contato do SDR. Novos cadastros ficam na fila separada.' : 'A busca considera nome, telefone, corretor, empreendimento, status e período de cadastro.'));
     heading.appendChild(title);
     if (!staleOnly) {
       const actions = el('div', 'row-actions');
@@ -423,7 +504,7 @@
     }
     area.appendChild(heading);
     if (staleOnly) {
-      const note = el('div', 'followup-note', 'A lista identifica clientes sem atualização do SDR por pelo menos ' + result.staleBusinessDays + ' dias úteis. Use os filtros para focar um corretor, empreendimento ou status.');
+      const note = el('div', 'followup-note', 'A lista identifica clientes sem atualização do SDR por pelo menos ' + result.staleBusinessDays + ' dias úteis. O alerta de 24 horas também aparece no painel do SDR, incluindo fins de semana.');
       area.appendChild(note);
     }
     const panel = el('section', 'table-panel'); const toolbar = el('div', 'table-toolbar'); const left = el('div');
@@ -437,7 +518,9 @@
       const tr = el('tr'); const td = el('td', 'table-empty', staleOnly ? 'Nenhum cliente vencido para follow-up.' : 'Nenhum cliente encontrado.'); td.colSpan = 7; tr.appendChild(td); body.appendChild(tr);
     } else result.items.forEach((lead) => {
       const tr = el('tr');
-      tr.appendChild(el('td', '', lead.name));
+      const nameCell = el('td'); const nameText = el('span', '', lead.name); nameCell.appendChild(nameText);
+      if (lead.phoneCorrectionRequired && (isAdmin() || state.user.role === 'Corretor')) nameCell.appendChild(el('span', 'status-pill correction-pill', 'Telefone pendente'));
+      tr.appendChild(nameCell);
       tr.appendChild(el('td', '', lead.phone));
       tr.appendChild(el('td', '', lead.developmentName));
       tr.appendChild(el('td', '', lead.brokerName));
@@ -455,8 +538,8 @@
     const last = Math.min(result.total, result.page * result.pageSize);
     pageFooter.appendChild(el('p', 'muted', 'Exibindo ' + first + '–' + last + ' de ' + result.total));
     const pageControls = el('div', 'row-actions');
-    const previous = button('Anterior', 'button-small', () => { if (state.pageNumber > 1) { state.pageNumber -= 1; renderLeads(staleOnly).catch(handleFailure); } });
-    const next = button('Próxima', 'button-small', () => { if (result.page * result.pageSize < result.total) { state.pageNumber += 1; renderLeads(staleOnly).catch(handleFailure); } });
+    const previous = button('Anterior', 'button-small', () => { if (state.pageNumber > 1) { state.pageNumber -= 1; renderLeads(staleOnly, requestedSegment).catch(handleFailure); } });
+    const next = button('Próxima', 'button-small', () => { if (result.page * result.pageSize < result.total) { state.pageNumber += 1; renderLeads(staleOnly, requestedSegment).catch(handleFailure); } });
     previous.disabled = result.page <= 1; next.disabled = result.page * result.pageSize >= result.total;
     pageControls.append(previous, next); pageFooter.appendChild(pageControls); panel.appendChild(pageFooter); area.appendChild(panel);
   }
@@ -586,10 +669,62 @@
     if (sdr && lead) {
       const fieldHint = el('p', 'field-hint', 'Ao registrar o contato, o status e o feedback ficam salvos como uma nova entrada no histórico deste cliente.');
       grid.appendChild(fieldHint);
+      const attemptSection = el('section', 'sdr-history');
+      const attemptHeader = el('div', 'sdr-history-header'); const attemptTitle = el('div');
+      attemptTitle.append(el('h3', '', 'Tentativas de contato'), el('p', '', 'Registre cada tentativa; ao chegar à 7ª, o painel lembrará o SDR de avaliar a desistência.'));
+      attemptHeader.appendChild(attemptTitle); attemptSection.appendChild(attemptHeader);
+      const attemptSummary = el('p', 'sdr-history-note', 'Carregando tentativas…'); attemptSection.appendChild(attemptSummary);
+      const attemptActions = el('div', 'row-actions');
+      const addAttempt = button('Registrar tentativa', 'button-small button-primary', async () => {
+        const note = window.prompt('Observação opcional desta tentativa:'); if (note === null) return;
+        addAttempt.disabled = true;
+        try {
+          const result = await callApi('apiAddLeadAttempt', state.token, lead.id, note);
+          if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível registrar a tentativa.');
+          toast(result.message, result.reminder ? 'warning' : 'success');
+          await loadAttempts();
+          await refreshPage(true);
+        } catch (error) { handleFailure(error); }
+        finally { addAttempt.disabled = Number(attemptSummary.dataset.count || 0) >= 7; }
+      });
+      const flagPhone = button(lead.phoneCorrectionRequired ? 'Telefone já enviado para correção' : 'Telefone incorreto', 'button-small', async () => {
+        if (lead.phoneCorrectionRequired) return;
+        const note = window.prompt('Descreva o problema do telefone (opcional):'); if (note === null) return;
+        flagPhone.disabled = true;
+        try {
+          const result = await callApi('apiFlagPhoneIncorrect', state.token, lead.id, note);
+          if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível pedir a correção.');
+          lead.phoneCorrectionRequired = true; flagPhone.textContent = 'Telefone já enviado para correção';
+          toast(result.message, 'success'); await refreshPage(true);
+        } catch (error) { handleFailure(error); }
+        finally { flagPhone.disabled = false; }
+      });
+      attemptActions.append(addAttempt, flagPhone); attemptSection.appendChild(attemptActions);
+      const attemptList = el('div', 'sdr-history-list'); attemptSection.appendChild(attemptList); box.appendChild(attemptSection);
+      async function loadAttempts() {
+        const attempts = await callApi('apiListLeadAttempts', state.token, lead.id);
+        attemptSummary.dataset.count = String(attempts.length);
+        attemptSummary.textContent = attempts.length + ' de 7 tentativas registradas.';
+        addAttempt.disabled = attempts.length >= 7;
+        addAttempt.textContent = attempts.length >= 7 ? '7 tentativas registradas' : 'Registrar tentativa ' + (attempts.length + 1) + ' de 7';
+        attemptList.replaceChildren();
+        if (!attempts.length) attemptList.appendChild(el('p', 'sdr-history-empty', 'Nenhuma tentativa registrada ainda.'));
+        attempts.slice().reverse().forEach((item) => {
+          const line = el('article', 'sdr-history-item');
+          line.append(el('strong', '', item.number + 'ª tentativa'), el('time', 'sdr-history-source', formatDate(item.at) + ' · ' + item.actorName + ' · status: ' + item.statusAtAttempt));
+          if (item.notes) line.appendChild(el('p', 'sdr-history-feedback', item.notes));
+          attemptList.appendChild(line);
+        });
+      }
+      loadAttempts().catch(handleFailure);
     } else if (sdrCreate) {
       grid.appendChild(el('p', 'field-hint', 'O cliente será criado com status “Em contato” e ficará visível para o SDR, para a gestão e para o corretor escolhido.'));
     }
     form.appendChild(grid);
+    if (lead && state.user.role === 'Corretor' && lead.phoneCorrectionRequired) {
+      const correction = el('div', 'followup-note correction-note', 'O SDR marcou este telefone para correção.' + (lead.phoneCorrectionNotes ? ' Observação: ' + lead.phoneCorrectionNotes : '') + ' Atualize o número para remover a pendência.');
+      box.appendChild(correction);
+    }
     const error = el('p', 'form-error'); error.setAttribute('role','alert'); form.appendChild(error);
     const actions = el('div', 'modal-actions');
     const cancel = button('Cancelar', '', () => dialog.close());
@@ -737,6 +872,22 @@
       downloadCsv('relatorio-gerencial-mundo-apto-' + new Date().toISOString().slice(0, 10) + '.csv', report.rows[0], report.rows.slice(1));
       toast('Relatório gerencial exportado em CSV.', 'success');
     } catch (error) { handleFailure(error); }
+  }
+
+  function exportSalesCsv(rows) {
+    if (!isAdmin()) return;
+    const headers = ['numero_interno','numero_processo','cliente','empreendimento','unidade_torre','corretor','data_venda','valor_unidade','status_venda','possui_pendencia','detalhe_pendencia','contabilizada','repasse_previsto','repasse_recebido','saldo_repasse','fase_repasse','historico_recebimentos','observacoes'];
+    const values = rows.map((item) => [item.internalNumber,item.processNumber,item.buyerName,item.developmentName,item.unit,item.brokerName,item.soldAt,item.unitValue,item.saleStatus,item.hasPending?'Sim':'Não',item.pendingDescription,item.accounted?'Sim':'Não',item.expectedRepass,item.receivedRepass,item.balanceRepass,item.repassStatus,(item.receipts||[]).map((receipt)=>`${receipt.receivedAt} — ${brl(receipt.amount)}${receipt.notes?' ('+receipt.notes+')':''}`).join(' | '),item.notes]);
+    downloadCsv('vendas-repasses-mundo-apto-'+new Date().toISOString().slice(0,10)+'.csv',headers,values);
+    toast(rows.length+' venda(s) exportada(s) com os filtros atuais.','success');
+  }
+
+  function exportContractsCsv(rows) {
+    if (!isAdmin()) return;
+    const headers = ['numero_contrato','numero_proposta_pasta','cliente','empreendimento','unidade_torre','corretor','sdr','gerente','valor_venda','base_calculo_comissao','percentual_comissao','comissao_bruta','comissao_corretor','comissao_sdr','premio_aplicavel','percentual_premio','premio_bruto','premio_corretor','premio_sdr','status','documentos_disponiveis','gerado_em','assinado_em'];
+    const values = rows.map((item) => [item.contractNumber,item.proposalNumber,item.buyerName,item.developmentName,item.unit,item.brokerName,item.sdrName,item.managerName,item.unitValue,item.commissionBase,item.commissionRatePct===null?'':item.commissionRatePct,item.grossCommission,item.brokerCommission,item.sdrCommission,item.hasPrize?'Sim':'Não',item.prizeRatePct===null?'':item.prizeRatePct,item.grossPrize,item.brokerPrize,item.sdrPrize,item.status,(item.documents||[]).map((doc)=>doc.name).join(' | '),item.generatedAt,item.signedAt]);
+    downloadCsv('contratos-mundo-apto-'+new Date().toISOString().slice(0,10)+'.csv',headers,values);
+    toast(rows.length+' contrato(s) exportado(s).','success');
   }
 
   function openFollowupSettings(currentDays) {
@@ -1009,6 +1160,230 @@
       }catch(err){error.textContent=err.message;}finally{save.disabled=false;}
     });
     dialog.showModal();
+  }
+
+  function brl(value) { return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(value || 0)); }
+  function todayBrazil() { return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); }
+
+  async function renderSales() {
+    if (!isAdmin()) { state.page = 'dashboard'; setActiveNav('dashboard'); return renderDashboard(); }
+    const rows = await callApi('apiListSales', state.token);
+    const area = byId('content-area'); area.replaceChildren();
+    const heading = el('div', 'page-heading'); const title = el('div');
+    title.append(el('h2', '', 'Controle manual de vendas e repasses'), el('p', '', 'Registre vendas da operação, inclusive de clientes que não passaram pela carteira do CRM. Acompanhe pendências, contabilização, repasses parciais e saldo; os contratos são preparados separadamente na aba Contratos.'));
+    const headingActions=el('div','row-actions');const exportButton=button('Exportar CSV','button-small',()=>exportSalesCsv(visibleRows));headingActions.append(button('+ Registrar venda','button-primary',()=>openSaleDialog(null)),exportButton);heading.append(title,headingActions);area.appendChild(heading);
+    const filters=el('div','filters-panel');
+    const search=document.createElement('input');search.type='search';search.placeholder='Cliente, processo, unidade…';search.setAttribute('aria-label','Buscar cliente, processo ou unidade');
+    const from=document.createElement('input');from.type='date';from.setAttribute('aria-label','Data inicial da venda');
+    const to=document.createElement('input');to.type='date';to.setAttribute('aria-label','Data final da venda');
+    const brokerOptions=[...new Map(rows.map((item)=>[item.brokerId,item.brokerName])).entries()].sort((a,b)=>String(a[1]).localeCompare(String(b[1]),'pt-BR')).map(([value,label])=>({value,label}));
+    const developmentOptions=[...new Map(rows.map((item)=>[item.developmentId,item.developmentName])).entries()].sort((a,b)=>String(a[1]).localeCompare(String(b[1]),'pt-BR')).map(([value,label])=>({value,label}));
+    const broker=makeSelect([{label:'Todos os corretores',value:''},...brokerOptions],'');broker.setAttribute('aria-label','Filtrar por corretor');
+    const development=makeSelect([{label:'Todos os empreendimentos',value:''},...developmentOptions],'');development.setAttribute('aria-label','Filtrar por empreendimento');
+    const saleStatus=makeSelect([{label:'Todos os status de venda',value:''},...['Cadastrada','Em conferência','Com pendência','Regularizada','Cancelada'].map((value)=>({label:value,value}))],'');saleStatus.setAttribute('aria-label','Filtrar por status da venda');
+    const repassStatuses=state.refs.repassStatuses||[];
+    const repassStatus=makeSelect([{label:'Todas as fases do repasse',value:''},...repassStatuses.map((value)=>({label:value,value}))],'');repassStatus.setAttribute('aria-label','Filtrar por fase do repasse');
+    const addFilter=(label,control,extraClass)=>{const holder=el('div','filter-field '+(extraClass||''));const labelNode=document.createElement('label');labelNode.textContent=label;labelNode.appendChild(control);holder.appendChild(labelNode);filters.appendChild(holder);};
+    addFilter('Buscar',search,'filter-search');addFilter('De',from);addFilter('Até',to);addFilter('Corretor',broker);addFilter('Empreendimento',development);addFilter('Status da venda',saleStatus);addFilter('Fase do repasse',repassStatus);
+    const resetButton=button('Limpar filtros','button-small',()=>{search.value='';from.value='';to.value='';broker.value='';development.value='';saleStatus.value='';repassStatus.value='';update();});filters.appendChild(resetButton);area.appendChild(filters);
+    const filterMessage=el('p','field-hint','');area.appendChild(filterMessage);
+    let visibleRows=[];
+    const summary = el('section', 'kpi-grid');
+    const panel = el('section', 'table-panel'); const scroll = el('div', 'table-scroll'); const table = el('table', 'data-table');
+    const head = el('thead'); const header = el('tr');
+    ['Processo interno / externo','Cliente','Empreendimento / unidade','Corretor','Data','Valor da unidade','Repasse previsto / recebido / saldo','Status da venda','Fase do repasse','Contabilizado','Ações'].forEach((label) => header.appendChild(el('th','',label)));
+    head.appendChild(header); table.appendChild(head); const body = el('tbody');
+    table.appendChild(body); scroll.appendChild(table); panel.appendChild(scroll); area.appendChild(panel);
+    function update(){
+      const start=from.value;const end=to.value;
+      const invalidRange=Boolean(start&&end&&start>end);
+      const query=search.value.trim().toLocaleLowerCase('pt-BR');
+      visibleRows=invalidRange?[]:rows.filter((item)=>{
+        if(start&&item.soldAt<start)return false;if(end&&item.soldAt>end)return false;
+        if(broker.value&&item.brokerId!==broker.value)return false;if(development.value&&item.developmentId!==development.value)return false;
+        if(saleStatus.value&&item.saleStatus!==saleStatus.value)return false;if(repassStatus.value&&item.repassStatus!==repassStatus.value)return false;
+        if(query&&!`${item.internalNumber} ${item.processNumber} ${item.buyerName} ${item.unit} ${item.developmentName} ${item.brokerName}`.toLocaleLowerCase('pt-BR').includes(query))return false;
+        return true;
+      });
+      filterMessage.textContent=invalidRange?'A data inicial não pode ser posterior à data final.':`Exibindo ${visibleRows.length} de ${rows.length} venda(s). A exportação incluirá exatamente os resultados filtrados.`;
+      exportButton.disabled=visibleRows.length===0;
+      const pending=visibleRows.filter((item)=>item.saleStatus!=='Cancelada'&&item.expectedRepass>0&&item.balanceRepass>0);
+      const expected=pending.reduce((sum,item)=>sum+item.expectedRepass,0);const received=pending.reduce((sum,item)=>sum+item.receivedRepass,0);
+      summary.replaceChildren(kpi('Vendas na seleção',visibleRows.length,'Com os filtros atuais','#EE7A00'),kpi('Repasses pendentes',pending.length,'Com saldo previsto em aberto','#f59e0b'),kpi('Previsto',brl(expected),'Nas vendas com saldo em aberto','#3b82f6'),kpi('Recebido',brl(received),'Nas vendas com saldo em aberto','#22c55e'));
+      body.replaceChildren();
+      if(!visibleRows.length){const tr=el('tr');const td=el('td','table-empty',rows.length?'Nenhuma venda corresponde aos filtros.':'Nenhuma venda cadastrada.');td.colSpan=11;tr.appendChild(td);body.appendChild(tr);return;}
+      visibleRows.forEach((sale)=>{
+        const tr=el('tr');tr.append(el('td','',sale.internalNumber+(sale.processNumber?'\n'+sale.processNumber:'')),el('td','',sale.buyerName),el('td','',sale.developmentName+(sale.unit?' · '+sale.unit:'')),el('td','',sale.brokerName),el('td','',sale.soldAt),el('td','',brl(sale.unitValue)),el('td','',brl(sale.expectedRepass)+' / '+brl(sale.receivedRepass)+' / '+brl(sale.balanceRepass)),el('td','',sale.saleStatus+(sale.hasPending?' · pendência':'')),el('td','',sale.repassStatus),el('td','',sale.accounted?'Sim':'Não'));
+        const action=el('td');const actions=el('div','row-actions');actions.append(button('Editar','button-small',()=>openSaleDialog(sale)),button('Lançar recebimento','button-small button-primary',()=>openReceiptDialog(sale)));if(sale.receipts.length)actions.append(button('Ver parcelas','button-small',()=>showSaleReceipts(sale)));action.appendChild(actions);tr.appendChild(action);body.appendChild(tr);
+      });
+    }
+    [search,from,to,broker,development,saleStatus,repassStatus].forEach((control)=>control.addEventListener(control===search?'input':'change',update));
+    area.insertBefore(summary,panel);update();
+  }
+
+  function openSaleDialog(sale) {
+    const dialog = byId('admin-dialog'); const content = byId('admin-dialog-content'); content.replaceChildren();
+    const box = el('div','modal-content'); box.append(el('h2','',sale ? 'Editar venda' : 'Registrar venda'), el('p','muted','O número interno é gerado automaticamente. O número de processo externo é opcional.'));
+    const form = el('form'); const grid = el('div','form-grid');
+    const process = document.createElement('input'); process.maxLength = 100; process.value = sale ? sale.processNumber : '';
+    const buyer = document.createElement('input'); buyer.maxLength = 150; buyer.required = true; buyer.value = sale ? sale.buyerName : '';
+    const developmentOptions=state.refs.developments.map((item)=>({label:item.name,value:item.id}));
+    if(sale&&sale.developmentId&&!developmentOptions.some((item)=>item.value===sale.developmentId))developmentOptions.push({label:(sale.developmentName||'Empreendimento')+' · inativo',value:sale.developmentId});
+    const brokerOptions=state.refs.brokers.filter((item)=>item.active).map((item)=>({label:item.name,value:item.id}));
+    if(sale&&sale.brokerId&&!brokerOptions.some((item)=>item.value===sale.brokerId))brokerOptions.push({label:(sale.brokerName||'Corretor')+' · inativo',value:sale.brokerId});
+    const development = makeSelect([{label:'Selecione o empreendimento',value:''},...developmentOptions],sale?sale.developmentId:'');
+    const broker = makeSelect([{label:'Selecione o corretor',value:''},...brokerOptions],sale?sale.brokerId:'');
+    const date = document.createElement('input'); date.type='date'; date.required=true; date.value=sale?sale.soldAt:todayBrazil();
+    const unit = document.createElement('input'); unit.maxLength=100; unit.required=true; unit.value=sale?sale.unit:'';
+    const unitValue = document.createElement('input'); unitValue.type='number'; unitValue.step='0.01'; unitValue.min='0'; unitValue.required=true; unitValue.value=sale?sale.unitValue:'';
+    const expected = document.createElement('input'); expected.type='number'; expected.step='0.01'; expected.min='0'; expected.value=sale?sale.expectedRepass:'';
+    const saleStatus = makeSelect(['Cadastrada','Em conferência','Com pendência','Regularizada','Cancelada'].map((value)=>({label:value,value})),sale?sale.saleStatus:'Cadastrada');
+    const repassStatus = makeSelect((state.refs.repassStatuses||[]).map((value)=>({label:value,value})),sale?sale.repassStatus:'AGUARDANDO PJ');
+    const hasPending = document.createElement('input'); hasPending.type='checkbox'; hasPending.checked=sale?sale.hasPending:false;
+    const pendingLabel = el('label','checkbox-row'); pendingLabel.append(hasPending,el('span','','Possui pendência'));
+    const pendingDescription = document.createElement('textarea'); pendingDescription.maxLength=2000; pendingDescription.value=sale?sale.pendingDescription:'';
+    const accounted = document.createElement('input'); accounted.type='checkbox'; accounted.checked=sale?sale.accounted:false;
+    const accountedLabel = el('label','checkbox-row'); accountedLabel.append(accounted,el('span','','Contabilizado'));
+    const notes = document.createElement('textarea'); notes.maxLength=3000; notes.value=sale?sale.notes:'';
+    addField(grid,'Número do processo externo (opcional)',process); addField(grid,'Cliente / comprador',buyer); addField(grid,'Empreendimento',development); addField(grid,'Corretor responsável',broker);
+    addField(grid,'Data da venda',date); addField(grid,'Unidade',unit); addField(grid,'Valor da unidade (R$)',unitValue); addField(grid,'Valor total previsto de repasse (R$)',expected);
+    addField(grid,'Status da venda',saleStatus); addField(grid,'Fase do repasse',repassStatus); grid.append(pendingLabel,accountedLabel);
+    addField(grid,'Descrição da pendência',pendingDescription,true); addField(grid,'Observações',notes,true);
+    form.appendChild(grid); const error=el('p','form-error'); error.setAttribute('role','alert'); form.appendChild(error);
+    const actions=el('div','modal-actions'); actions.append(button('Cancelar','',()=>dialog.close())); const save=el('button','button button-primary','Salvar venda'); save.type='submit'; actions.appendChild(save); form.appendChild(actions); box.appendChild(form); content.appendChild(box);
+    form.addEventListener('submit',async(event)=>{
+      event.preventDefault(); error.textContent=''; save.disabled=true;
+      try {
+        const result=await callApi('apiSaveSale',state.token,{id:sale?sale.id:'',processNumber:process.value,buyerName:buyer.value,developmentId:development.value,brokerId:broker.value,soldAt:date.value,unit:unit.value,unitValue:unitValue.value,expectedRepass:expected.value,saleStatus:saleStatus.value,repassStatus:repassStatus.value,hasPending:hasPending.checked,pendingDescription:pendingDescription.value,accounted:accounted.checked,notes:notes.value});
+        if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar a venda.');
+        dialog.close(); toast(result.message,'success'); await renderSales();
+      } catch(err){error.textContent=err.message||'Não foi possível salvar.';} finally{save.disabled=false;}
+    });
+    dialog.showModal();
+  }
+
+  function openReceiptDialog(sale) {
+    const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');
+    box.append(el('h2','','Registrar recebimento'),el('p','muted',sale.internalNumber+' · '+sale.buyerName+' · saldo atual '+brl(sale.balanceRepass)+'. A fase do repasse permanece conforme definida pela gestão.'));
+    const form=el('form');const grid=el('div','form-grid');const amount=document.createElement('input');amount.type='number';amount.step='0.01';amount.min='0.01';amount.required=true;
+    const date=document.createElement('input');date.type='date';date.required=true;date.value=todayBrazil();const notes=document.createElement('textarea');notes.maxLength=1000;
+    addField(grid,'Valor recebido (R$)',amount);addField(grid,'Data do recebimento',date);addField(grid,'Observação (opcional)',notes,true);form.appendChild(grid);
+    const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Registrar parcela');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiAddSaleReceipt',state.token,sale.id,{amount:amount.value,receivedAt:date.value,notes:notes.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível registrar.');dialog.close();toast(result.message,'success');await renderSales();}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});
+    dialog.showModal();
+  }
+
+  function showSaleReceipts(sale) {
+    const detail=sale.receipts.map((item)=>formatDate(item.receivedAt)+' · '+brl(item.amount)+(item.notes?' · '+item.notes:'')).join('\n');
+    window.alert('Histórico de recebimentos — '+sale.internalNumber+'\n\n'+detail+'\n\nTotal lançado: '+brl(sale.receivedRepass));
+  }
+
+  async function renderContracts() {
+    const contracts=await callApi('apiListContracts',state.token); const area=byId('content-area');area.replaceChildren();
+    const heading=el('div','page-heading');const title=el('div');const admin=isAdmin();
+    title.append(el('h2','','Contratos de venda'),el('p','',admin?'Rascunhos e documentos ficam restritos à gestão. Corretor e SDR só consultam o arquivo depois que a gestão registrar a assinatura.':'Você vê apenas contratos assinados vinculados à sua carteira ou atuação como SDR.'));
+    const actions=el('div','row-actions');
+    if(admin){actions.append(button('Exportar contratos CSV','button-small',()=>exportContractsCsv(contracts)),button('+ Novo contrato','button-primary',()=>openContractDialog(null)),button('Modelo do documento','button-small',openContractTemplateDialog),button('Cadastro dos corretores','button-small',renderBrokerProfiles));}
+    heading.append(title,actions);area.appendChild(heading);
+    const panel=el('section','table-panel');const scroll=el('div','table-scroll');const table=el('table','data-table');const thead=el('thead');const h=el('tr');
+    ['Documento','Cliente','Empreendimento / unidade','Corretor','Comissão total (50/50)','Prêmio (50/50)','Situação','Arquivos','Ações'].forEach((label)=>h.appendChild(el('th','',label)));thead.appendChild(h);table.appendChild(thead);const body=el('tbody');
+    if(!contracts.length){const tr=el('tr');const td=el('td','table-empty',admin?'Nenhum contrato cadastrado.':'Nenhum contrato assinado foi disponibilizado para você.');td.colSpan=9;tr.appendChild(td);body.appendChild(tr);}
+    contracts.forEach((item)=>{
+      const tr=el('tr');tr.append(el('td','',item.contractNumber+(item.proposalNumber?'\nProposta: '+item.proposalNumber:'')),el('td','',item.buyerName),el('td','',item.developmentName+' · '+item.unit),el('td','',item.brokerName),
+        el('td','',brl(item.grossCommission)+'\nCorretor '+brl(item.brokerCommission)+' · SDR '+brl(item.sdrCommission)),
+        el('td','',item.hasPrize?brl(item.grossPrize)+'\nCorretor '+brl(item.brokerPrize)+' · SDR '+brl(item.sdrPrize):'Sem prêmio'),el('td','',item.status));
+      const docs=el('td');(item.documents||[]).forEach((doc)=>docs.appendChild(button(doc.type==='signed'?'Assinado':'Gerado', 'button-small',()=>downloadContractDocument(doc))));tr.appendChild(docs);
+      const actionsCell=el('td');const buttons=el('div','row-actions');
+      if(admin){
+        if(item.status==='Rascunho')buttons.append(button('Editar','button-small',()=>openContractDialog(item)));
+        if(item.status==='Rascunho'||item.status==='Gerado para assinatura')buttons.append(button('Gerar documento','button-small button-primary',()=>generateContract(item)));
+        if(item.status==='Gerado para assinatura')buttons.append(button('Anexar assinado','button-small',()=>chooseSignedContractFile(item)));
+      }
+      actionsCell.appendChild(buttons);tr.appendChild(actionsCell);body.appendChild(tr);
+    });
+    table.appendChild(body);scroll.appendChild(table);panel.appendChild(scroll);area.appendChild(panel);
+    if(admin){const hint=el('p','field-hint','O modelo padrão segue o termo em branco fornecido para o Mundo Apto. A gestão pode revisar e ajustar o HTML aprovado. O documento é baixado para assinatura externa; a gestão anexa e confirma o arquivo assinado. O corretor e o SDR vinculados só podem consultar e baixar esse arquivo após a confirmação. A exportação CSV contém metadados do registro, sem anexar os documentos.');area.appendChild(hint);}
+  }
+
+  async function openContractDialog(contract) {
+    const [leads,profiles]=await Promise.all([callApi('apiListContractLeads',state.token),callApi('apiListBrokerProfiles',state.token)]);
+    const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');box.append(el('h2','',contract?'Editar rascunho de contrato':'Novo contrato'),el('p','muted','A comissão e o prêmio são informados pelo valor total; a divisão em 50% para corretor e 50% para SDR é calculada pelo sistema.'));
+    const form=el('form');const grid=el('div','form-grid');const lead=makeSelect([{label:'Selecione o cliente do CRM',value:''},...leads.map((item)=>({label:item.name+' · '+item.phone+' · '+item.brokerName,value:item.id}))],contract?contract.leadId:'');
+    const buyer=document.createElement('input');buyer.required=true;buyer.maxLength=150;buyer.value=contract?contract.buyerName:'';const cpf=document.createElement('input');cpf.maxLength=30;cpf.value=contract?contract.buyerCpf:'';const sdrCpf=document.createElement('input');sdrCpf.maxLength=30;sdrCpf.value=contract?contract.sdrCpf:'';const proposal=document.createElement('input');proposal.maxLength=100;proposal.value=contract?contract.proposalNumber:'';const address=document.createElement('textarea');address.maxLength=500;address.value=contract?contract.buyerAddress:'';
+    const development=makeSelect([{label:'Selecione o empreendimento',value:''},...state.refs.developments.map((item)=>({label:item.name,value:item.id}))],contract?contract.developmentId:'');
+    const broker=makeSelect([{label:'Selecione o corretor',value:''},...state.refs.brokers.filter((item)=>item.active).map((item)=>({label:item.name,value:item.id}))],contract?contract.brokerId:'');
+    const sdr=makeSelect([{label:'Selecione o SDR',value:''},...(state.refs.sdrs||[]).map((item)=>({label:item.name,value:item.id}))],contract?contract.sdrId:'');
+    const managerOptions=state.refs.managers||[];const defaultManager=contract?contract.managerId:(state.user.role==='Gerente'?state.user.id:(managerOptions[0]||{}).id||'');const manager=makeSelect([{label:'Selecione o gerente signatário',value:''},...managerOptions.map((item)=>({label:item.name,value:item.id}))],defaultManager);
+    const unit=document.createElement('input');unit.required=true;unit.maxLength=100;unit.value=contract?contract.unit:'';
+    const unitValue=document.createElement('input');unitValue.type='number';unitValue.step='0.01';unitValue.min='0.01';unitValue.required=true;unitValue.value=contract?contract.unitValue:'';
+    const commissionBase=document.createElement('input');commissionBase.type='number';commissionBase.step='0.01';commissionBase.min='0';commissionBase.value=contract&&contract.commissionBase?contract.commissionBase:'';
+    const commissionRate=document.createElement('input');commissionRate.type='number';commissionRate.step='0.0001';commissionRate.min='0';commissionRate.max='100';commissionRate.value=contract&&contract.commissionRatePct!==null?contract.commissionRatePct:'';
+    const commission=document.createElement('input');commission.type='number';commission.step='0.01';commission.min='0.01';commission.required=true;commission.value=contract?contract.grossCommission:'';
+    const hasPrize=document.createElement('input');hasPrize.type='checkbox';hasPrize.checked=contract?contract.hasPrize:false;const prizeLabel=el('label','checkbox-row');prizeLabel.append(hasPrize,el('span','','Há prêmio nesta venda'));
+    const prizeRate=document.createElement('input');prizeRate.type='number';prizeRate.step='0.0001';prizeRate.min='0';prizeRate.max='100';prizeRate.value=contract&&contract.prizeRatePct!==null?contract.prizeRatePct:'';
+    const prize=document.createElement('input');prize.type='number';prize.step='0.01';prize.min='0.01';prize.value=contract?contract.grossPrize:'';
+    addField(grid,'Cliente vinculado',lead,true);addField(grid,'Nome do comprador',buyer);addField(grid,'CPF do comprador (obrigatório para gerar)',cpf);addField(grid,'CPF do SDR (obrigatório para gerar)',sdrCpf);addField(grid,'Endereço do comprador',address,true);
+    addField(grid,'Empreendimento',development);addField(grid,'Corretor responsável',broker);addField(grid,'SDR signatário',sdr);addField(grid,'Gerente signatário',manager);
+    addField(grid,'Unidade / torre',unit);addField(grid,'Valor da venda (R$)',unitValue);addField(grid,'Nº da proposta / pasta',proposal);addField(grid,'Base de cálculo da comissão (R$)',commissionBase);addField(grid,'Percentual de comissão (%)',commissionRate);addField(grid,'Comissão bruta total (R$)',commission);grid.appendChild(prizeLabel);addField(grid,'Percentual do prêmio (%)',prizeRate);addField(grid,'Prêmio bruto total (R$)',prize);
+    const splitHint=el('p','field-hint','O total bruto da comissão e do prêmio é informado pela gestão; o CRM divide cada valor em 50% para o corretor e 50% para o SDR. Base e percentuais podem ficar em branco quando não se aplicarem ao produto. O CPF do comprador e do SDR, além do CPF, CNPJ, CRECI e endereço do corretor, serão necessários para gerar o termo.');grid.appendChild(splitHint);
+    lead.addEventListener('change',()=>{const chosen=leads.find((item)=>item.id===lead.value);if(!chosen)return;buyer.value=chosen.name;development.value=chosen.developmentId;broker.value=chosen.brokerId;});
+    form.appendChild(grid);const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar rascunho');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveContract',state.token,{id:contract?contract.id:'',leadId:lead.value,brokerId:broker.value,sdrId:sdr.value,sdrCpf:sdrCpf.value,managerId:manager.value,buyerName:buyer.value,buyerCpf:cpf.value,buyerAddress:address.value,developmentId:development.value,unit:unit.value,proposalNumber:proposal.value,unitValue:unitValue.value,commissionBase:commissionBase.value,commissionRatePct:commissionRate.value,grossCommission:commission.value,hasPrize:hasPrize.checked,prizeRatePct:prizeRate.value,grossPrize:prize.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar o contrato.');dialog.close();toast(result.message,'success');await renderContracts();}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});
+    dialog.showModal();
+  }
+
+  async function openContractTemplateDialog() {
+    const data=await callApi('apiGetContractTemplate',state.token);const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');
+    box.append(el('h2','','Modelo de contrato'),el('p','muted','O termo em branco enviado pela empresa já está carregado como modelo inicial. Revise e ajuste a estrutura conforme necessário, preservando as cláusulas aprovadas. Os marcadores abaixo são preenchidos a partir do CRM; a gestão deve validar o texto jurídico antes de gerar documentos.'));
+    const placeholders=el('div','contract-placeholders');placeholders.textContent=data.placeholders.join(' · ');box.appendChild(placeholders);
+    const form=el('form');const template=document.createElement('textarea');template.className='template-editor';template.maxLength=100000;template.required=true;template.value=data.template;addField(form,'Modelo HTML aprovado',template,true);
+    const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar modelo');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveContractTemplate',state.token,template.value);if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar.');dialog.close();toast(result.message,'success');}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});dialog.showModal();
+  }
+
+  async function renderBrokerProfiles() {
+    const rows=await callApi('apiListBrokerProfiles',state.token);const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');box.append(el('h2','','Dados cadastrais dos corretores'),el('p','muted','Essas informações serão carregadas no documento de contrato gerado.'));
+    const panel=el('section','table-panel');const table=el('table','data-table');const head=el('thead');const h=el('tr');['Corretor','CPF','CNPJ','CRECI','Endereço','Ação'].forEach((x)=>h.appendChild(el('th','',x)));head.appendChild(h);table.appendChild(head);const body=el('tbody');
+    rows.forEach((item)=>{const tr=el('tr');tr.append(el('td','',item.name),el('td','',item.cpf||'—'),el('td','',item.cnpj||'—'),el('td','',item.creci||'—'),el('td','',item.address||'—'));const action=el('td');action.appendChild(button('Editar','button-small',()=>openBrokerProfileDialog(item,renderBrokerProfiles)));tr.appendChild(action);body.appendChild(tr);});table.appendChild(body);const scroll=el('div','table-scroll');scroll.appendChild(table);panel.appendChild(scroll);box.appendChild(panel);box.appendChild(button('Fechar','button-small',()=>dialog.close()));content.appendChild(box);if(!dialog.open)dialog.showModal();
+  }
+
+  function openBrokerProfileDialog(profile, onSaved) {
+    const dialog=byId('user-dialog');const content=byId('user-dialog-content');content.replaceChildren();const box=el('div','modal-content');box.append(el('h2','','Cadastro do corretor'),el('p','muted',profile.name));const form=el('form');const grid=el('div','form-grid');
+    const cpf=document.createElement('input');cpf.value=profile.cpf;const cnpj=document.createElement('input');cnpj.value=profile.cnpj;const creci=document.createElement('input');creci.value=profile.creci;const address=document.createElement('textarea');address.value=profile.address;address.maxLength=500;
+    addField(grid,'CPF',cpf);addField(grid,'CNPJ',cnpj);addField(grid,'CRECI',creci);addField(grid,'Endereço',address,true);form.appendChild(grid);const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar dados');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveBrokerProfile',state.token,{brokerId:profile.brokerId,cpf:cpf.value,cnpj:cnpj.value,creci:creci.value,address:address.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar.');dialog.close();toast(result.message,'success');await onSaved();}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});dialog.showModal();
+  }
+
+  async function generateContract(contract) {
+    const tab=window.open('about:blank','_blank');
+    try{const result=await callApi('apiGenerateContract',state.token,contract.id);if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível gerar o documento.');if(tab)tab.location=result.downloadUrl;else window.location.href=result.downloadUrl;toast(result.message,'success');await renderContracts();}
+    catch(error){if(tab)tab.close();handleFailure(error);}
+  }
+
+  async function chooseSignedContractFile(contract) {
+    const input=document.createElement('input');input.type='file';input.accept='.pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    input.addEventListener('change',async()=>{const file=input.files&&input.files[0];if(!file)return;try{
+      const prepared=await callApi('apiCreateContractUpload',state.token,contract.id,{name:file.name,mimeType:file.type,sizeBytes:file.size});if(!prepared||prepared.ok!==true)throw new Error(prepared&&prepared.message?prepared.message:'Não foi possível preparar o envio.');
+      const upload=await fetch(prepared.uploadUrl,{method:'PUT',headers:{apikey:prepared.publishableKey,'Content-Type':file.type,'x-upsert':'false'},body:file});
+      if(!upload.ok)throw new Error('O arquivo não foi enviado. Tente novamente.');
+      const confirmed=await callApi('apiConfirmContractSigned',state.token,contract.id,prepared.documentId);if(!confirmed||confirmed.ok!==true)throw new Error(confirmed&&confirmed.message?confirmed.message:'Não foi possível confirmar a assinatura.');
+      toast(confirmed.message,'success');await renderContracts();
+    }catch(error){handleFailure(error);}});input.click();
+  }
+
+  async function downloadContractDocument(documentInfo) {
+    try{const result=await callApi('apiGetContractDocument',state.token,documentInfo.id);if(!result||!result.downloadUrl)throw new Error('Documento indisponível.');window.location.href=result.downloadUrl;}catch(error){handleFailure(error);}
+  }
+
+  async function renderAudit() {
+    if(!isAdmin()){state.page='dashboard';setActiveNav('dashboard');return renderDashboard();}
+    const area=byId('content-area');area.replaceChildren();const heading=el('div','page-heading');const title=el('div');title.append(el('h2','','Histórico administrativo detalhado'),el('p','','Mostra autor, data, ação, campos alterados e valores anteriores e novos a partir da implantação desta melhoria.'));
+    const filters=el('div','row-actions');const from=document.createElement('input');from.type='date';from.setAttribute('aria-label','A partir de');const to=document.createElement('input');to.type='date';to.setAttribute('aria-label','Até');const entity=makeSelect([{label:'Todos os registros',value:''},...['lead','user','development','sale','contract','broker_profile','setting'].map((value)=>({label:value,value}))],'');
+    const apply=button('Filtrar','button-small button-primary',()=>{state.pageNumber=1;load();});filters.append(from,to,entity,apply);heading.append(title,filters);area.appendChild(heading);
+    const list=el('section','audit-list');list.appendChild(el('div','loading','Carregando histórico…'));area.appendChild(list);
+    const footer=el('div','table-toolbar');area.appendChild(footer);
+    async function load(){list.replaceChildren(el('div','loading','Carregando histórico…'));try{const result=await callApi('apiListAudit',state.token,{dateFrom:from.value,dateTo:to.value,entityType:entity.value},state.pageNumber,100);list.replaceChildren();footer.replaceChildren();if(!result||result.ok===false)throw new Error(result&&result.message?result.message:'Não foi possível carregar o histórico.');if(!result.items.length){list.appendChild(el('div','empty-state','Nenhuma alteração encontrada neste recorte.'));footer.appendChild(el('p','muted','0 alterações'));return;}result.items.forEach((item)=>{const details=document.createElement('details');details.className='audit-entry';const summary=document.createElement('summary');summary.append(el('strong','',item.actorName+' · '+item.actorRole),el('span','',formatDate(item.at)+' · '+item.action+' · '+item.entityType));details.appendChild(summary);const body=el('div','audit-values');body.append(el('div','', 'Registro: '+item.entityId),el('div','','Campos: '+(item.changedFields||'—')));const values=el('div','audit-value-grid');const before=el('div','audit-value-box');before.append(el('strong','','Antes'),el('pre','',JSON.stringify(item.beforeValues,null,2)));const after=el('div','audit-value-box');after.append(el('strong','','Depois'),el('pre','',JSON.stringify(item.afterValues,null,2)));values.append(before,after);body.appendChild(values);details.appendChild(body);list.appendChild(details);});const first=(result.page-1)*result.pageSize+1;const last=Math.min(result.total,result.page*result.pageSize);footer.appendChild(el('p','muted','Exibindo '+first+'–'+last+' de '+result.total+' alterações'));const controls=el('div','row-actions');const previous=button('Anterior','button-small',()=>{if(state.pageNumber>1){state.pageNumber-=1;load();}});const next=button('Próxima','button-small',()=>{if(state.pageNumber*result.pageSize<result.total){state.pageNumber+=1;load();}});previous.disabled=result.page<=1;next.disabled=result.page*result.pageSize>=result.total;controls.append(previous,next);footer.appendChild(controls);}catch(error){list.replaceChildren(el('div','empty-state','Não foi possível carregar o histórico.'));footer.replaceChildren();handleFailure(error);}}
+    await load();
   }
 
   async function logout(notify) {
