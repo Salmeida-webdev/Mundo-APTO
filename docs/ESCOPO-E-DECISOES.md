@@ -22,7 +22,10 @@
 ## Arquitetura e limites
 
 - Frontend estático publicado no Netlify; API em Netlify Functions; dados e autenticação no Supabase.
-- O dashboard sincroniza automaticamente enquanto está aberto e atualiza imediatamente na sessão que salvou. A versão inicial consulta alterações a cada 20 segundos; a migration deixa leads/histórico prontos para ativar Supabase Realtime na interface numa evolução sem refazer o modelo.
+- O dashboard e as telas abertas recebem um sinal técnico autenticado do Supabase Realtime após gravações do CRM. O sinal não contém dados de clientes; a interface também consulta a API a cada 20 segundos como fallback e mostra o estado da conexão.
+- A fila do SDR fica no início do dashboard, antes dos indicadores, com chamada visual destacada. Os avisos são somente dentro do CRM, não por e-mail ou WhatsApp; as 24 horas são corridas, incluindo fins de semana.
+- Ao sinalizar telefone incorreto, o CRM registra a ocorrência no histórico do SDR, atualiza a data de acompanhamento e cria uma pendência na carteira do corretor até que o telefone seja corrigido.
+- Recebimentos de vendas continuam manuais e append-only. Perfis administrativos podem anular uma parcela com justificativa; o lançamento permanece no histórico e na auditoria, os totais e o saldo excluem a parcela anulada e a fase do repasse não é alterada automaticamente.
 - A migration cria uma fotografia do status dos clientes no início do histórico e um gatilho que registra criações e transições posteriores. Não reconstrói mudanças anteriores.
 - A comparação semanal usa a semana do calendário, de segunda a domingo, contra a semana anterior até o mesmo dia e horário. A comparação mensal usa o mês atual contra o mês anterior até o mesmo dia (limitado ao último dia daquele mês). Um intervalo personalizado nos filtros compara o intervalo anterior de igual duração.
 - Conversão por etapa considera clientes que entraram na etapa (ou estavam nela no primeiro snapshot) e avançaram depois; o resultado acumulado pode mudar conforme os clientes continuam no funil.
@@ -41,4 +44,4 @@
 - **Tempo até o primeiro contato:** média entre cadastro e primeiro registro de contato do SDR para clientes cadastrados na janela; clientes sem contato registrado não entram no denominador.
 - **Alertas:** follow-up atrasado em alta quando o total aumenta; queda de conversão quando há pelo menos três clientes de coorte nos dois períodos e a taxa cai; primeiro contato mais demorado quando a média cresce pelo menos 10% e há ao menos dois contatos medidos; concentração quando dois ou mais atrasados representam pelo menos 30% do total em uma etapa, corretor ou empreendimento.
 - **Prazo de follow-up:** valor de 1 a 30 dias úteis, configurável pela gestão. O padrão é 3 dias úteis.
-- **Histórico inicial:** os 55 clientes atuais recebem um snapshot do status na aplicação da migration. A base atual não tem histórico de contatos SDR armazenado; esse histórico e as conversões anteriores a esse snapshot não podem ser reconstruídos.
+- **Histórico inicial:** os clientes ativos existentes recebem um snapshot do status na aplicação da migration. A base não tem histórico de contatos SDR armazenado antes da implantação; esse histórico e as conversões anteriores ao snapshot não podem ser reconstruídos.

@@ -10,13 +10,20 @@ const ALLOWED_METHODS = new Set([
   'apiChangePassword', 'apiGetReferenceData', 'apiGetDashboard', 'apiListLeads',
   'apiGetSdrHistory', 'apiSaveLead', 'apiListUsers', 'apiSaveUser',
   'apiGetSdrWorklist', 'apiListLeadAttempts', 'apiAddLeadAttempt', 'apiFlagPhoneIncorrect',
-  'apiListAudit', 'apiListSales', 'apiSaveSale', 'apiAddSaleReceipt', 'apiListBrokerProfiles', 'apiSaveBrokerProfile',
+  'apiListAudit', 'apiListSales', 'apiSaveSale', 'apiAddSaleReceipt', 'apiVoidSaleReceipt', 'apiListBrokerProfiles', 'apiSaveBrokerProfile',
   'apiListContracts', 'apiListContractLeads', 'apiSaveContract', 'apiGenerateContract', 'apiGetContractTemplate', 'apiSaveContractTemplate',
   'apiCreateContractUpload', 'apiConfirmContractSigned', 'apiGetContractDocument',
   'apiListArchivedLeads', 'apiArchiveLead', 'apiRestoreLead',
   'apiListArchivedUsers', 'apiArchiveUser', 'apiRestoreUser',
   'apiResetUserPassword', 'apiApplySharedTemporaryPassword', 'apiListDevelopments',
   'apiSaveDevelopment', 'apiPreviewLeadImport', 'apiImportLeads', 'apiExportLeads', 'apiExportReport', 'apiSaveFollowupDays'
+]);
+const MUTATING_METHODS = new Set([
+  'apiChangePassword', 'apiSaveFollowupDays', 'apiSaveLead', 'apiArchiveLead', 'apiRestoreLead',
+  'apiAddLeadAttempt', 'apiFlagPhoneIncorrect', 'apiSaveSale', 'apiAddSaleReceipt', 'apiVoidSaleReceipt',
+  'apiSaveBrokerProfile', 'apiSaveContract', 'apiGenerateContract', 'apiCreateContractUpload',
+  'apiConfirmContractSigned', 'apiSaveContractTemplate', 'apiSaveDevelopment', 'apiImportLeads',
+  'apiSaveUser', 'apiArchiveUser', 'apiRestoreUser', 'apiResetUserPassword', 'apiApplySharedTemporaryPassword'
 ]);
 
 class HttpError extends Error {
@@ -84,6 +91,15 @@ async function dbRequest(table, { method = 'GET', query = {}, body, prefer, rang
   const totalPart = (response.headers.get('content-range') || '').split('/').pop();
   const total = totalPart && totalPart !== '*' ? Number(totalPart) : Array.isArray(data) ? data.length : 0;
   return { data, total: Number.isFinite(total) ? total : 0 };
+}
+
+async function emitSyncSignal() {
+  // Polling remains as a fallback if Realtime is disconnected or temporarily unavailable.
+  try {
+    await dbRequest('crm_sync_signal', {
+      method: 'PATCH', query: { id: 'eq.1' }, prefer: 'return=minimal', body: { changed_at: now() }
+    });
+  } catch (_) {}
 }
 
 async function storageRequest(path, { method = 'GET', body, contentType, headers: extraHeaders = {} } = {}) {
@@ -353,6 +369,7 @@ async function apiGetReferenceData(token) {
   ]);
   return {
     systemName: CRM_CONFIG.systemName, user: publicUser(await getProfile(actor.id)), statuses: CRM_CONFIG.statuses,
+    realtime: { url: env().url, publishableKey: env().publishableKey },
     repassStatuses: CRM_CONFIG.repassStatuses,
     developments: (developments || []).map((item) => ({ id: item.id, name: item.name, active: item.active })),
     brokers: (users || []).map(mapUser).filter((item) => item.role === 'Corretor' && !item.deletedAt).map((item) => ({ id: item.id, name: item.name, email: item.email, role: item.role, active: item.active })),
@@ -547,14 +564,15 @@ async function apiFlagPhoneIncorrect(token, leadId, notes = '') {
   const actor = await verifyActor(token);
   if (actor.role !== 'SDR') throw new HttpError(403, 'Somente o SDR pode solicitar a correção do telefone.');
   if (!isUuid(leadId)) return { ok: false, message: 'Cliente inválido.' };
-  const rows = await dbRequest('crm_leads', { query: { select: 'id,broker_id,phone,phone_correction_required,deleted_at', id: `eq.${leadId}`, limit: 1 } });
+  const rows = await dbRequest('crm_leads', { query: { select: 'id,broker_id,phone,status,sdr_updated_at,phone_correction_required,deleted_at', id: `eq.${leadId}`, limit: 1 } });
   const lead = Array.isArray(rows) ? rows[0] : null;
   if (!lead || lead.deleted_at) return { ok: false, message: 'Cliente não encontrado.' };
   if (lead.phone_correction_required) return { ok: true, message: 'A correção do telefone já está pendente para o corretor responsável.' };
   const stamp = now();
-  await dbRequest('crm_leads', { method: 'PATCH', query: { id: `eq.${leadId}` }, prefer: 'return=minimal', body: { phone_correction_required: true, phone_correction_requested_at: stamp, phone_correction_requested_by: actor.id, phone_correction_notes: String(notes || '').trim().slice(0, 1000), updated_at: stamp, updated_by: actor.id } });
   const note = String(notes || '').trim().slice(0, 1000);
-  await audit(actor, 'lead.phone_correction_requested', 'lead', leadId, ['phoneCorrectionRequired'], { phoneCorrectionRequired: false, phone: lead.phone }, { phoneCorrectionRequired: true, phone: lead.phone, notes: note, requestedAt: stamp, requestedBy: actor.name });
+  await dbRequest('crm_leads', { method: 'PATCH', query: { id: `eq.${leadId}` }, prefer: 'return=minimal', body: { phone_correction_required: true, phone_correction_requested_at: stamp, phone_correction_requested_by: actor.id, phone_correction_notes: note, sdr_updated_at: stamp, sdr_updated_by: actor.id, updated_at: stamp, updated_by: actor.id } });
+  await dbRequest('crm_sdr_history', { method: 'POST', prefer: 'return=minimal', body: { lead_id: leadId, user_id: actor.id, user_name: actor.name, status: lead.status || 'Em contato', feedback: note || 'Telefone informado inválido; correção solicitada ao corretor responsável.', source: 'Telefone incorreto: correção solicitada ao corretor', at: stamp } });
+  await audit(actor, 'lead.phone_correction_requested', 'lead', leadId, ['phoneCorrectionRequired','sdrUpdatedAt'], { phoneCorrectionRequired: false, phone: lead.phone, sdrUpdatedAt: lead.sdr_updated_at || null }, { phoneCorrectionRequired: true, phone: lead.phone, notes: note, requestedAt: stamp, requestedBy: actor.name, sdrUpdatedAt: stamp });
   return { ok: true, message: 'Correção solicitada. O cliente ficará pendente para o corretor responsável.' };
 }
 
@@ -653,14 +671,16 @@ async function apiListSales(token) {
   const receiptGroups = new Map();
   (receipts || []).forEach((item) => {
     const key = String(item.sale_id); const list = receiptGroups.get(key) || [];
-    list.push({ id: item.id, amount: Number(item.amount), receivedAt: item.received_at, notes: item.notes || '', createdAt: item.created_at });
+    const createdBy = users.find((user) => String(user.id) === String(item.created_by));
+    const voidedBy = users.find((user) => String(user.id) === String(item.voided_by));
+    list.push({ id: item.id, amount: Number(item.amount), receivedAt: item.received_at, notes: item.notes || '', createdAt: item.created_at, createdBy: item.created_by || '', createdByName: createdBy ? createdBy.name : '', voidedAt: item.voided_at || '', voidedBy: item.voided_by || '', voidedByName: voidedBy ? voidedBy.name : '', voidReason: item.void_reason || '' });
     receiptGroups.set(key, list);
   });
   return (sales || []).map((row) => {
     const broker = users.find((item) => String(item.id) === String(row.broker_id));
     const development = developments.find((item) => String(item.id) === String(row.development_id));
     const payments = receiptGroups.get(String(row.id)) || [];
-    const received = Math.round(payments.reduce((sum, item) => sum + item.amount, 0) * 100) / 100;
+    const received = Math.round(payments.filter((item) => !item.voidedAt).reduce((sum, item) => sum + item.amount, 0) * 100) / 100;
     return { id: row.id, internalNumber: row.internal_number, processNumber: row.process_number || '', leadId: row.lead_id || '', buyerName: row.buyer_name,
       developmentId: row.development_id || '', developmentName: development ? development.name : '', brokerId: row.broker_id,
       brokerName: broker ? broker.name : 'Corretor inativo', soldAt: row.sold_at, unit: row.unit || '', unitValue: Number(row.unit_value || 0),
@@ -756,6 +776,27 @@ async function apiAddSaleReceipt(token, saleId, payload = {}) {
   return { ok: true, message: 'Recebimento registrado; a fase selecionada pela gestão foi preservada.', totalReceived: Number(result.received_total), balance: Number(result.balance), repassStatus: result.repass_status };
 }
 
+async function apiVoidSaleReceipt(token, receiptId, payload = {}) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  if (!isUuid(receiptId)) return { ok: false, message: 'Recebimento inválido.' };
+  const reason = String(payload.reason || '').trim();
+  if (reason.length < 5 || reason.length > 1000) return { ok: false, message: 'Informe uma justificativa entre 5 e 1.000 caracteres.' };
+  const response = await dbRequest('rpc/crm_void_sale_receipt', {
+    method: 'POST', body: { p_receipt_id: receiptId, p_actor_id: actor.id, p_reason: reason }
+  });
+  const result = Array.isArray(response) ? response[0] : response;
+  if (!result) throw new HttpError(502, 'Não foi possível corrigir o recebimento.');
+  const totalBefore = Number(result.previous_received_total);
+  const totalAfter = Number(result.received_total);
+  const amount = Number(result.amount);
+  const balance = Number(result.balance);
+  await audit(actor, 'sale.receipt.void', 'sale', result.sale_id,
+    ['recebimento','repasse_recebido','saldo_repasse','motivo'],
+    { receiptId, receivedAmount: totalBefore, balanceRepass: balance - amount },
+    { receiptId, voidedAmount: amount, receivedAmount: totalAfter, balanceRepass: balance, receivedAt: result.received_at, reason });
+  return { ok: true, message: 'Recebimento anulado com justificativa; o histórico foi preservado e a fase do repasse não foi alterada.', totalReceived: totalAfter, balance, repassStatus: result.repass_status };
+}
+
 async function apiListBrokerProfiles(token) {
   const actor = await verifyActor(token); requireAdmin(actor);
   const [profiles, users] = await Promise.all([listAll('crm_broker_profiles', { select: '*' }), listAll('crm_users', { select: 'id,name,email,role,active,deleted_at' })]);
@@ -817,7 +858,7 @@ const DEFAULT_CONTRACT_TEMPLATE_HTML = `<!doctype html>
   <tr><td><span class="label">Empreendimento</span><span class="value">{{empreendimento}}</span></td><td><span class="label">Unidade / Torre</span><span class="value">{{unidade}}</span></td></tr>
   <tr><td><span class="label">Valor da venda (R$)</span><span class="value">{{valor_unidade}}</span></td><td><span class="label">Nº da proposta / pasta</span><span class="value">{{numero_proposta}}</span></td></tr></table>
   <h2>2. PARTICIPANTES</h2>
-  <table><tr><td><span class="label">Corretor responsável</span><span class="value">{{corretor_nome}}</span></td><td><span class="label">CRECI/SP</span><span class="value">{{corretor_creci}}</span></td></tr>
+  <table><tr><td><span class="label">Corretor responsável</span><span class="value">{{corretor_nome}}</span></td><td><span class="label">CRECI</span><span class="value">{{corretor_creci}}</span></td></tr>
   <tr><td><span class="label">CPF do corretor</span><span class="value">{{corretor_cpf}}</span></td><td><span class="label">SDR</span><span class="value">{{sdr_nome}}</span></td></tr>
   <tr><td><span class="label">CNPJ do corretor</span><span class="value">{{corretor_cnpj}}</span></td><td><span class="label">Endereço do corretor</span><span class="value">{{corretor_endereco}}</span></td></tr>
   <tr><td><span class="label">CPF do SDR</span><span class="value">{{sdr_cpf}}</span></td><td><span class="label">Gestor</span><span class="value">{{gerente_nome}}</span></td></tr></table>
@@ -1363,7 +1404,7 @@ const api = {
   apiGetSdrWorklist, apiListLeadAttempts, apiAddLeadAttempt, apiFlagPhoneIncorrect, apiListAudit,
   apiListUsers, apiSaveUser, apiListArchivedUsers, apiArchiveUser, apiRestoreUser,
   apiListArchivedLeads, apiArchiveLead, apiRestoreLead,
-  apiListSales, apiSaveSale, apiAddSaleReceipt, apiListBrokerProfiles, apiSaveBrokerProfile,
+  apiListSales, apiSaveSale, apiAddSaleReceipt, apiVoidSaleReceipt, apiListBrokerProfiles, apiSaveBrokerProfile,
   apiListContracts, apiListContractLeads, apiSaveContract, apiGenerateContract, apiGetContractTemplate, apiSaveContractTemplate,
   apiCreateContractUpload, apiConfirmContractSigned, apiGetContractDocument,
   apiResetUserPassword, apiApplySharedTemporaryPassword,
@@ -1384,7 +1425,11 @@ export default async (request) => {
   const method = String(body && body.method || '');
   const args = body && Array.isArray(body.args) ? body.args : [];
   if (!ALLOWED_METHODS.has(method) || typeof api[method] !== 'function') return json({ message: 'Operação não reconhecida.' }, 404);
-  try { return json(await api[method](...args)); }
+  try {
+    const result = await api[method](...args);
+    if (MUTATING_METHODS.has(method) && result && result.ok !== false) await emitSyncSignal();
+    return json(result);
+  }
   catch (error) {
     const status = error instanceof HttpError ? error.status : 500;
     const message = error instanceof HttpError ? error.message : 'Não foi possível concluir a operação. Tente novamente.';

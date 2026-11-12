@@ -1,7 +1,7 @@
 <script>
 (() => {
   'use strict';
-  const state = { token: '', refreshToken: '', user: null, refs: null, page: 'dashboard', pageNumber: 1, lastDashboard: null, pollId: null, queryTimer: null };
+  const state = { token: '', refreshToken: '', user: null, refs: null, page: 'dashboard', pageNumber: 1, lastDashboard: null, pollId: null, queryTimer: null, realtimeClient: null, realtimeChannel: null, realtimeTimer: null };
   const byId = (id) => document.getElementById(id);
   const ADMIN_ROLES = ['Administrador', 'Gerente', 'Coordenador', 'Assistente'];
   const ROLE_LIST = ['Administrador', 'Gerente', 'Coordenador', 'Assistente', 'SDR', 'Corretor'];
@@ -37,6 +37,7 @@
           state.refreshToken = refreshed.result.refreshToken;
           sessionStorage.setItem('crm-session-token', state.token);
           sessionStorage.setItem('crm-refresh-token', state.refreshToken);
+          if (state.realtimeClient) { try { state.realtimeClient.realtime.setAuth(state.token); } catch (_) { setRealtimeStatus('fallback'); } }
           const retryArgs = args.slice();
           retryArgs[0] = state.token;
           const retry = await request(method, retryArgs);
@@ -57,6 +58,63 @@
     region.appendChild(item);
     window.setTimeout(() => item.remove(), 4200);
   }
+
+  function setRealtimeStatus(status) {
+    const label = byId('sync-label'); const dot = byId('sync-dot');
+    if (!label || !dot) return;
+    const labels = { connecting: 'Conectando atualização…', live: 'Atualização em tempo real ativa', fallback: 'Atualização automática ativa' };
+    label.textContent = labels[status] || labels.fallback;
+    dot.className = 'live-dot sync-dot-' + (status === 'live' ? 'live' : status === 'fallback' ? 'fallback' : 'connecting');
+  }
+
+  function loadRealtimeSdk() {
+    if (window.supabase && window.supabase.createClient) return Promise.resolve(window.supabase);
+    return new Promise((resolve, reject) => {
+      let script = byId('supabase-realtime-sdk');
+      if (!script) { script = document.createElement('script'); script.id = 'supabase-realtime-sdk'; script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.0/dist/umd/supabase.js'; script.async = true; document.head.appendChild(script); }
+      script.addEventListener('load', () => window.supabase && window.supabase.createClient ? resolve(window.supabase) : reject(new Error('SDK indisponível')), { once: true });
+      script.addEventListener('error', () => reject(new Error('SDK indisponível')), { once: true });
+    });
+  }
+
+  async function stopRealtimeSync() {
+    if (state.realtimeTimer) window.clearTimeout(state.realtimeTimer);
+    state.realtimeTimer = null;
+    if (state.realtimeClient && state.realtimeChannel) await state.realtimeClient.removeChannel(state.realtimeChannel).catch(() => {});
+    state.realtimeChannel = null; state.realtimeClient = null;
+  }
+
+  function scheduleRealtimeRefresh() {
+    if (state.realtimeTimer) window.clearTimeout(state.realtimeTimer);
+    state.realtimeTimer = window.setTimeout(() => {
+      state.realtimeTimer = null;
+      if (!document.hidden && state.token) refreshPage(true).catch(handleFailure);
+    }, 250);
+  }
+
+  async function startRealtimeSync() {
+    await stopRealtimeSync();
+    const config = state.refs && state.refs.realtime;
+    if (!config || !config.url || !config.publishableKey || !state.token || (state.user && state.user.mustChangePassword)) { setRealtimeStatus('fallback'); return; }
+    setRealtimeStatus('connecting');
+    try {
+      const sdk = await loadRealtimeSdk();
+      if (!state.token) return;
+      const client = sdk.createClient(config.url, config.publishableKey, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+      state.realtimeClient = client;
+      await client.realtime.setAuth(state.token);
+      state.realtimeChannel = client.channel('crm-sync-signal').on('postgres_changes', {
+        event: 'UPDATE', schema: 'public', table: 'crm_sync_signal', filter: 'id=eq.1'
+      }, scheduleRealtimeRefresh).subscribe((status) => {
+        if (status === 'SUBSCRIBED') setRealtimeStatus('live');
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') setRealtimeStatus('fallback');
+      });
+    } catch (_) { setRealtimeStatus('fallback'); await stopRealtimeSync(); }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && state.token) refreshPage(true).catch(handleFailure);
+  });
 
   function showLoading(message) {
     const area = byId('content-area');
@@ -165,6 +223,8 @@
         if (state.user && state.user.role === 'SDR' && !['dashboard','sdrAlerts'].includes(state.page)) updateSdrNavigation().catch(handleFailure);
       }
     }, 20000);
+    if (!state.user.mustChangePassword) startRealtimeSync().catch(() => setRealtimeStatus('fallback'));
+    else setRealtimeStatus('fallback');
     if (state.user.mustChangePassword) openPasswordDialog(true);
     else if (!restored) toast('Bem-vindo, ' + state.user.name.split(' ')[0] + '.', 'success');
   }
@@ -264,10 +324,14 @@
     area.replaceChildren();
     const heading = el('div', 'page-heading');
     const text = el('div');
-    text.append(el('h2', '', 'Acompanhamento da operação'), el('p', '', 'Indicadores atuais e históricos por carteira, empreendimento e período. Sincronização automática a cada 20 segundos.'));
+    text.append(el('h2', '', 'Acompanhamento da operação'), el('p', '', 'Indicadores atuais e históricos por carteira, empreendimento e período. Atualização em tempo real com consulta automática de segurança.'));
     heading.append(text);
     if (isAdmin()) heading.appendChild(button('Exportar relatório CSV', 'button-small', exportReport));
     area.appendChild(heading);
+    if (sdrWorklist) {
+      updateSdrBadges(sdrWorklist);
+      area.appendChild(buildSdrAlerts(sdrWorklist));
+    }
 
     const cards = el('section', 'kpi-grid');
     cards.append(
@@ -353,10 +417,6 @@
     if (!data.staleLeads.length) stalePanel.appendChild(el('div', 'empty-state', 'Tudo em dia. Não há clientes vencidos para follow-up.'));
     else stalePanel.appendChild(buildStalePreview(data.staleLeads));
     area.appendChild(stalePanel);
-    if (sdrWorklist) {
-      updateSdrBadges(sdrWorklist);
-      area.appendChild(buildSdrAlerts(sdrWorklist));
-    }
     area.appendChild(buildAnalyticsPanel(data.analytics));
   }
 
@@ -365,6 +425,15 @@
     const head = el('div', 'panel-header'); const title = el('div');
     title.append(el('h3', '', 'Fila de ação do SDR'), el('p', '', 'Avisos internos no painel; não são enviados por e-mail ou WhatsApp. A regra de 24 horas inclui fins de semana.'));
     head.append(title, el('span', 'panel-chip', 'Acompanhamento diário')); panel.appendChild(head);
+    const attentionCount = worklist.followupAlerts.length + worklist.sevenAttemptAlerts.length + worklist.phoneCorrections.length;
+    const callout = el('div', 'sdr-alert-callout ' + (attentionCount ? 'sdr-alert-callout-urgent' : worklist.newLeads.length ? 'sdr-alert-callout-pending' : 'sdr-alert-callout-clear'));
+    callout.setAttribute('role', 'status'); callout.setAttribute('aria-live', 'polite');
+    callout.append(el('span', 'sdr-alert-icon', attentionCount ? '!' : worklist.newLeads.length ? '◷' : '✓'));
+    const copy = el('div', 'sdr-alert-callout-copy');
+    copy.append(el('strong', '', attentionCount ? attentionCount + ' cliente(s) precisam de atenção do SDR' : worklist.newLeads.length ? worklist.newLeads.length + ' cadastro(s) aguardam o primeiro contato' : 'Nenhum alerta pendente para o SDR'), el('span', '', 'A fila fica no topo do painel. Os avisos aparecem somente dentro do CRM.'));
+    callout.appendChild(copy);
+    callout.appendChild(button('Abrir fila de alertas', 'button-primary', () => { state.page = 'sdrAlerts'; setActiveNav(state.page); refreshPage().catch(handleFailure); }));
+    panel.appendChild(callout);
     const cards = el('div', 'sdr-alert-summary');
     cards.append(kpi('Novos cadastros', worklist.newLeads.length, 'Ainda sem primeiro contato', '#EE7A00'),
       kpi('Aguardando há 24h+', worklist.followupAlerts.length, 'Desde o último contato ou cadastro', '#f59e0b'),
@@ -877,7 +946,7 @@
   function exportSalesCsv(rows) {
     if (!isAdmin()) return;
     const headers = ['numero_interno','numero_processo','cliente','empreendimento','unidade_torre','corretor','data_venda','valor_unidade','status_venda','possui_pendencia','detalhe_pendencia','contabilizada','repasse_previsto','repasse_recebido','saldo_repasse','fase_repasse','historico_recebimentos','observacoes'];
-    const values = rows.map((item) => [item.internalNumber,item.processNumber,item.buyerName,item.developmentName,item.unit,item.brokerName,item.soldAt,item.unitValue,item.saleStatus,item.hasPending?'Sim':'Não',item.pendingDescription,item.accounted?'Sim':'Não',item.expectedRepass,item.receivedRepass,item.balanceRepass,item.repassStatus,(item.receipts||[]).map((receipt)=>`${receipt.receivedAt} — ${brl(receipt.amount)}${receipt.notes?' ('+receipt.notes+')':''}`).join(' | '),item.notes]);
+    const values = rows.map((item) => [item.internalNumber,item.processNumber,item.buyerName,item.developmentName,item.unit,item.brokerName,item.soldAt,item.unitValue,item.saleStatus,item.hasPending?'Sim':'Não',item.pendingDescription,item.accounted?'Sim':'Não',item.expectedRepass,item.receivedRepass,item.balanceRepass,item.repassStatus,(item.receipts||[]).map((receipt)=>`${receipt.receivedAt} — ${brl(receipt.amount)}${receipt.notes?' ('+receipt.notes+')':''}${receipt.voidedAt?' [ANULADO: '+receipt.voidReason+']':''}`).join(' | '),item.notes]);
     downloadCsv('vendas-repasses-mundo-apto-'+new Date().toISOString().slice(0,10)+'.csv',headers,values);
     toast(rows.length+' venda(s) exportada(s) com os filtros atuais.','success');
   }
@@ -1274,17 +1343,47 @@
   }
 
   function showSaleReceipts(sale) {
-    const detail=sale.receipts.map((item)=>formatDate(item.receivedAt)+' · '+brl(item.amount)+(item.notes?' · '+item.notes:'')).join('\n');
-    window.alert('Histórico de recebimentos — '+sale.internalNumber+'\n\n'+detail+'\n\nTotal lançado: '+brl(sale.receivedRepass));
+    const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');
+    box.append(el('h2','','Histórico de recebimentos'),el('p','muted',sale.internalNumber+' · Total ativo: '+brl(sale.receivedRepass)+' · Saldo: '+brl(sale.balanceRepass)));
+    const list=el('div','receipt-history-list');
+    sale.receipts.forEach((item)=>{
+      const row=el('article','receipt-history-row');const details=el('div','receipt-history-details');
+      details.append(el('strong','',formatDate(item.receivedAt)+' · '+brl(item.amount)+(item.voidedAt?' · ANULADO':'')),el('small','',(item.createdByName?'Lançado por '+item.createdByName:'Lançamento original')+(item.notes?' · '+item.notes:'')));
+      if(item.voidedAt)details.appendChild(el('small','receipt-void-reason','Anulado por '+(item.voidedByName||'perfil administrativo')+' · '+item.voidReason));
+      row.appendChild(details);
+      if(!item.voidedAt)row.appendChild(button('Anular com justificativa','button-small',()=>voidSaleReceipt(sale,item)));
+      list.appendChild(row);
+    });
+    if(!sale.receipts.length)list.appendChild(el('div','empty-state','Nenhum recebimento registrado.'));
+    box.appendChild(list);box.appendChild(button('Fechar','button-small',()=>dialog.close()));content.appendChild(box);dialog.showModal();
+  }
+
+  async function voidSaleReceipt(sale, receipt) {
+    const reason=window.prompt('Informe a justificativa para anular este recebimento (mínimo de 5 caracteres).');
+    if(reason===null)return;
+    if(reason.trim().length<5){toast('A justificativa precisa ter pelo menos 5 caracteres.','error');return;}
+    if(!window.confirm('O recebimento ficará marcado como anulado e será preservado no histórico e na auditoria. A fase do repasse não será alterada. Continuar?'))return;
+    try{
+      const result=await callApi('apiVoidSaleReceipt',state.token,receipt.id,{reason:reason.trim()});
+      if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível corrigir o recebimento.');
+      byId('admin-dialog').close();toast(result.message,'success');await renderSales();
+    }catch(error){toast(error.message||'Não foi possível corrigir o recebimento.','error');}
   }
 
   async function renderContracts() {
-    const contracts=await callApi('apiListContracts',state.token); const area=byId('content-area');area.replaceChildren();
-    const heading=el('div','page-heading');const title=el('div');const admin=isAdmin();
+    const admin=isAdmin();const [contracts,brokerProfiles]=await Promise.all([callApi('apiListContracts',state.token),admin?callApi('apiListBrokerProfiles',state.token):Promise.resolve([])]); const area=byId('content-area');area.replaceChildren();
+    const heading=el('div','page-heading');const title=el('div');
     title.append(el('h2','','Contratos de venda'),el('p','',admin?'Rascunhos e documentos ficam restritos à gestão. Corretor e SDR só consultam o arquivo depois que a gestão registrar a assinatura.':'Você vê apenas contratos assinados vinculados à sua carteira ou atuação como SDR.'));
     const actions=el('div','row-actions');
     if(admin){actions.append(button('Exportar contratos CSV','button-small',()=>exportContractsCsv(contracts)),button('+ Novo contrato','button-primary',()=>openContractDialog(null)),button('Modelo do documento','button-small',openContractTemplateDialog),button('Cadastro dos corretores','button-small',renderBrokerProfiles));}
     heading.append(title,actions);area.appendChild(heading);
+    if(admin){
+      const incomplete=brokerProfiles.filter((profile)=>!profile.cpf||!profile.cnpj||!profile.creci||!profile.address).length;
+      const readiness=el('section','contract-readiness '+(incomplete?'contract-readiness-pending':'contract-readiness-ready'));
+      readiness.append(el('strong','',incomplete?incomplete+' cadastro(s) de corretor incompleto(s) para geração de contrato':'Cadastros dos corretores completos'));
+      readiness.appendChild(el('p','',incomplete?'Preencha CPF, CNPJ, CRECI e endereço em “Cadastro dos corretores”. O rascunho também exige CPF do comprador e do SDR. Revise e aprove o texto do modelo com a empresa antes de gerar.':'Confira CPF do comprador e do SDR em cada rascunho e mantenha o texto do modelo aprovado pela empresa. A assinatura continua externa; depois, anexe e confirme o documento assinado no CRM.'));
+      area.appendChild(readiness);
+    }
     const panel=el('section','table-panel');const scroll=el('div','table-scroll');const table=el('table','data-table');const thead=el('thead');const h=el('tr');
     ['Documento','Cliente','Empreendimento / unidade','Corretor','Comissão total (50/50)','Prêmio (50/50)','Situação','Arquivos','Ações'].forEach((label)=>h.appendChild(el('th','',label)));thead.appendChild(h);table.appendChild(thead);const body=el('tbody');
     if(!contracts.length){const tr=el('tr');const td=el('td','table-empty',admin?'Nenhum contrato cadastrado.':'Nenhum contrato assinado foi disponibilizado para você.');td.colSpan=9;tr.appendChild(td);body.appendChild(tr);}
@@ -1302,7 +1401,7 @@
       actionsCell.appendChild(buttons);tr.appendChild(actionsCell);body.appendChild(tr);
     });
     table.appendChild(body);scroll.appendChild(table);panel.appendChild(scroll);area.appendChild(panel);
-    if(admin){const hint=el('p','field-hint','O modelo padrão segue o termo em branco fornecido para o Mundo Apto. A gestão pode revisar e ajustar o HTML aprovado. O documento é baixado para assinatura externa; a gestão anexa e confirma o arquivo assinado. O corretor e o SDR vinculados só podem consultar e baixar esse arquivo após a confirmação. A exportação CSV contém metadados do registro, sem anexar os documentos.');area.appendChild(hint);}
+    if(admin){const hint=el('p','field-hint','O modelo inicial segue o termo em branco fornecido para o Mundo Apto; o exemplo preenchido serve de referência e seus dados não são reutilizados. A gestão pode revisar e ajustar o modelo aprovado. O documento é baixado para assinatura externa; a gestão anexa e confirma o arquivo assinado. O corretor e o SDR vinculados só podem consultar e baixar esse arquivo após a confirmação. A exportação CSV contém metadados do registro, sem anexar documentos.');area.appendChild(hint);}
   }
 
   async function openContractDialog(contract) {
@@ -1387,6 +1486,7 @@
   }
 
   async function logout(notify) {
+    await stopRealtimeSync();
     const token = state.token;
     if (token) {
       try { await callApi('apiLogout', token, state.refreshToken); } catch (_) { /* sessão já pode ter expirado */ }

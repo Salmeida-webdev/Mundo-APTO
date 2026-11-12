@@ -52,3 +52,31 @@ test('ficha do cliente oferece histórico de contatos e encaixa a linha do tempo
   assert.match(client, /Registrar contato/);
   assert.match(styles, /\.sdr-history-list\{display:grid;gap:9px;max-height:330px;overflow:auto/);
 });
+
+test('alertas do SDR aparecem no topo do dashboard com destaque e sem envio externo', () => {
+  const alertPosition=client.indexOf('area.appendChild(buildSdrAlerts(sdrWorklist))');
+  const kpiPosition=client.indexOf("const cards = el('section', 'kpi-grid')");
+  assert.ok(alertPosition>=0&&kpiPosition>alertPosition,'a fila de alertas precisa anteceder os indicadores do dashboard');
+  assert.match(client,/sdr-alert-callout-urgent/);
+  assert.match(client,/A fila fica no topo do painel/);
+  assert.match(client,/não são enviados por e-mail ou WhatsApp/);
+  assert.match(client,/A regra de 24 horas inclui fins de semana/);
+  assert.match(styles,/\.sdr-alert-callout-urgent\{background:linear-gradient\(110deg,#FFF1F2,#FFF7ED\);border-color:#FCA5A5/);
+  assert.match(styles,/\.sdr-worklist-panel\{margin:0 0 18px;border:2px solid #F3B567/);
+});
+
+test('sincronização ao vivo mantém polling de segurança e informa o estado da conexão', () => {
+  assert.match(client,/table: 'crm_sync_signal'/);
+  assert.match(client,/status === 'SUBSCRIBED'/);
+  assert.match(client,/setRealtimeStatus\('fallback'\)/);
+  assert.match(client,/window\.setInterval\(\(\) =>/);
+  assert.match(client,/20000/);
+  assert.match(index,/id="sync-label" role="status"/);
+});
+
+test('histórico de recebimentos permite anulação justificada sem apagar o lançamento', () => {
+  assert.match(client,/Anular com justificativa/);
+  assert.match(client,/apiVoidSaleReceipt/);
+  assert.match(client,/O recebimento ficará marcado como anulado e será preservado no histórico e na auditoria/);
+  assert.match(client,/voidReason/);
+});

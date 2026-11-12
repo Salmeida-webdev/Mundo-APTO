@@ -33,7 +33,8 @@ const rows = {
   crm_contracts: [],
   crm_contract_documents: [],
   crm_sessions: [],
-  crm_settings: []
+  crm_settings: [],
+  crm_sync_signal: [{ id: 1, changed_at: '2026-11-12T00:00:00.000Z' }]
 };
 
 const jwtFor = (role, userId, email, sessionVersion = 0) => `e30.${Buffer.from(JSON.stringify({ sub: userId, app_metadata: { role, crm_session_version: sessionVersion } })).toString('base64url')}.signature`;
@@ -91,13 +92,27 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
       const payload = JSON.parse(options.body);
       const sale = rows.crm_sales.find((item) => item.id === payload.p_sale_id && !item.deleted_at);
       if (!sale) return Response.json({ message:'sale_not_found' }, { status:400 });
-      const prior = rows.crm_sales_receipts.filter((item) => item.sale_id === sale.id).reduce((sum,item)=>sum+Number(item.amount),0);
+      const prior = rows.crm_sales_receipts.filter((item) => item.sale_id === sale.id && !item.voided_at).reduce((sum,item)=>sum+Number(item.amount),0);
       const total = Math.round((prior + Number(payload.p_amount))*100)/100;
       const previousStatus = sale.repass_status;
       const status = sale.repass_status;
       const receipt = { id:`receipt-${rows.crm_sales_receipts.length+1}`, sale_id:sale.id, amount:Number(payload.p_amount), received_at:payload.p_received_at, notes:payload.p_notes || '', created_by:payload.p_actor_id, created_at:new Date().toISOString() };
       rows.crm_sales_receipts.push(receipt); sale.updated_by=payload.p_actor_id;
       return Response.json([{ receipt_id:receipt.id, received_total:total, balance:Math.round((Number(sale.expected_repass)-total)*100)/100, repass_status:status, previous_status:previousStatus }]);
+    }
+    if (url.pathname === '/rest/v1/rpc/crm_void_sale_receipt') {
+      const payload = JSON.parse(options.body);
+      const receipt = rows.crm_sales_receipts.find((item) => item.id === payload.p_receipt_id);
+      if (!receipt) return Response.json({ message:'receipt_not_found' }, { status:400 });
+      if (receipt.voided_at) return Response.json({ message:'receipt_already_voided' }, { status:400 });
+      const sale = rows.crm_sales.find((item) => item.id === receipt.sale_id);
+      if (!sale) return Response.json({ message:'sale_not_found' }, { status:400 });
+      const active = rows.crm_sales_receipts.filter((item) => item.sale_id === sale.id && !item.voided_at);
+      const previous = Math.round(active.reduce((sum,item)=>sum+Number(item.amount),0)*100)/100;
+      receipt.voided_at = new Date().toISOString(); receipt.voided_by = payload.p_actor_id; receipt.void_reason = payload.p_reason;
+      const total = Math.round(rows.crm_sales_receipts.filter((item)=>item.sale_id===sale.id&&!item.voided_at).reduce((sum,item)=>sum+Number(item.amount),0)*100)/100;
+      sale.updated_by=payload.p_actor_id; sale.updated_at=receipt.voided_at;
+      return Response.json([{ sale_id:sale.id,receipt_id:receipt.id,amount:Number(receipt.amount),received_at:receipt.received_at,notes:receipt.notes||'',previous_received_total:previous,received_total:total,balance:Math.round((Number(sale.expected_repass)-total)*100)/100,repass_status:sale.repass_status }]);
     }
     if (url.pathname.startsWith('/rest/v1/')) {
       const table = url.pathname.split('/').pop();
@@ -491,14 +506,31 @@ test('SDR separa clientes novos e registra a 7ª tentativa sem mudar o status au
 });
 
 test('telefone incorreto vira pendência para a carteira; só o corretor responsável corrige o próprio número', async (t) => {
-  const originals = { leads:rows.crm_leads.slice(), audit:rows.crm_audit.slice() };
-  t.after(() => { rows.crm_leads.splice(0,rows.crm_leads.length,...originals.leads); rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit); });
+  const originals = { leads:rows.crm_leads.slice(), audit:rows.crm_audit.slice(), history:rows.crm_sdr_history.slice() };
+  t.after(() => { rows.crm_leads.splice(0,rows.crm_leads.length,...originals.leads); rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit); rows.crm_sdr_history.splice(0,rows.crm_sdr_history.length,...originals.history); });
   const id='10000000-0000-4000-8000-000000000032';
   rows.crm_leads.push({ id, name:'Telefone pendente', phone:'11999990032', development_id:'E001', notes:'', sdr_feedback:'', status:'Em contato', broker_id:userIdBrokerA, created_at:'2026-11-08T10:00:00Z', created_by:userIdBrokerA, updated_at:'2026-11-08T10:00:00Z', updated_by:userIdBrokerA, sdr_updated_at:null, sdr_updated_by:null, phone_correction_required:false });
   const sdr=mockEnvironmentAndFetch(t,{role:'SDR',userId:userIdSdr,email:'sdr@example.test'});
   const flagged=await invoke('apiFlagPhoneIncorrect',[sdr.token,id,'Número não completa a chamada'],sdr.token);
   assert.equal(flagged.body.ok,true,JSON.stringify(flagged.body));
-  assert.equal(rows.crm_leads.find((lead)=>lead.id===id).phone_correction_required,true);
+  const lead=rows.crm_leads.find((item)=>item.id===id);
+  assert.equal(lead.phone_correction_required,true);
+  assert.equal(lead.sdr_updated_by,userIdSdr);
+  assert.ok(Date.now()-new Date(lead.sdr_updated_at).getTime()<5000);
+  assert.equal(rows.crm_sdr_history.at(-1).source,'Telefone incorreto: correção solicitada ao corretor');
+  assert.equal(rows.crm_sdr_history.at(-1).feedback,'Número não completa a chamada');
+  const worklist=await invoke('apiGetSdrWorklist',[sdr.token],sdr.token);
+  assert.equal(worklist.body.newLeads.some((item)=>item.id===id),false);
+  assert.equal(worklist.body.followupAlerts.some((item)=>item.id===id),false);
+  assert.equal(worklist.body.phoneCorrections.some((item)=>item.id===id),true);
+});
+
+test('configuração Realtime só entrega chave pública a usuário autenticado', async (t) => {
+  const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
+  const refs=await invoke('apiGetReferenceData',[manager.token],manager.token);
+  assert.equal(refs.response.status,200);
+  assert.deepEqual(refs.body.realtime,{url:'https://supabase.example.test',publishableKey:'public-test-key'});
+  assert.equal(JSON.stringify(refs.body).includes('service-test-key'),false);
 });
 
 test('corretor remove a pendência ao atualizar o telefone da própria carteira', async (t) => {
@@ -657,6 +689,42 @@ test('gestão registra venda manual sem lead e acompanha repasses em parcelas au
   assert.equal(savedSale.balanceRepass,0);
 });
 
+test('anulação de recebimento preserva auditoria e não infla lançamentos posteriores', async (t) => {
+  const originals={sales:rows.crm_sales.slice(),receipts:rows.crm_sales_receipts.slice(),audit:rows.crm_audit.slice()};
+  t.after(()=>{rows.crm_sales.splice(0,rows.crm_sales.length,...originals.sales);rows.crm_sales_receipts.splice(0,rows.crm_sales_receipts.length,...originals.receipts);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
+  const saleId='10000000-0000-4000-8000-000000000043';
+  const receiptId='10000000-0000-4000-8000-000000000044';
+  rows.crm_sales.push({id:saleId,internal_number:'MA-TESTE-43',process_number:'',lead_id:null,buyer_name:'Cliente de teste',development_id:'E001',broker_id:userIdBrokerA,sold_at:'2026-11-10',unit:'A-103',unit_value:180000,sale_status:'Cadastrada',has_pending:false,pending_description:'',accounted:false,expected_repass:1000,repass_status:'AGUARDANDO PJ',notes:'',created_by:userIdManager,updated_by:userIdManager});
+  rows.crm_sales_receipts.push({id:receiptId,sale_id:saleId,amount:400,received_at:'2026-11-11',notes:'Parcela lançada por engano',created_by:userIdManager,created_at:'2026-11-11T10:00:00Z'});
+  const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
+  const voided=await invoke('apiVoidSaleReceipt',[manager.token,receiptId,{reason:'Valor lançado em duplicidade'}],manager.token);
+  assert.equal(voided.response.status,200,JSON.stringify(voided.body));
+  assert.equal(voided.body.ok,true);
+  assert.equal(voided.body.totalReceived,0);
+  assert.equal(voided.body.balance,1000);
+  assert.equal(voided.body.repassStatus,'AGUARDANDO PJ');
+  assert.ok(rows.crm_sales_receipts[0].voided_at);
+  assert.equal(rows.crm_sales_receipts[0].void_reason,'Valor lançado em duplicidade');
+  assert.equal(rows.crm_audit.at(-1).action,'sale.receipt.void');
+
+  const later=await invoke('apiAddSaleReceipt',[manager.token,saleId,{amount:'300.00',receivedAt:'2026-11-12',notes:'Recebimento correto'}],manager.token);
+  assert.equal(later.body.ok,true,JSON.stringify(later.body));
+  assert.equal(later.body.totalReceived,300);
+  assert.equal(later.body.balance,700);
+  const listed=await invoke('apiListSales',[manager.token],manager.token);
+  const sale=listed.body.find((item)=>item.id===saleId);
+  assert.equal(sale.receivedRepass,300);
+  assert.equal(sale.balanceRepass,700);
+  assert.equal(sale.receipts.length,2);
+  assert.ok(sale.receipts.some((item)=>item.voidedAt&&item.voidReason==='Valor lançado em duplicidade'));
+});
+
+test('anulação de recebimento é restrita aos perfis administrativos', async (t) => {
+  const broker=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerA,email:'a@example.test'});
+  const result=await invoke('apiVoidSaleReceipt',[broker.token,'10000000-0000-4000-8000-000000000045',{reason:'Motivo válido'}],broker.token);
+  assert.equal(result.response.status,403);
+});
+
 test('fase do repasse publica exatamente os 30 status enviados pela cliente e rejeita opções antigas', async (t) => {
   const originalSales=rows.crm_sales.slice();const originalAudit=rows.crm_audit.slice();
   t.after(()=>{rows.crm_sales.splice(0,rows.crm_sales.length,...originalSales);rows.crm_audit.splice(0,rows.crm_audit.length,...originalAudit);});
@@ -757,6 +825,20 @@ test('migration da fase do repasse instala só os 30 status definidos e preserva
   assert.doesNotMatch(sql,/set repass_status\s*=/i);
   assert.match(sql,/revoke all on function public\.crm_add_sale_receipt/i);
   assert.match(sql,/grant execute on function public\.crm_add_sale_receipt\(uuid, uuid, numeric, date, text\) to service_role/i);
+});
+
+test('migration de atualização em tempo real e anulação de recebimentos preserva dados e cálculos', () => {
+  const sql=fs.readFileSync(path.join(root,'supabase/migrations/20261112060000_crm_live_sync_and_receipt_void.sql'),'utf8');
+  const executableSql=sql.replace(/--[^\n]*/g,'');
+  assert.match(executableSql,/create table if not exists public\.crm_sync_signal/i);
+  assert.match(executableSql,/alter table public\.crm_sync_signal enable row level security/i);
+  assert.match(executableSql,/create policy crm_sync_signal_read_active[\s\S]*crm_user_is_active\(\)/i);
+  assert.match(executableSql,/alter publication supabase_realtime add table public\.crm_sync_signal/i);
+  assert.match(executableSql,/add column if not exists voided_at timestamptz/i);
+  assert.match(executableSql,/set voided_at = v_now, voided_by = p_actor_id, void_reason = v_reason/i);
+  assert.match(executableSql,/where sale_id = p_sale_id and voided_at is null/i);
+  assert.match(executableSql,/grant execute on function public\.crm_void_sale_receipt\(uuid, uuid, text\) to service_role/i);
+  assert.doesNotMatch(executableSql,/(^|\n)\s*(drop\s+table|truncate\s+|delete\s+from)\b/i);
 });
 
 test('build estático não deixa marcações Apps Script nem credenciais no HTML publicado', () => {

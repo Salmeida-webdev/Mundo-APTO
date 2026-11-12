@@ -1,26 +1,24 @@
-# Status da implantação
+# Revisão consolidada do CRM Mundo Apto
 
-## Entrega preparada
+## O que esta versão cobre
 
-- CRM Mundo Apto responsivo com acesso por perfil e carteira individual dos corretores.
-- SDR consulta todos os clientes, pode cadastrar um cliente escolhendo um corretor ativo e, nos registros existentes, edita apenas feedback e status.
-- Gestão de empreendimentos, importação CSV validada e exportação de cadastros/relatórios, com operações restritas aos perfis administrativos.
-- Histórico dos contatos do SDR e histórico de mudanças de etapa para conversões e comparações.
-- Dashboard com indicadores, ranking, comparação semanal e mensal por calendário, conversões, tempo até o primeiro contato, atrasos e concentrações de clientes parados por etapa, corretor e empreendimento.
-- Prazo de follow-up configurável pela gestão entre 1 e 30 dias úteis, com padrão inicial de 3 dias úteis.
-- Gestão pode arquivar e restaurar clientes e usuários de todos os perfis. A operação preserva cadastro, histórico e vínculos; usuário arquivado perde o acesso, e a conta conectada não pode ser excluída.
-- Migrations de análise histórica e de exclusão reversível aplicadas ao Supabase de produção. A migração de exclusão acrescentou apenas colunas e índices, sem comandos de atualização ou exclusão de cadastros.
-- npm run check: build e **62 testes automatizados aprovados**.
+- Alertas do SDR no topo do dashboard, com destaque visual para clientes aguardando contato por 24 horas ou mais, revisões após a 7ª tentativa e telefones que o corretor precisa corrigir. A contagem considera fins de semana e os avisos ficam somente no CRM.
+- Histórico do SDR atualizado quando uma solicitação de correção de telefone é registrada; o pedido aparece na carteira do corretor responsável e o prazo do contato é reiniciado naquele momento.
+- Atualização entre usuários por Supabase Realtime. O canal transmite apenas um sinal técnico sem dados de clientes; a consulta automática a cada 20 segundos continua como fallback.
+- Anulação administrativa de recebimentos com justificativa, preservando o registro original e a auditoria. Totais e saldo deixam de contar a parcela anulada, inclusive quando novas parcelas forem lançadas depois. A fase escolhida para o repasse permanece sob decisão da gestão.
+- Contratos de venda e controle manual de vendas/repasses mantidos como módulos distintos dentro do CRM. Gestão gera e exporta os dados do contrato; corretor e SDR acessam os documentos somente depois da assinatura registrada. O controle de vendas aceita vendas fora da carteira de leads, parcelas e as 30 fases de repasse informadas pela cliente.
+- Demais regras já implementadas: permissões por papel e carteira, cadastro de leads pelo SDR com atribuição obrigatória, tentativas de contato, gestão de empreendimentos, importação/exportação, análise histórica e auditoria administrativa.
 
-## Publicação e validação
+## Verificação técnica
 
-- O código está preparado para uma atualização consolidada no repositório público `Salmeida-webdev/Mundo-APTO`, branch `main`.
-- Após o commit, confirmar a associação com o site Netlify `mundoapto`, acompanhar um único deploy até o estado `ready` e validar os fluxos principais no endereço publicado antes de liberar o uso da equipe.
-- A conta administrativa e os usuários da equipe devem ser configurados no CRM; nomes e e-mails de usuários não são armazenados no repositório.
+- `npm run check`: build, empacotamento e **80 testes automatizados aprovados**.
+- Migration `crm_live_sync_and_receipt_void` aplicada ao projeto Supabase de produção. A conferência confirmou 21 perfis, nenhuma parcela anterior, as novas colunas de anulação e a presença de `crm_sync_signal` na publicação Realtime.
+- A migration é aditiva para os dados comerciais: não apaga clientes, usuários, vendas ou históricos. Nenhum registro existente de parcela foi alterado.
+- O site `mundoapto` segue conectado a `Salmeida-webdev/Mundo-APTO`, branch `main`; o fluxo de publicação é acionado pelo commit nessa branch.
 
-## Limites dos dados históricos
+## Limites do histórico
 
-- Os registros de etapas anteriores ao snapshot não existem na base e não podem ser reconstruídos retroativamente.
-- O histórico de contatos do SDR passa a ser formado a partir das novas atualizações registradas pelo CRM.
-- A interface atualiza os dados periodicamente, com consulta automática a cada 20 segundos enquanto estiver aberta.
-- O sistema não registra auditoria administrativa completa de todas as mudanças de todos os campos; essa funcionalidade não faz parte do escopo aprovado.
+- Os contatos de SDR anteriores que não foram registrados pelo CRM não podem ser reconstruídos. A partir das novas gravações, o histórico e o tempo até o primeiro contato ficam disponíveis.
+- A anulação de recebimento não é exclusão física. O registro continua visível no histórico com autor e justificativa, mas não entra no total recebido nem reduz o saldo.
+- O CRM não envia alertas por e-mail ou WhatsApp. Os avisos do SDR são exibidos dentro do painel.
+- Produção diária, metas e frequências de plantão pertencem à aplicação separada e não fazem parte deste repositório.
