@@ -588,7 +588,10 @@
     const rows=await callApi('apiListAttendance',state.token,filters);
     const selectedDay=state.operationsAttendanceDay&&state.operationsAttendanceDay<=todayBrazil()?state.operationsAttendanceDay:todayBrazil();
     const weekStart=mondayOfOperationWeek(selectedDay);const weekEnd=shiftOperationDate(weekStart,6);
-    const weekRows=await callApi('apiListAttendance',state.token,{dateFrom:weekStart,dateTo:weekEnd});
+    // A tabela mostra a semana completa, mas a API não aceita consultas em datas futuras.
+    // Na semana atual, busque registros somente até hoje e mantenha os dias futuros zerados.
+    const attendanceQueryEnd=weekEnd>todayBrazil()?todayBrazil():weekEnd;
+    const weekRows=await callApi('apiListAttendance',state.token,{dateFrom:weekStart,dateTo:attendanceQueryEnd});
     const selectedDayRows=weekRows.filter((row)=>row.attendanceDate===selectedDay);
     const area=byId('content-area');area.replaceChildren();
     const page=operationsPage(()=>renderAttendance().catch(handleFailure));

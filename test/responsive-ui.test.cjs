@@ -89,6 +89,8 @@ test('módulo Sharks está integrado ao mesmo CRM, com filtros diário/semanal/m
   assert.match(client,/Semana anterior/);
   assert.match(client,/Próxima semana/);
   assert.match(client,/apiSetAttendance/);
+  assert.match(client,/const attendanceQueryEnd=weekEnd>todayBrazil\(\)\?todayBrazil\(\):weekEnd/);
+  assert.match(client,/dateFrom:weekStart,dateTo:attendanceQueryEnd/);
   assert.match(client,/campos|Frequência do dia selecionado/i);
   assert.match(styles,/\.ops-week-navigation/);
   assert.match(styles,/\.ops-freshness/);
