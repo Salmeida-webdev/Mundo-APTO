@@ -1307,7 +1307,7 @@ test('migration de contratos permite venda manual e separa contrato e confissão
 });
 
 test('migração centraliza dados contratuais sem expô-los nem apagar os snapshots anteriores', () => {
-  const sql=fs.readFileSync(path.join(root,'supabase/migrations/20261113142000_crm_team_contract_profiles.sql'),'utf8');
+  const sql=fs.readFileSync(path.join(root,'supabase/migrations/20261113174030_crm_user_contract_profiles_20261113142000.sql'),'utf8');
   const executableSql=sql.replace(/--[^\n]*/g,'');
   assert.match(executableSql,/create table if not exists public\.crm_user_contract_profiles/i);
   assert.match(executableSql,/references public\.crm_users\(id\) on delete restrict/i);
