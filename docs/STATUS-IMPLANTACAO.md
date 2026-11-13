@@ -15,7 +15,7 @@ Os módulos ficam separados pela navegação e pelo domínio: relacionamento e c
 - Frequências por manhã, tarde e noite, com lançamentos/correções restritos às contas operacionais autorizadas e consulta limitada por perfil.
 - Painéis e relatórios com visões diária, semanal e mensal, comparação de períodos, totais individuais/de equipe e exportação CSV com proteção contra fórmulas.
 - Registro manual de vendas e repasses, independente do cadastro de lead, com os 30 status enviados pela cliente, pendências, parcelas e anulação justificada auditada.
-- Contratos gerados apenas pela gestão, com origem em venda manual, lead ou preenchimento sem vínculo; divisão de comissão/prêmio; dados cadastrais do corretor; contrato/termo e confissão separados; arquivo assinado e confirmação individual. O corretor e o SDR vinculados acessam documentos somente após as confirmações previstas.
+- Contratos gerados apenas pela gestão, com origem em venda manual, lead ou preenchimento sem vínculo; divisão de comissão/prêmio; cadastro documental unificado para corretores e múltiplos SDRs; seleção do SDR responsável em cada venda; cópia dos dados usados dentro do contrato para preservar documentos antigos; contrato/termo e confissão separados; arquivo assinado e confirmação individual. O corretor e o SDR vinculados acessam documentos somente após as confirmações previstas.
 
 ## Permissões operacionais
 

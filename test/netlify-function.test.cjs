@@ -30,6 +30,7 @@ const rows = {
   crm_audit: [],
   crm_lead_attempts: [],
   crm_broker_profiles: [],
+  crm_user_contract_profiles: [],
   crm_sales: [],
   crm_sales_receipts: [],
   crm_contracts: [],
@@ -243,7 +244,9 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
       if (method === 'PATCH') {
         const idFilter = url.searchParams.get('id') || '';
         const id = idFilter.slice(3);
-        const row = list.find((item) => String(item.id) === id);
+        const userFilter = url.searchParams.get('user_id') || '';
+        const userId = userFilter.slice(3);
+        const row = list.find((item) => idFilter.startsWith('eq.') ? String(item.id) === id : userFilter.startsWith('eq.') ? String(item.user_id) === userId : false);
         const deletedFilter = url.searchParams.get('deleted_at');
         const versionFilter=url.searchParams.get('session_version');const activeFilter=url.searchParams.get('active');
         if (!row || (deletedFilter === 'is.null' && row.deleted_at) || (deletedFilter === 'not.is.null' && !row.deleted_at)
@@ -514,14 +517,22 @@ test('bootstrap usa segredo temporário e e-mail informado na tela, sem variáve
 });
 
 test('usuário novo entra com a senha definida pela gestão, troca no primeiro acesso e pode receber nova senha', async (t) => {
-  const originals={users:structuredClone(rows.crm_users),sessions:rows.crm_sessions.slice(),audit:rows.crm_audit.slice()};
-  t.after(()=>{rows.crm_users.splice(0,rows.crm_users.length,...originals.users);rows.crm_sessions.splice(0,rows.crm_sessions.length,...originals.sessions);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
+  const originals={users:structuredClone(rows.crm_users),sessions:rows.crm_sessions.slice(),audit:rows.crm_audit.slice(),profiles:structuredClone(rows.crm_user_contract_profiles)};
+  t.after(()=>{rows.crm_users.splice(0,rows.crm_users.length,...originals.users);rows.crm_sessions.splice(0,rows.crm_sessions.length,...originals.sessions);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);rows.crm_user_contract_profiles.splice(0,rows.crm_user_contract_profiles.length,...originals.profiles);});
   const admin=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
   const initialPassword='InicialDefinidaPelaGestao#2026';
-  const created=await invoke('apiSaveUser',[admin.token,{name:'Nova corretora',email:'nova.corretora@example.test',role:'Corretor',initialPassword}],admin.token);
+  const created=await invoke('apiSaveUser',[admin.token,{name:'Nova corretora',email:'nova.corretora@example.test',role:'Corretor',initialPassword,contractCpf:'111.222.333-44',contractCnpj:'12.345.678/0001-90',contractCreci:'CRECI 12345',contractAddress:'Rua Nova, 10'}],admin.token);
   assert.equal(created.response.status,200,JSON.stringify(created.body));
   assert.equal(created.body.ok,true,JSON.stringify(created.body));
   const user=created.body.user;assert.equal(user.mustChangePassword,true);
+  const listedUsers=await invoke('apiListUsers',[admin.token],admin.token);
+  assert.equal(listedUsers.body.find((item)=>item.id===user.id).contractCpf,'111.222.333-44');
+  assert.equal(listedUsers.body.find((item)=>item.id===user.id).contractAddress,'Rua Nova, 10');
+  assert.equal(rows.crm_user_contract_profiles.find((item)=>item.user_id===user.id).contractCpf,undefined,'a tabela armazena apenas as colunas privadas e não duplica nomes de API');
+  assert.equal(rows.crm_user_contract_profiles.find((item)=>item.user_id===user.id).cpf,'111.222.333-44');
+  const updatedProfile=await invoke('apiSaveUser',[admin.token,{id:user.id,name:user.name,email:user.email,role:user.role,active:true,contractCpf:'999.888.777-66',contractCnpj:'98.765.432/0001-10',contractCreci:'CRECI 54321',contractAddress:'Rua Atualizada, 20'}],admin.token);
+  assert.equal(updatedProfile.body.ok,true,JSON.stringify(updatedProfile.body));
+  assert.equal((await invoke('apiListUsers',[admin.token],admin.token)).body.find((item)=>item.id===user.id).contractCpf,'999.888.777-66');
   const authCreate=admin.calls.find((call)=>call.path==='/auth/v1/admin/users'&&call.method==='POST');
   assert.equal(authCreate.body.password,initialPassword,'a senha informada pela gestão deve ser aplicada à conta Auth');
   assert.doesNotMatch(JSON.stringify(rows.crm_audit),new RegExp(initialPassword));
@@ -898,29 +909,40 @@ test('auditoria pagina todo o histórico e permanece restrita à gestão', async
 });
 
 test('contrato usa o modelo Mundo Apto, divide a remuneração e só libera o assinado aos participantes', async (t) => {
-  const originals={users:rows.crm_users.slice(),leads:rows.crm_leads.slice(),contracts:rows.crm_contracts.slice(),documents:rows.crm_contract_documents.slice(),profiles:rows.crm_broker_profiles.slice(),audit:rows.crm_audit.slice()};
-  t.after(()=>{rows.crm_users.splice(0,rows.crm_users.length,...originals.users);rows.crm_leads.splice(0,rows.crm_leads.length,...originals.leads);rows.crm_contracts.splice(0,rows.crm_contracts.length,...originals.contracts);rows.crm_contract_documents.splice(0,rows.crm_contract_documents.length,...originals.documents);rows.crm_broker_profiles.splice(0,rows.crm_broker_profiles.length,...originals.profiles);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
+  const originals={users:rows.crm_users.slice(),leads:rows.crm_leads.slice(),contracts:rows.crm_contracts.slice(),documents:rows.crm_contract_documents.slice(),profiles:rows.crm_broker_profiles.slice(),teamProfiles:structuredClone(rows.crm_user_contract_profiles),audit:rows.crm_audit.slice()};
+  t.after(()=>{rows.crm_users.splice(0,rows.crm_users.length,...originals.users);rows.crm_leads.splice(0,rows.crm_leads.length,...originals.leads);rows.crm_contracts.splice(0,rows.crm_contracts.length,...originals.contracts);rows.crm_contract_documents.splice(0,rows.crm_contract_documents.length,...originals.documents);rows.crm_broker_profiles.splice(0,rows.crm_broker_profiles.length,...originals.profiles);rows.crm_user_contract_profiles.splice(0,rows.crm_user_contract_profiles.length,...originals.teamProfiles);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
   const coordinatorId='10000000-0000-4000-8000-000000000034';
   rows.crm_users.push({id:coordinatorId,name:'Coordenador de teste',email:'coord@example.test',role:'Coordenador',active:true,must_change_password:false,session_version:0});
   const leadId='10000000-0000-4000-8000-000000000035';
   rows.crm_leads.push({id:leadId,name:'Cliente do contrato',phone:'11999990035',development_id:'E001',notes:'',sdr_feedback:'',status:'Atendimento realizado',broker_id:userIdBrokerA,created_at:'2026-11-08T10:00:00Z',created_by:userIdBrokerA,updated_at:'2026-11-08T10:00:00Z',updated_by:userIdManager,sdr_updated_at:'2026-11-09T10:00:00Z',sdr_updated_by:userIdSdr});
+  rows.crm_user_contract_profiles.push({user_id:userIdBrokerA,cpf:'111.222.333-44',cnpj:'',creci:'12345',address:'Rua de Teste, 100'});
+  rows.crm_user_contract_profiles.push({user_id:userIdSdr,cpf:'444.555.666-77',cnpj:'12.345.678/0002-71',creci:'SDR 9988',address:'Rua SDR, 200'});
+  const secondSdrId='10000000-0000-4000-8000-000000000036';
+  rows.crm_users.push({id:secondSdrId,name:'Segundo SDR',email:'sdr2@example.test',role:'SDR',active:true,must_change_password:false,session_version:0});
+  rows.crm_user_contract_profiles.push({user_id:secondSdrId,cpf:'777.888.999-00',cnpj:'55.666.777/0001-88',creci:'',address:'Rua SDR 2, 300'});
   const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
   const refs=await invoke('apiGetReferenceData',[manager.token],manager.token);
   assert.deepEqual(refs.body.managers.map((item)=>item.id),[userIdManager]);
+  assert.deepEqual(refs.body.sdrs.map((item)=>item.id).sort(),[userIdSdr,secondSdrId].sort());
   const draft=await invoke('apiSaveContract',[manager.token,{leadId,brokerId:userIdBrokerA,sdrId:userIdSdr,managerId:coordinatorId,unit:'A-101',unitValue:200000,grossCommission:5000}],manager.token);
   assert.equal(draft.body.ok,false);
   assert.match(draft.body.message,/gerente/i);
-  const saved=await invoke('apiSaveContract',[manager.token,{leadId,brokerId:userIdBrokerA,sdrId:userIdSdr,sdrCpf:'111.222.333-44',managerId:userIdManager,buyerName:'Cliente do contrato',buyerCpf:'222.333.444-55',proposalNumber:'PASTA-2026-15',developmentId:'E001',unit:'A-101',unitValue:200000,commissionBase:200000,commissionRatePct:2.5,grossCommission:5000,managerCommissionRatePct:0.5,managerCommissionValue:1000,hasPrize:true,prizeRatePct:1.2,grossPrize:1000}],manager.token);
+  const saved=await invoke('apiSaveContract',[manager.token,{leadId,brokerId:userIdBrokerA,sdrId:userIdSdr,managerId:userIdManager,buyerName:'Cliente do contrato',buyerCpf:'222.333.444-55',proposalNumber:'PASTA-2026-15',developmentId:'E001',unit:'A-101',unitValue:200000,commissionBase:200000,commissionRatePct:2.5,grossCommission:5000,managerCommissionRatePct:0.5,managerCommissionValue:1000,hasPrize:true,prizeRatePct:1.2,grossPrize:1000}],manager.token);
   assert.equal(saved.response.status,200,JSON.stringify(saved.body));
   assert.equal(saved.body.ok,true);
   const contract=rows.crm_contracts.find((item)=>item.id===saved.body.contractId);
   assert.equal(contract.proposal_number,'PASTA-2026-15');
-  assert.equal(contract.sdr_cpf,'111.222.333-44');
+  assert.equal(contract.sdr_cpf,'444.555.666-77');
+  assert.equal(contract.sdr_cnpj,'12.345.678/0002-71');
+  assert.equal(contract.sdr_address,'Rua SDR, 200');
   assert.equal(Number(contract.commission_base),200000);
   assert.equal(Number(contract.commission_rate_pct),2.5);
   assert.equal(Number(contract.manager_commission_rate_pct),0.5);
   assert.equal(Number(contract.manager_commission_value),1000);
   assert.equal(Number(contract.prize_rate_pct),1.2);
+  const secondSdrDraft=await invoke('apiSaveContract',[manager.token,{leadId,brokerId:userIdBrokerA,sdrId:secondSdrId,managerId:userIdManager,buyerName:'Cliente do contrato',buyerCpf:'222.333.444-55',proposalNumber:'PASTA-2026-16',developmentId:'E001',unit:'A-102',unitValue:210000,commissionBase:210000,commissionRatePct:2.5,grossCommission:5250,hasPrize:false}],manager.token);
+  assert.equal(secondSdrDraft.body.ok,true,JSON.stringify(secondSdrDraft.body));
+  assert.equal(rows.crm_contracts.find((item)=>item.id===secondSdrDraft.body.contractId).sdr_cpf,'777.888.999-00');
   const template=await invoke('apiGetContractTemplate',[manager.token],manager.token);
   assert.match(template.body.template,/PROJETO SDR SHARKS \| MUNDO APTO/);
   assert.match(template.body.template,/{{numero_proposta}}/);
@@ -928,8 +950,7 @@ test('contrato usa o modelo Mundo Apto, divide a remuneração e só libera o as
   assert.match(template.body.template,/{{comissao_corretor}}/);
   assert.match(template.body.template,/{{corretor_cnpj}}/);
   assert.match(template.body.template,/{{corretor_endereco}}/);
-  const brokerProfile={broker_id:userIdBrokerA,cpf:'111.222.333-44',cnpj:'',creci:'12345',address:'Rua de Teste, 100'};
-  rows.crm_broker_profiles.push(brokerProfile);
+  const brokerProfile=rows.crm_user_contract_profiles.find((item)=>item.user_id===userIdBrokerA);
   const missingCnpj=await invoke('apiGenerateContract',[manager.token,saved.body.contractId],manager.token);
   assert.equal(missingCnpj.body.ok,false);
   assert.match(missingCnpj.body.message,/CNPJ/i);
@@ -944,18 +965,20 @@ test('contrato usa o modelo Mundo Apto, divide a remuneração e só libera o as
   assert.match(generatedFile.body,/PROJETO SDR SHARKS \| MUNDO APTO/);
   assert.match(generatedFile.body,/12\.345\.678\/0001-90/);
   assert.match(generatedFile.body,/Rua de Teste, 100/);
+  assert.match(generatedFile.body,/444\.555\.666-77/);
   assert.match(generatedFile.body,/0,5% \/ R\$\s?1\.000,00/);
   assert.match(generatedFile.body,/2\.500/);
   assert.match(generatedFile.body,/A quitação será concedida/);
   assert.equal(rows.crm_contracts.find((item)=>item.id===saved.body.contractId).status,'Gerado para assinatura');
   const unsignedVisible=await invoke('apiListContracts',[manager.token],manager.token);
-  assert.equal(unsignedVisible.body.length,1);
+  assert.equal(unsignedVisible.body.length,2,'um registro deve permanecer disponível para cada SDR vinculado');
   const contractRow=rows.crm_contracts.find((item)=>item.id===saved.body.contractId);
   assert.equal(contractRow.broker_commission,2500);
   assert.equal(contractRow.sdr_commission,2500);
   const listedContracts=await invoke('apiListContracts',[manager.token],manager.token);
-  assert.equal(listedContracts.body[0].managerCommissionRatePct,0.5);
-  assert.equal(listedContracts.body[0].managerCommissionValue,1000);
+  const listedContract=listedContracts.body.find((item)=>item.id===contractRow.id);
+  assert.equal(listedContract.managerCommissionRatePct,0.5);
+  assert.equal(listedContract.managerCommissionValue,1000);
   assert.equal(contractRow.broker_prize,1200);
   assert.equal(contractRow.sdr_prize,1200);
   const signedDocument={id:'10000000-0000-4000-8000-000000000099',contract_id:contractRow.id,document_kind:'agreement',document_type:'signed',signature_confirmed_at:new Date().toISOString(),signature_confirmed_by:userIdManager,storage_path:'signed/test-contract.pdf',original_name:'termo-assinado.pdf',mime_type:'application/pdf',size_bytes:1000,uploaded_by:userIdManager,created_at:new Date().toISOString()};
@@ -978,13 +1001,14 @@ test('contrato usa o modelo Mundo Apto, divide a remuneração e só libera o as
 });
 
 test('contrato pode partir de venda manual e controla contrato e confissão com assinaturas independentes', async (t) => {
-  const originals={sales:rows.crm_sales.slice(),receipts:rows.crm_sales_receipts.slice(),contracts:rows.crm_contracts.slice(),documents:rows.crm_contract_documents.slice(),profiles:rows.crm_broker_profiles.slice(),settings:rows.crm_settings.slice(),audit:rows.crm_audit.slice()};
-  t.after(()=>{rows.crm_sales.splice(0,rows.crm_sales.length,...originals.sales);rows.crm_sales_receipts.splice(0,rows.crm_sales_receipts.length,...originals.receipts);rows.crm_contracts.splice(0,rows.crm_contracts.length,...originals.contracts);rows.crm_contract_documents.splice(0,rows.crm_contract_documents.length,...originals.documents);rows.crm_broker_profiles.splice(0,rows.crm_broker_profiles.length,...originals.profiles);rows.crm_settings.splice(0,rows.crm_settings.length,...originals.settings);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
+  const originals={sales:rows.crm_sales.slice(),receipts:rows.crm_sales_receipts.slice(),contracts:rows.crm_contracts.slice(),documents:rows.crm_contract_documents.slice(),profiles:rows.crm_broker_profiles.slice(),teamProfiles:structuredClone(rows.crm_user_contract_profiles),settings:rows.crm_settings.slice(),audit:rows.crm_audit.slice()};
+  t.after(()=>{rows.crm_sales.splice(0,rows.crm_sales.length,...originals.sales);rows.crm_sales_receipts.splice(0,rows.crm_sales_receipts.length,...originals.receipts);rows.crm_contracts.splice(0,rows.crm_contracts.length,...originals.contracts);rows.crm_contract_documents.splice(0,rows.crm_contract_documents.length,...originals.documents);rows.crm_broker_profiles.splice(0,rows.crm_broker_profiles.length,...originals.profiles);rows.crm_user_contract_profiles.splice(0,rows.crm_user_contract_profiles.length,...originals.teamProfiles);rows.crm_settings.splice(0,rows.crm_settings.length,...originals.settings);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
   const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
   const sale=await invoke('apiSaveSale',[manager.token,{processNumber:'PROC-EXT-77',buyerName:'Comprador fora do CRM',developmentId:'E001',brokerId:userIdBrokerA,soldAt:'2026-11-12',unit:'B-204',unitValue:245000,commissionRatePct:2.5,saleStatus:'Pendência para contabilização',repassStatus:'FASE DO REGISTRO',hasPending:false,pendingDescription:'',accounted:false,notes:'Venda manual externa'}],manager.token);
   assert.equal(sale.body.ok,true,JSON.stringify(sale.body));
-  const profile={broker_id:userIdBrokerA,cpf:'111.222.333-44',cnpj:'12.345.678/0001-90',creci:'12345',address:'Rua de Teste, 100'};rows.crm_broker_profiles.push(profile);
-  const saved=await invoke('apiSaveContract',[manager.token,{saleId:sale.body.saleId,sdrId:userIdSdr,sdrCpf:'222.333.444-55',managerId:userIdManager,buyerCpf:'333.444.555-66',buyerAddress:'Rua Externa, 10',proposalNumber:'PASTA-EXT-77',commissionBase:245000,commissionRatePct:2.5,grossCommission:6125,hasPrize:false}],manager.token);
+  const profile={user_id:userIdBrokerA,cpf:'111.222.333-44',cnpj:'12.345.678/0001-90',creci:'12345',address:'Rua de Teste, 100'};rows.crm_user_contract_profiles.push(profile);
+  rows.crm_user_contract_profiles.push({user_id:userIdSdr,cpf:'222.333.444-55',cnpj:'22.333.444/0001-90',creci:'',address:'Rua SDR, 50'});
+  const saved=await invoke('apiSaveContract',[manager.token,{saleId:sale.body.saleId,sdrId:userIdSdr,managerId:userIdManager,buyerCpf:'333.444.555-66',buyerAddress:'Rua Externa, 10',proposalNumber:'PASTA-EXT-77',commissionBase:245000,commissionRatePct:2.5,grossCommission:6125,hasPrize:false}],manager.token);
   assert.equal(saved.body.ok,true,JSON.stringify(saved.body));
   const contract=rows.crm_contracts.find((item)=>item.id===saved.body.contractId);
   assert.equal(contract.sale_id,sale.body.saleId);
@@ -992,6 +1016,7 @@ test('contrato pode partir de venda manual e controla contrato e confissão com 
   assert.equal(contract.process_number,'PROC-EXT-77');
   assert.equal(contract.buyer_name,'Comprador fora do CRM');
   assert.equal(Number(contract.unit_value),245000);
+  assert.equal(contract.sdr_cnpj,'22.333.444/0001-90');
   const templateHtml='<!doctype html><html><body><h1>CONFISSÃO {{numero_contrato}}</h1><p>Processo {{numero_processo}}</p><p>{{cliente_nome}}</p></body></html>';
   const unsafeTemplate=await invoke('apiSaveContractTemplate',[manager.token,{kind:'debt_confession',html:'<html><body><img src="https://example.test/collect?cpf={{cliente_cpf}}"></body></html>'}],manager.token);
   assert.equal(unsafeTemplate.response.status,400);
@@ -1279,6 +1304,21 @@ test('migration de contratos permite venda manual e separa contrato e confissão
   assert.match(executableSql,/signature_confirmed_by uuid references public\.crm_users/i);
   assert.match(executableSql,/document_type = 'signed'[\s\S]*contract\.status = 'Assinado'/i);
   assert.doesNotMatch(executableSql,/(^|\n)\s*(delete\s+from|truncate\s+)/i);
+});
+
+test('migração centraliza dados contratuais sem expô-los nem apagar os snapshots anteriores', () => {
+  const sql=fs.readFileSync(path.join(root,'supabase/migrations/20261113142000_crm_team_contract_profiles.sql'),'utf8');
+  const executableSql=sql.replace(/--[^\n]*/g,'');
+  assert.match(executableSql,/create table if not exists public\.crm_user_contract_profiles/i);
+  assert.match(executableSql,/references public\.crm_users\(id\) on delete restrict/i);
+  assert.match(executableSql,/enable row level security/i);
+  assert.match(executableSql,/revoke all on public\.crm_user_contract_profiles from public, anon, authenticated/i);
+  assert.match(executableSql,/grant all on public\.crm_user_contract_profiles to service_role/i);
+  assert.match(executableSql,/add column if not exists broker_cpf/i);
+  assert.match(executableSql,/add column if not exists sdr_address/i);
+  assert.match(executableSql,/insert into public\.crm_user_contract_profiles[\s\S]*from public\.crm_broker_profiles/i);
+  assert.match(executableSql,/update public\.crm_contracts[\s\S]*where sdr_profile\.user_id = contract\.sdr_id/i);
+  assert.doesNotMatch(executableSql,/(^|\n)\s*(drop\s+table|truncate\s+|delete\s+from)\b/i);
 });
 
 test('migration integrada indexa as novas relações de auditoria sem remover dados', () => {

@@ -191,6 +191,38 @@ function publicUser(row) {
   if (!user) return null;
   return { id: user.id, name: user.name, email: user.email, role: user.role, operationsAccess: user.operationsAccess, active: user.active, mustChangePassword: user.mustChangePassword, canManageOperations: isConfiguredOperationsManager(user), canApplySharedTemporaryPassword: isSharedTemporaryPasswordOperator(user) };
 }
+function normalizeTeamContractProfile(payload = {}) {
+  return {
+    cpf: String(payload.contractCpf || '').trim().slice(0, 30),
+    cnpj: String(payload.contractCnpj || '').trim().slice(0, 30),
+    creci: String(payload.contractCreci || '').trim().slice(0, 60),
+    address: String(payload.contractAddress || '').trim().slice(0, 500)
+  };
+}
+function teamContractProfileForUser(userId, profiles = []) {
+  const profile = profiles.find((item) => String(item.user_id) === String(userId)) || {};
+  return { contractCpf: profile.cpf || '', contractCnpj: profile.cnpj || '', contractCreci: profile.creci || '', contractAddress: profile.address || '' };
+}
+function redactedTeamContractProfile(profile = {}) {
+  return Object.fromEntries(Object.entries(profile).map(([key, value]) => [key, value ? '[preenchido]' : '']));
+}
+async function saveTeamContractProfile(actor, userId, profile) {
+  const currentRows = await dbRequest('crm_user_contract_profiles', { query: { select: '*', user_id: `eq.${userId}`, limit: 1 } });
+  const current = Array.isArray(currentRows) ? currentRows[0] || null : null;
+  const before = current ? { cpf: current.cpf || '', cnpj: current.cnpj || '', creci: current.creci || '', address: current.address || '' } : { cpf: '', cnpj: '', creci: '', address: '' };
+  const changedFields = auditChangedFields(before, profile);
+  if (!changedFields.length) return { profile: current, changedFields: [] };
+  if (!current && !Object.values(profile).some(Boolean)) return { profile: null, changedFields: [] };
+  const values = { ...profile, updated_at: now(), updated_by: actor.id };
+  const savedRows = current
+    ? await dbRequest('crm_user_contract_profiles', { method: 'PATCH', query: { user_id: `eq.${userId}` }, prefer: 'return=representation', body: values })
+    : await dbRequest('crm_user_contract_profiles', { method: 'POST', prefer: 'return=representation', body: { user_id: userId, ...values } });
+  const saved = Array.isArray(savedRows) ? savedRows[0] : savedRows;
+  if (!saved) throw new HttpError(502, 'O usuário foi salvo, mas os dados para documentos não foram confirmados. Abra o cadastro novamente e tente salvar os dados contratuais.');
+  await audit(actor, current ? 'user.contract_profile.update' : 'user.contract_profile.create', 'user_contract_profile', userId, changedFields,
+    redactedTeamContractProfile(before), redactedTeamContractProfile(profile));
+  return { profile: saved, changedFields };
+}
 function mapLead(row, users, developments) {
   const broker = users.find((item) => String(item.id) === String(row.broker_id));
   const development = developments.find((item) => String(item.id) === String(row.development_id));
@@ -1391,10 +1423,10 @@ async function apiVoidSaleReceipt(token, receiptId, payload = {}) {
 
 async function apiListBrokerProfiles(token) {
   const actor = await verifyActor(token); requireAdmin(actor);
-  const [profiles, users] = await Promise.all([listAll('crm_broker_profiles', { select: '*' }), listAll('crm_users', { select: 'id,name,email,role,active,deleted_at' })]);
+  const [profiles, users] = await Promise.all([listAll('crm_user_contract_profiles', { select: '*' }), listAll('crm_users', { select: 'id,name,email,role,active,deleted_at' })]);
   const brokers = users.filter((item) => item.role === 'Corretor' && !item.deleted_at);
   return brokers.map((item) => {
-    const profile = profiles.find((row) => row.broker_id === item.id) || {};
+    const profile = profiles.find((row) => row.user_id === item.id) || {};
     return { brokerId: item.id, name: item.name, email: item.email, cpf: profile.cpf || '', cnpj: profile.cnpj || '', creci: profile.creci || '', address: profile.address || '', updatedAt: profile.updated_at || '' };
   }).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
 }
@@ -1406,18 +1438,8 @@ async function apiSaveBrokerProfile(token, payload = {}) {
   const users = await listAll('crm_users', { select: 'id,role,deleted_at' });
   if (!users.some((item) => item.id === brokerId && item.role === 'Corretor' && !item.deleted_at)) return { ok: false, message: 'Corretor não encontrado.' };
   const fields = { cpf: String(payload.cpf || '').trim().slice(0, 30), cnpj: String(payload.cnpj || '').trim().slice(0, 30), creci: String(payload.creci || '').trim().slice(0, 60), address: String(payload.address || '').trim().slice(0, 500) };
-  const currentRows = await dbRequest('crm_broker_profiles', { query: { select: '*', broker_id: `eq.${brokerId}`, limit: 1 } });
-  const current = Array.isArray(currentRows) ? currentRows[0] || null : null;
-  const values = { cpf: fields.cpf, cnpj: fields.cnpj, creci: fields.creci, address: fields.address, updated_at: now(), updated_by: actor.id };
-  const beforeValues = current ? { cpf: current.cpf || '', cnpj: current.cnpj || '', creci: current.creci || '', address: current.address || '' } : {};
-  const changedFields = auditChangedFields(beforeValues, fields);
-  if (current && !changedFields.length) return { ok: true, profile: current, message: 'Nenhuma alteração detectada.' };
-  const savedRows = current
-    ? await dbRequest('crm_broker_profiles', { method: 'PATCH', query: { broker_id: `eq.${brokerId}` }, prefer: 'return=representation', body: values })
-    : await dbRequest('crm_broker_profiles', { method: 'POST', prefer: 'return=representation', body: { broker_id: brokerId, ...values } });
-  const saved = Array.isArray(savedRows) ? savedRows[0] : savedRows;
-  await audit(actor, current ? 'broker_profile.update' : 'broker_profile.create', 'broker_profile', brokerId, changedFields, beforeValues, fields);
-  return { ok: true, profile: saved, message: 'Dados cadastrais do corretor salvos.' };
+  const saved = await saveTeamContractProfile(actor, brokerId, fields);
+  return { ok: true, profile: saved.profile, message: saved.changedFields.length ? 'Dados cadastrais do corretor salvos no cadastro da equipe.' : 'Nenhuma alteração detectada.' };
 }
 
 const DEFAULT_CONTRACT_TEMPLATE_HTML = `<!doctype html>
@@ -1485,7 +1507,7 @@ function contractTemplateSettingKey(kind) {
 const CONTRACT_PLACEHOLDERS = [
   '{{numero_contrato}}','{{numero_processo}}','{{numero_proposta}}','{{cliente_nome}}','{{cliente_cpf}}','{{cliente_endereco}}',
   '{{empreendimento}}','{{unidade}}','{{valor_unidade}}','{{corretor_nome}}','{{corretor_cpf}}','{{corretor_cnpj}}',
-  '{{corretor_creci}}','{{corretor_endereco}}','{{sdr_nome}}','{{sdr_cpf}}','{{gerente_nome}}','{{percentual_comissao}}',
+  '{{corretor_creci}}','{{corretor_endereco}}','{{sdr_nome}}','{{sdr_cpf}}','{{sdr_cnpj}}','{{sdr_creci}}','{{sdr_endereco}}','{{gerente_nome}}','{{percentual_comissao}}',
   '{{base_calculo_comissao}}','{{comissao_bruta}}','{{comissao_corretor}}','{{comissao_sdr}}','{{percentual_comissao_gerente}}','{{comissao_gerente}}','{{premio_aplicavel}}',
   '{{percentual_premio}}','{{premio_bruto}}','{{premio_corretor}}','{{premio_sdr}}','{{data_geracao}}'
 ];
@@ -1565,6 +1587,16 @@ async function apiSaveContract(token, payload = {}) {
   if (!broker || lead && broker.id !== lead.broker_id) return { ok: false, message: 'Selecione o corretor responsável pela venda ou pela carteira do cliente.' };
   if (!sdr) return { ok: false, message: 'Selecione o SDR que assinará o documento.' };
   if (!manager) return { ok: false, message: 'Selecione um gerente ou administrador como signatário.' };
+  let existingDraft = null;
+  if (id) {
+    if (!isUuid(id)) return { ok: false, message: 'Contrato inválido.' };
+    const draftRows = await dbRequest('crm_contracts', { query: { select: '*', id: `eq.${id}`, limit: 1 } });
+    existingDraft = Array.isArray(draftRows) ? draftRows[0] || null : null;
+    if (!existingDraft || existingDraft.status !== 'Rascunho') return { ok: false, message: 'Somente rascunhos podem ser editados.' };
+  }
+  const partyProfiles = await listAll('crm_user_contract_profiles', { select: '*' });
+  const brokerProfile = (partyProfiles || []).find((item) => item.user_id === broker.id) || {};
+  const sdrProfile = (partyProfiles || []).find((item) => item.user_id === sdr.id) || {};
   const developmentId = String(sale ? sale.development_id : payload.developmentId || lead && lead.development_id || '').trim();
   if (sale && payload.developmentId && String(payload.developmentId) !== developmentId) return { ok: false, message: 'O empreendimento do contrato precisa corresponder à venda selecionada.' };
   const developments = await listAll('crm_developments', { select: 'id,name,active' });
@@ -1588,7 +1620,12 @@ async function apiSaveContract(token, payload = {}) {
   const managerRate = sale && sale.manager_commission_rate_pct !== null && sale.manager_commission_rate_pct !== undefined ? Number(sale.manager_commission_rate_pct) : inputManagerRate;
   const managerValue = sale && Number(sale.manager_commission_value || 0) > 0 ? Number(sale.manager_commission_value) : managerRate !== null ? Math.round(contractUnitValue * managerRate) / 100 : parseMoney(payload.managerCommissionValue, 'Comissão do gerente');
   const values = { sale_id: saleId || null, lead_id: leadId || null, process_number: String(sale ? sale.process_number || '' : payload.processNumber || '').trim().slice(0, 100),
-    broker_id: broker.id, sdr_id: sdr.id, sdr_cpf: String(payload.sdrCpf || '').trim().slice(0, 30), manager_id: manager.id,
+    broker_id: broker.id, sdr_id: sdr.id, manager_id: manager.id,
+    broker_cpf: brokerProfile.cpf || existingDraft && existingDraft.broker_cpf || '', broker_cnpj: brokerProfile.cnpj || existingDraft && existingDraft.broker_cnpj || '',
+    broker_creci: brokerProfile.creci || existingDraft && existingDraft.broker_creci || '', broker_address: brokerProfile.address || existingDraft && existingDraft.broker_address || '',
+    sdr_cpf: sdrProfile.cpf || String(payload.sdrCpf || '').trim().slice(0, 30) || existingDraft && existingDraft.sdr_cpf || '',
+    sdr_cnpj: sdrProfile.cnpj || existingDraft && existingDraft.sdr_cnpj || '', sdr_creci: sdrProfile.creci || existingDraft && existingDraft.sdr_creci || '',
+    sdr_address: sdrProfile.address || existingDraft && existingDraft.sdr_address || '',
     buyer_name: String(sale ? saleBuyerName : payload.buyerName || saleBuyerName || '').trim().slice(0, 150), buyer_cpf: String(payload.buyerCpf || '').trim().slice(0, 30),
     buyer_address: String(payload.buyerAddress || '').trim().slice(0, 500), development_id: developmentId, unit,
     proposal_number: String(payload.proposalNumber || '').trim().slice(0, 100),
@@ -1604,12 +1641,10 @@ async function apiSaveContract(token, payload = {}) {
   let existing = null;
   let beforeValues = {};
   if (id) {
-    if (!isUuid(id)) return { ok: false, message: 'Contrato inválido.' };
-    const rows = await dbRequest('crm_contracts', { query: { select: '*', id: `eq.${id}`, limit: 1 } });
-    existing = Array.isArray(rows) ? rows[0] || null : null;
-    if (!existing || existing.status !== 'Rascunho') return { ok: false, message: 'Somente rascunhos podem ser editados.' };
+    existing = existingDraft;
     beforeValues = { contractNumber: existing.contract_number, sale_id: existing.sale_id || null, lead_id: existing.lead_id || null, process_number: existing.process_number || '', broker_id: existing.broker_id, sdr_id: existing.sdr_id, manager_id: existing.manager_id,
-      sdr_cpf: existing.sdr_cpf || '', buyer_name: existing.buyer_name, buyer_cpf: existing.buyer_cpf, buyer_address: existing.buyer_address, development_id: existing.development_id,
+      broker_cpf: existing.broker_cpf || '', broker_cnpj: existing.broker_cnpj || '', broker_creci: existing.broker_creci || '', broker_address: existing.broker_address || '',
+      sdr_cpf: existing.sdr_cpf || '', sdr_cnpj: existing.sdr_cnpj || '', sdr_creci: existing.sdr_creci || '', sdr_address: existing.sdr_address || '', buyer_name: existing.buyer_name, buyer_cpf: existing.buyer_cpf, buyer_address: existing.buyer_address, development_id: existing.development_id,
       unit: existing.unit, proposal_number: existing.proposal_number || '', unit_value: Number(existing.unit_value), commission_base: Number(existing.commission_base || 0), commission_rate_pct: existing.commission_rate_pct === null ? null : Number(existing.commission_rate_pct),
       gross_commission: Number(existing.gross_commission), manager_commission_rate_pct: existing.manager_commission_rate_pct === null ? null : Number(existing.manager_commission_rate_pct), manager_commission_value: Number(existing.manager_commission_value || 0),
       has_prize: existing.has_prize, prize_rate_pct: existing.prize_rate_pct === null ? null : Number(existing.prize_rate_pct), gross_prize: Number(existing.gross_prize) };
@@ -1621,7 +1656,9 @@ async function apiSaveContract(token, payload = {}) {
     existing = Array.isArray(result) ? result[0] : result;
   }
   if (!existing) throw new HttpError(502, 'Não foi possível salvar o contrato.');
-  const afterValues = { sale_id: values.sale_id, lead_id: values.lead_id, process_number: values.process_number, broker_id: values.broker_id, sdr_id: values.sdr_id, sdr_cpf: values.sdr_cpf, manager_id: values.manager_id,
+  const afterValues = { sale_id: values.sale_id, lead_id: values.lead_id, process_number: values.process_number, broker_id: values.broker_id, sdr_id: values.sdr_id, manager_id: values.manager_id,
+    broker_cpf: values.broker_cpf, broker_cnpj: values.broker_cnpj, broker_creci: values.broker_creci, broker_address: values.broker_address,
+    sdr_cpf: values.sdr_cpf, sdr_cnpj: values.sdr_cnpj, sdr_creci: values.sdr_creci, sdr_address: values.sdr_address,
     buyer_name: values.buyer_name, buyer_cpf: values.buyer_cpf, buyer_address: values.buyer_address, development_id: values.development_id,
     unit: values.unit, proposal_number: values.proposal_number, unit_value: values.unit_value, commission_base: values.commission_base, commission_rate_pct: values.commission_rate_pct,
     gross_commission: values.gross_commission, manager_commission_rate_pct: values.manager_commission_rate_pct, manager_commission_value: values.manager_commission_value,
@@ -1672,6 +1709,13 @@ function formatPercent(value) {
   return `${new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 4 }).format(Number(value))}%`;
 }
 
+function partySnapshotValues(party) {
+  return {
+    broker_cpf: party.brokerCpf || '', broker_cnpj: party.brokerCnpj || '', broker_creci: party.brokerCreci || '', broker_address: party.brokerAddress || '',
+    sdr_cpf: party.sdrCpf || '', sdr_cnpj: party.sdrCnpj || '', sdr_creci: party.sdrCreci || '', sdr_address: party.sdrAddress || ''
+  };
+}
+
 async function apiGenerateContract(token, contractId, documentKind = 'agreement') {
   const actor = await verifyActor(token); requireAdmin(actor);
   const kind = normalizeContractDocumentKind(documentKind);
@@ -1683,19 +1727,32 @@ async function apiGenerateContract(token, contractId, documentKind = 'agreement'
   if ((priorDocuments || []).some((doc) => (doc.document_kind || 'agreement') === kind && doc.document_type === 'signed' && doc.signature_confirmed_at)) return { ok: false, message: 'A assinatura deste documento já foi confirmada. Não é possível gerar outra versão pelo fluxo atual.' };
   const templateInfo = await apiGetContractTemplate(token, { kind });
   if (!templateInfo.template) return { ok: false, message: `Cadastre o modelo aprovado de ${kind === 'agreement' ? 'contrato/termo' : 'confissão de dívida'} antes de gerar o documento.` };
-  const [users, developments, profiles] = await Promise.all([listAll('crm_users', { select: 'id,name,email,role,active,deleted_at' }), listAll('crm_developments', { select: 'id,name' }), listAll('crm_broker_profiles', { select: '*' })]);
+  const [users, developments, profiles] = await Promise.all([listAll('crm_users', { select: 'id,name,email,role,active,deleted_at' }), listAll('crm_developments', { select: 'id,name' }), listAll('crm_user_contract_profiles', { select: '*' })]);
   const broker = users.find((item) => item.id === contract.broker_id) || {};
   const sdr = users.find((item) => item.id === contract.sdr_id) || {};
   const manager = users.find((item) => item.id === contract.manager_id) || {};
   const development = developments.find((item) => item.id === contract.development_id) || {};
-  const profile = profiles.find((item) => item.broker_id === contract.broker_id) || {};
+  const brokerProfile = (profiles || []).find((item) => item.user_id === contract.broker_id) || {};
+  const sdrProfile = (profiles || []).find((item) => item.user_id === contract.sdr_id) || {};
+  const participantSnapshotLocked = Boolean(contract.generated_at || contract.status !== 'Rascunho'
+    || (priorDocuments || []).some((doc) => doc.document_type === 'generated'));
+  const party = {
+    brokerCpf: participantSnapshotLocked ? contract.broker_cpf || brokerProfile.cpf || '' : brokerProfile.cpf || contract.broker_cpf || '',
+    brokerCnpj: participantSnapshotLocked ? contract.broker_cnpj || brokerProfile.cnpj || '' : brokerProfile.cnpj || contract.broker_cnpj || '',
+    brokerCreci: participantSnapshotLocked ? contract.broker_creci || brokerProfile.creci || '' : brokerProfile.creci || contract.broker_creci || '',
+    brokerAddress: participantSnapshotLocked ? contract.broker_address || brokerProfile.address || '' : brokerProfile.address || contract.broker_address || '',
+    sdrCpf: participantSnapshotLocked ? contract.sdr_cpf || sdrProfile.cpf || '' : sdrProfile.cpf || contract.sdr_cpf || '',
+    sdrCnpj: participantSnapshotLocked ? contract.sdr_cnpj || sdrProfile.cnpj || '' : sdrProfile.cnpj || contract.sdr_cnpj || '',
+    sdrCreci: participantSnapshotLocked ? contract.sdr_creci || sdrProfile.creci || '' : sdrProfile.creci || contract.sdr_creci || '',
+    sdrAddress: participantSnapshotLocked ? contract.sdr_address || sdrProfile.address || '' : sdrProfile.address || contract.sdr_address || ''
+  };
   if (!manager.id || !manager.active || manager.deleted_at || !['Gerente','Administrador'].includes(manager.role)) return { ok: false, message: 'Selecione um gerente ou administrador ativo como terceiro signatário e salve o rascunho novamente.' };
   const values = {
     numero_contrato: contract.contract_number, numero_processo: contract.process_number || 'Não informado', numero_proposta: contract.proposal_number || 'Não informado', cliente_nome: contract.buyer_name, cliente_cpf: contract.buyer_cpf,
     cliente_endereco: contract.buyer_address, empreendimento: development.name || '', unidade: contract.unit,
-    valor_unidade: formatCurrency(contract.unit_value), corretor_nome: broker.name || '', corretor_cpf: profile.cpf || '',
-    corretor_cnpj: profile.cnpj || '', corretor_creci: profile.creci || '', corretor_endereco: profile.address || '',
-    sdr_nome: sdr.name || '', sdr_cpf: contract.sdr_cpf || '', gerente_nome: manager.name || '',
+    valor_unidade: formatCurrency(contract.unit_value), corretor_nome: broker.name || '', corretor_cpf: party.brokerCpf,
+    corretor_cnpj: party.brokerCnpj, corretor_creci: party.brokerCreci, corretor_endereco: party.brokerAddress,
+    sdr_nome: sdr.name || '', sdr_cpf: party.sdrCpf, sdr_cnpj: party.sdrCnpj, sdr_creci: party.sdrCreci, sdr_endereco: party.sdrAddress, gerente_nome: manager.name || '',
     percentual_comissao: contract.commission_rate_pct === null || contract.commission_rate_pct === undefined ? 'Não informado' : formatPercent(contract.commission_rate_pct), base_calculo_comissao: Number(contract.commission_base || 0) > 0 ? formatCurrency(contract.commission_base) : 'Não informado',
     comissao_bruta: formatCurrency(contract.gross_commission),
     comissao_corretor: formatCurrency(contract.broker_commission), comissao_sdr: formatCurrency(contract.sdr_commission),
@@ -1707,7 +1764,7 @@ async function apiGenerateContract(token, contractId, documentKind = 'agreement'
     premio_sdr: contract.has_prize ? formatCurrency(contract.sdr_prize) : 'Não se aplica',
     data_geracao: new Intl.DateTimeFormat('pt-BR', { dateStyle: 'long', timeZone: 'America/Sao_Paulo' }).format(new Date())
   };
-  const labels = { cliente_nome:'nome do comprador', cliente_cpf:'CPF do comprador', cliente_endereco:'endereço do comprador', empreendimento:'empreendimento', unidade:'unidade', valor_unidade:'valor da unidade', corretor_nome:'corretor responsável', corretor_cpf:'CPF do corretor', corretor_cnpj:'CNPJ do corretor', corretor_creci:'CRECI do corretor', corretor_endereco:'endereço do corretor', sdr_nome:'SDR signatário', sdr_cpf:'CPF do SDR', gerente_nome:'terceiro signatário', comissao_bruta:'comissão total' };
+  const labels = { cliente_nome:'nome do comprador', cliente_cpf:'CPF do comprador', cliente_endereco:'endereço do comprador', empreendimento:'empreendimento', unidade:'unidade', valor_unidade:'valor da unidade', corretor_nome:'corretor responsável', corretor_cpf:'CPF do corretor', corretor_cnpj:'CNPJ do corretor', corretor_creci:'CRECI do corretor', corretor_endereco:'endereço do corretor', sdr_nome:'SDR signatário', sdr_cpf:'CPF do SDR', sdr_cnpj:'CNPJ do SDR', sdr_creci:'CRECI do SDR', sdr_endereco:'endereço do SDR', gerente_nome:'terceiro signatário', comissao_bruta:'comissão total' };
   const requiredKeys = [...new Set([...String(templateInfo.template).matchAll(/{{\s*([a-z_]+)\s*}}/g)].map((match) => match[1]))];
   const missing = requiredKeys.filter((key) => !Object.prototype.hasOwnProperty.call(values, key) || !String(values[key] || '').trim() || String(values[key]).trim() === 'Não informado');
   if (missing.length) {
@@ -1724,8 +1781,8 @@ async function apiGenerateContract(token, contractId, documentKind = 'agreement'
   const path = `generated/${contract.id}/${kind}/${randomBytes(5).toString('hex')}-${fileName}`;
   await storageRequest(`object/crm-contracts/${storageObjectPath(path)}`, { method: 'POST', body: fileBytes, contentType: 'application/msword', headers: { 'x-upsert': 'false' } });
   const contractUpdate = kind === 'agreement'
-    ? { status: 'Gerado para assinatura', generated_at: now(), generated_by: actor.id, template_snapshot: templateInfo.template, updated_at: now(), updated_by: actor.id }
-    : { debt_confession_template_snapshot: templateInfo.template, updated_at: now(), updated_by: actor.id };
+    ? { status: 'Gerado para assinatura', generated_at: now(), generated_by: actor.id, template_snapshot: templateInfo.template, ...partySnapshotValues(party), updated_at: now(), updated_by: actor.id }
+    : { debt_confession_template_snapshot: templateInfo.template, ...(participantSnapshotLocked ? {} : partySnapshotValues(party)), updated_at: now(), updated_by: actor.id };
   await dbRequest('crm_contracts', { method: 'PATCH', query: { id: `eq.${contract.id}` }, prefer: 'return=minimal', body: contractUpdate });
   await dbRequest('crm_contract_documents', { method: 'POST', prefer: 'return=minimal', body: { contract_id: contract.id, document_kind: kind, document_type: 'generated', storage_path: path, original_name: fileName, mime_type: 'application/msword', size_bytes: fileBytes.byteLength, uploaded_by: actor.id } });
   const beforeValues = kind === 'agreement' ? { status: contract.status } : { debtConfessionTemplateConfigured: Boolean(contract.debt_confession_template_snapshot) };
@@ -1952,7 +2009,12 @@ async function apiExportReport(token, filters) {
 
 async function apiListUsers(token) {
   const actor = await verifyActor(token); requireAdmin(actor);
-  return (await listAll('crm_users', { select: '*', deleted_at: 'is.null' })).map((row) => publicUser(row)).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  const [users, profiles] = await Promise.all([
+    listAll('crm_users', { select: '*', deleted_at: 'is.null' }),
+    listAll('crm_user_contract_profiles', { select: '*' })
+  ]);
+  return (users || []).map((row) => ({ ...publicUser(row), ...teamContractProfileForUser(row.id, profiles || []) }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
 }
 
 async function apiListArchivedUsers(token) {
@@ -2006,7 +2068,9 @@ async function apiRestoreUser(token, userId) {
 async function apiSaveUser(token, payload) {
   const actor = await verifyActor(token); requireAdmin(actor);
   payload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
-  const allowed = ['id', 'name', 'email', 'role', 'active', 'operationsAccess', 'initialPassword'];
+  const profileKeys = ['contractCpf','contractCnpj','contractCreci','contractAddress'];
+  const allowed = ['id', 'name', 'email', 'role', 'active', 'operationsAccess', 'initialPassword', ...profileKeys];
+  const hasContractProfile = profileKeys.some((key) => Object.prototype.hasOwnProperty.call(payload, key));
   if (Object.keys(payload).some((key) => !allowed.includes(key))) return { ok: false, message: 'A solicitação contém campos não permitidos.' };
   if (Object.prototype.hasOwnProperty.call(payload, 'active') && typeof payload.active !== 'boolean') return { ok: false, message: 'Estado do usuário inválido.' };
   const name = String(payload.name || '').trim(); const email = normalizeEmail(payload.email); const role = String(payload.role || '').trim();
@@ -2052,20 +2116,36 @@ async function apiSaveUser(token, payload) {
       await authRequest(`admin/users/${encodeURIComponent(user.id)}`, { method: 'DELETE', admin: true }).catch(() => null);
       throw error;
     }
-    const afterValues = { name, email, role, active, operationsAccess };
+    const profile = normalizeTeamContractProfile(payload);
+    try {
+      if (hasContractProfile) await saveTeamContractProfile(actor, user.id, profile);
+    } catch (error) {
+      await dbRequest('crm_user_contract_profiles', { method: 'DELETE', query: { user_id: `eq.${user.id}` } }).catch(() => null);
+      await dbRequest('crm_users', { method: 'DELETE', query: { id: `eq.${user.id}` } }).catch(() => null);
+      await authRequest(`admin/users/${encodeURIComponent(user.id)}`, { method: 'DELETE', admin: true }).catch(() => null);
+      throw error;
+    }
+    const afterValues = { name, email, role, active, operationsAccess, contractProfile: redactedTeamContractProfile(profile) };
     await audit(actor, 'user.create', 'user', user.id, auditChangedFields({}, afterValues), {}, afterValues);
     return { ok: true, user: publicUser(Array.isArray(inserted) ? inserted[0] : null), message: 'Usuário cadastrado com senha inicial. A pessoa deverá criar uma senha própria no primeiro acesso.' };
   }
   const old = mapUser(existing); const beforeValues = { name: old.name, email: old.email, role: old.role, active: old.active, operationsAccess: old.operationsAccess };
   const afterValues = { name, email, role, active, operationsAccess };
   const changedFields = auditChangedFields(beforeValues, afterValues);
-  if (!changedFields.length) return { ok: true, user: publicUser(existing), message: 'Nenhuma alteração detectada.' };
+  const profile = normalizeTeamContractProfile(payload);
+  let profileResult = { changedFields: [] };
+  if (hasContractProfile) profileResult = await saveTeamContractProfile(actor, existing.id, profile);
+  if (!changedFields.length && !profileResult.changedFields.length) return { ok: true, user: publicUser(existing), message: 'Nenhuma alteração detectada.' };
   const changed = old.email !== email || old.role !== role || old.active !== active || old.operationsAccess !== operationsAccess;
   const sessionVersion = Number(old.sessionVersion || 0) + (changed ? 1 : 0);
-  if (old.email !== email || changed || old.name !== name) await updateAuthProfile(existing.id, { email: old.email !== email ? email : undefined, name, sessionVersion });
-  const updated = await dbRequest('crm_users', { method: 'PATCH', query: { id: `eq.${existing.id}` }, prefer: 'return=representation', body: { name, email, role, operations_access: operationsAccess, active, session_version: sessionVersion, updated_at: stamp } });
-  await audit(actor, 'user.update', 'user', existing.id, changedFields, beforeValues, afterValues);
-  return { ok: true, user: publicUser(Array.isArray(updated) ? updated[0] : null), message: 'Usuário atualizado.' };
+  let updated = existing;
+  if (changedFields.length) {
+    if (old.email !== email || changed || old.name !== name) await updateAuthProfile(existing.id, { email: old.email !== email ? email : undefined, name, sessionVersion });
+    const updatedRows = await dbRequest('crm_users', { method: 'PATCH', query: { id: `eq.${existing.id}` }, prefer: 'return=representation', body: { name, email, role, operations_access: operationsAccess, active, session_version: sessionVersion, updated_at: stamp } });
+    updated = Array.isArray(updatedRows) ? updatedRows[0] || existing : existing;
+    await audit(actor, 'user.update', 'user', existing.id, changedFields, beforeValues, afterValues);
+  }
+  return { ok: true, user: publicUser(updated), message: profileResult.changedFields.length && !changedFields.length ? 'Dados para documentos atualizados no cadastro da equipe.' : 'Usuário atualizado.' };
 }
 
 async function apiResetUserPassword(token, userId, payload = {}) {

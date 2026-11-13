@@ -1519,13 +1519,17 @@
   function openUserDialog(user) {
     const dialog = byId('user-dialog'); const content = byId('user-dialog-content'); content.replaceChildren();
     const box = el('div', 'modal-content'); const isCreate = !user;
-    box.append(el('h2', '', isCreate ? 'Adicionar usuário' : 'Editar usuário'), el('p', 'muted', 'O acesso é baseado no perfil e, para corretores, na carteira associada à própria conta.'));
+    box.append(el('h2', '', isCreate ? 'Adicionar usuário' : 'Editar usuário'), el('p', 'muted', 'O acesso é baseado no perfil e, para corretores, na carteira associada à própria conta. Os dados para documentos ficam vinculados ao cadastro e podem ser preenchidos para corretores e SDRs.'));
     const form = el('form'); const grid = el('div', 'form-grid');
     const name = document.createElement('input'); name.required = true; name.maxLength = 150; name.value = user ? user.name : '';
     const email = document.createElement('input'); email.type = 'email'; email.required = true; email.value = user ? user.email : '';
     const initialPassword = document.createElement('input'); initialPassword.type='password'; initialPassword.autocomplete='new-password'; initialPassword.minLength=12; initialPassword.maxLength=128; initialPassword.required=true;
     const initialPasswordConfirm = document.createElement('input'); initialPasswordConfirm.type='password'; initialPasswordConfirm.autocomplete='new-password'; initialPasswordConfirm.minLength=12; initialPasswordConfirm.maxLength=128; initialPasswordConfirm.required=true;
     const role = makeSelect(ROLE_LIST.map((value) => ({label:value,value})), user ? user.role : 'Corretor');
+    const contractCpf=document.createElement('input');contractCpf.maxLength=30;contractCpf.autocomplete='off';contractCpf.value=user?user.contractCpf||'' :'';
+    const contractCnpj=document.createElement('input');contractCnpj.maxLength=30;contractCnpj.autocomplete='off';contractCnpj.value=user?user.contractCnpj||'' :'';
+    const contractCreci=document.createElement('input');contractCreci.maxLength=60;contractCreci.autocomplete='off';contractCreci.value=user?user.contractCreci||'' :'';
+    const contractAddress=document.createElement('textarea');contractAddress.maxLength=500;contractAddress.autocomplete='street-address';contractAddress.value=user?user.contractAddress||'' :'';
     const operationsPermission = makeSelect([], '');
     const accessHint = el('small','ops-access-hint','Corretores e SDR recebem as permissões próprias de seu perfil. A gestão de produção, metas e frequências é concedida apenas às contas operacionais designadas.');
     const active = document.createElement('input'); active.type = 'checkbox'; active.checked = user ? user.active : true;
@@ -1536,6 +1540,8 @@
       addField(grid,'Confirme a senha inicial',initialPasswordConfirm,true);
       grid.appendChild(el('p','field-hint','A pessoa entrará com esta senha e será obrigada a trocá-la no primeiro acesso. O CRM não registra a senha em histórico nem em texto legível.'));
     }
+    grid.appendChild(el('p','field-hint field-full','Dados para documentos · ficam no cadastro deste usuário e são usados quando ele for selecionado como corretor ou SDR em uma venda.'));
+    addField(grid,'CPF',contractCpf);addField(grid,'CNPJ',contractCnpj);addField(grid,'CRECI (quando aplicável)',contractCreci);addField(grid,'Endereço completo',contractAddress,true);
     const accessField=el('label','field field-full');accessField.append(el('span','','Permissão no módulo de produção e frequência'),operationsPermission,accessHint);grid.appendChild(accessField);grid.appendChild(activeLabel);
     const updateOperationsPermission=()=>{
       if(role.value==='Corretor'){operationsPermission.replaceChildren(new Option('Corretor · próprios lançamentos e frequência','broker'));operationsPermission.value='broker';operationsPermission.disabled=true;accessHint.textContent='O corretor registra e edita somente os próprios lançamentos e consulta apenas a própria frequência.';}
@@ -1558,7 +1564,7 @@
       event.preventDefault(); error.textContent=''; save.disabled=true;
       try {
         if(isCreate&&initialPassword.value!==initialPasswordConfirm.value)throw new Error('As senhas iniciais não coincidem.');
-        const payload={id:user ? user.id : '',name:name.value,email:email.value,role:role.value,active:active.checked};
+        const payload={id:user ? user.id : '',name:name.value,email:email.value,role:role.value,active:active.checked,contractCpf:contractCpf.value,contractCnpj:contractCnpj.value,contractCreci:contractCreci.value,contractAddress:contractAddress.value};
         if(isCreate)payload.initialPassword=initialPassword.value;
         if(state.user.role==='Administrador')payload.operationsAccess=operationsPermission.value;
         const result = await callApi('apiSaveUser', state.token, payload);
@@ -1768,17 +1774,21 @@
   }
 
   async function renderContracts() {
-    const admin=isAdmin();const [contracts,brokerProfiles]=await Promise.all([callApi('apiListContracts',state.token),admin?callApi('apiListBrokerProfiles',state.token):Promise.resolve([])]); const area=byId('content-area');area.replaceChildren();
+    const admin=isAdmin();const [contracts,teamUsers]=await Promise.all([callApi('apiListContracts',state.token),admin?callApi('apiListUsers',state.token):Promise.resolve([])]); const area=byId('content-area');area.replaceChildren();
     const heading=el('div','page-heading');const title=el('div');
     title.append(el('h2','','Contratos e documentos'),el('p','',admin?'Registre documentos a partir de uma venda manual ou lead. Contrato/termo e confissão de dívida têm geração, assinatura e arquivo próprios.':'Você vê somente documentos assinados de vendas vinculadas à sua carteira ou atuação como SDR.'));
     const actions=el('div','row-actions');
-    if(admin){actions.append(button('Exportar contratos CSV','button-small',()=>exportContractsCsv(contracts)),button('+ Novo contrato','button-primary',()=>openContractDialog(null)),button('Modelos dos documentos','button-small',openContractTemplateDialog),button('Cadastro dos corretores','button-small',renderBrokerProfiles));}
+    if(admin){actions.append(button('Exportar contratos CSV','button-small',()=>exportContractsCsv(contracts)),button('+ Novo contrato','button-primary',()=>openContractDialog(null)),button('Modelos dos documentos','button-small',openContractTemplateDialog),button('Dados da equipe para documentos','button-small',renderContractTeamProfiles));}
     heading.append(title,actions);area.appendChild(heading);
     if(admin){
-      const incomplete=brokerProfiles.filter((profile)=>!profile.cpf||!profile.cnpj||!profile.creci||!profile.address).length;
+      const documentTeam=(teamUsers||[]).filter((profile)=>['Corretor','SDR'].includes(profile.role));
+      const incompleteBrokers=documentTeam.filter((profile)=>profile.role==='Corretor'&&(!profile.contractCpf||!profile.contractCnpj||!profile.contractCreci||!profile.contractAddress)).length;
+      const incompleteSdrs=documentTeam.filter((profile)=>profile.role==='SDR'&&profile.active&&!profile.contractCpf).length;
+      const incomplete=incompleteBrokers+incompleteSdrs;
       const readiness=el('section','contract-readiness '+(incomplete?'contract-readiness-pending':'contract-readiness-ready'));
-      readiness.append(el('strong','',incomplete?incomplete+' cadastro(s) de corretor incompleto(s) para geração':'Cadastros dos corretores completos'));
-      readiness.appendChild(el('p','',incomplete?'Preencha CPF, CNPJ, CRECI e endereço em “Cadastro dos corretores”. Cada documento também exige CPF do comprador e do SDR.':'Confira os CPFs e os dados do corretor antes de gerar. A assinatura é externa; a gestão anexa cada arquivo assinado e confirma as três assinaturas.'));
+      readiness.append(el('strong','',incomplete?incomplete+' cadastro(s) da equipe incompleto(s) para geração':'Dados da equipe prontos para os modelos atuais'));
+      readiness.appendChild(el('p','',incomplete?`${incompleteBrokers} corretor(es) precisam de CPF, CNPJ, CRECI e endereço; ${incompleteSdrs} SDR(s) ativo(s) precisam de CPF. Complete tudo em Administração > Equipe. O sistema também valida os campos exigidos por cada modelo.`:'Os dados contratuais ficam no cadastro da equipe. A gestão anexa cada arquivo assinado e confirma as três assinaturas.'));
+      readiness.appendChild(button('Revisar dados da equipe','button-small',renderContractTeamProfiles));
       area.appendChild(readiness);
     }
     const panel=el('section','table-panel');const scroll=el('div','table-scroll');const table=el('table','data-table');const thead=el('thead');const h=el('tr');
@@ -1810,8 +1820,18 @@
     if(admin){const hint=el('p','field-hint','A venda pode estar ligada a um lead ou ter sido lançada manualmente, sem cadastro na carteira do CRM. Contrato/termo e confissão são documentos independentes: gerar ou assinar um não altera o estado do outro. A gestão deve verificar as assinaturas do corretor, SDR e gerente em cada arquivo. Corretor e SDR só recebem arquivos assinados após a confirmação do contrato principal. O CSV contém metadados, não o conteúdo dos arquivos.');area.appendChild(hint);}
   }
 
+  async function renderContractTeamProfiles() {
+    const users=await callApi('apiListUsers',state.token);const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');
+    box.append(el('h2','','Dados da equipe para documentos'),el('p','muted','Os dados são preenchidos no cadastro do usuário e reutilizados nos documentos. Vendas com mais de um SDR usam o SDR escolhido no rascunho do contrato.'));
+    const panel=el('section','table-panel');const scroll=el('div','table-scroll');const table=el('table','data-table');const head=el('thead');const row=el('tr');['Nome','Perfil','CPF','CNPJ','CRECI','Endereço','Situação','Ação'].forEach((label)=>row.appendChild(el('th','',label)));head.appendChild(row);table.appendChild(head);const body=el('tbody');
+    const parties=(users||[]).filter((item)=>['Corretor','SDR'].includes(item.role)).sort((a,b)=>a.name.localeCompare(b.name,'pt-BR'));
+    if(!parties.length){const tr=el('tr');const td=el('td','table-empty','Nenhum corretor ou SDR cadastrado.');td.colSpan=8;tr.appendChild(td);body.appendChild(tr);}
+    parties.forEach((item)=>{const required=item.role==='Corretor'?['contractCpf','contractCnpj','contractCreci','contractAddress']:['contractCpf'];const complete=required.every((key)=>Boolean(item[key]));const tr=el('tr');tr.append(el('td','',item.name),el('td','',item.role),el('td','',item.contractCpf||'—'),el('td','',item.contractCnpj||'—'),el('td','',item.contractCreci||'—'),el('td','',item.contractAddress||'—'),el('td','',complete?'Completo':'Pendente'+(item.active?'':' · usuário inativo')));const action=el('td');action.appendChild(button('Editar cadastro','button-small',()=>{dialog.close();openUserDialog(item);}));tr.appendChild(action);body.appendChild(tr);});
+    table.appendChild(body);scroll.appendChild(table);panel.appendChild(scroll);box.appendChild(panel);box.appendChild(button('Fechar','button-small',()=>dialog.close()));content.appendChild(box);if(!dialog.open)dialog.showModal();
+  }
+
   async function openContractDialog(contract) {
-    const [leads,sales]=await Promise.all([callApi('apiListContractLeads',state.token),callApi('apiListSales',state.token)]);
+    const [leads,sales,teamUsers]=await Promise.all([callApi('apiListContractLeads',state.token),callApi('apiListSales',state.token),callApi('apiListUsers',state.token)]);
     const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');
     box.append(el('h2','',contract?'Editar rascunho de contrato':'Novo contrato'),el('p','muted','Somente a gestão gera os documentos. O corretor e o SDR poderão consultar os arquivos após as assinaturas serem confirmadas. A comissão e o prêmio são divididos em 50% para cada; a comissão do gerente é calculada separadamente.'));
     const form=el('form');const grid=el('div','form-grid');
@@ -1819,16 +1839,16 @@
     const lead=makeSelect([{label:'Sem lead vinculado (venda externa/manual)',value:''},...leads.map((item)=>({label:item.name+' · '+item.phone+' · '+item.brokerName,value:item.id}))],contract?contract.leadId||'':'');
     const buyer=document.createElement('input');buyer.required=true;buyer.maxLength=150;buyer.value=contract?contract.buyerName:'';
     const cpf=document.createElement('input');cpf.maxLength=30;cpf.value=contract?contract.buyerCpf:'';
-    const sdrCpf=document.createElement('input');sdrCpf.maxLength=30;sdrCpf.value=contract?contract.sdrCpf:'';
     const proposal=document.createElement('input');proposal.maxLength=100;proposal.value=contract?contract.proposalNumber:'';
     const process=document.createElement('input');process.maxLength=100;process.value=contract?contract.processNumber||'':'';
     const address=document.createElement('textarea');address.maxLength=500;address.value=contract?contract.buyerAddress:'';
     const developmentOptions=state.refs.developments.map((item)=>({label:item.name,value:item.id}));
     const development=makeSelect([{label:'Selecione o empreendimento',value:''},...developmentOptions],contract?contract.developmentId:'');
-    const brokerOptions=state.refs.brokers.filter((item)=>item.active).map((item)=>({label:item.name,value:item.id}));
+    const brokerOptions=(teamUsers||[]).filter((item)=>item.role==='Corretor'&&item.active).map((item)=>({label:item.name,value:item.id}));
     if(contract&&contract.brokerId&&!brokerOptions.some((item)=>item.value===contract.brokerId))brokerOptions.push({label:contract.brokerName+' · inativo',value:contract.brokerId});
     const broker=makeSelect([{label:'Selecione o corretor',value:''},...brokerOptions],contract?contract.brokerId:'');
-    const sdr=makeSelect([{label:'Selecione o SDR',value:''},...(state.refs.sdrs||[]).map((item)=>({label:item.name,value:item.id}))],contract?contract.sdrId:'');
+    const sdrOptions=(teamUsers||[]).filter((item)=>item.role==='SDR'&&item.active).map((item)=>({label:item.name,value:item.id}));
+    const sdr=makeSelect([{label:'Selecione o SDR responsável por esta venda',value:''},...sdrOptions],contract?contract.sdrId:'');
     const managerOptions=state.refs.managers||[];const defaultManager=contract?contract.managerId:(managerOptions.find((item)=>item.id===state.user.id)||managerOptions[0]||{}).id||'';const manager=makeSelect([{label:'Selecione o gerente ou administrador signatário',value:''},...managerOptions.map((item)=>({label:item.name+' · '+item.role,value:item.id}))],defaultManager);
     const unit=document.createElement('input');unit.required=true;unit.maxLength=100;unit.value=contract?contract.unit:'';
     const unitValue=document.createElement('input');unitValue.required=true;configureCurrencyInput(unitValue,contract?contract.unitValue:0);
@@ -1840,8 +1860,23 @@
     const prizeRate=document.createElement('input');prizeRate.type='number';prizeRate.step='0.0001';prizeRate.min='0';prizeRate.max='100';prizeRate.value=contract&&contract.prizeRatePct!==null?contract.prizeRatePct:'';prizeRate.disabled=!hasPrize.checked;prizeRate.required=hasPrize.checked;
     const prize=document.createElement('input');prize.type='text';prize.readOnly=true;prize.setAttribute('aria-label','Prêmio bruto total calculado');
     addField(grid,'Venda já registrada (opcional)',sale,true);addField(grid,'Lead do CRM (opcional)',lead,true);addField(grid,'Número do processo (manual, quando não houver venda vinculada)',process,true);
-    addField(grid,'Nome do comprador',buyer);addField(grid,'CPF do comprador (necessário para gerar)',cpf);addField(grid,'CPF do SDR (necessário para gerar)',sdrCpf);addField(grid,'Endereço do comprador',address,true);
+    addField(grid,'Nome do comprador',buyer);addField(grid,'CPF do comprador (necessário para gerar)',cpf);addField(grid,'Endereço do comprador',address,true);
     addField(grid,'Empreendimento',development);addField(grid,'Corretor responsável',broker);addField(grid,'SDR signatário',sdr);addField(grid,'Gerente signatário',manager);
+    const partyProfilesNote=el('div','contract-party-preview');
+    function renderPartyProfile(userId,roleLabel){
+      const item=(teamUsers||[]).find((user)=>user.id===userId);
+      if(!item)return roleLabel+': selecione uma pessoa.';
+      const values=[['CPF',item.contractCpf],['CNPJ',item.contractCnpj],['CRECI',item.contractCreci],['Endereço',item.contractAddress]];
+      const missing=values.filter(([,value])=>!String(value||'').trim()).map(([label])=>label);
+      return roleLabel+' · '+item.name+': '+(missing.length?'cadastro incompleto — faltam '+missing.join(', '):'dados cadastrais completos');
+    }
+    function updatePartyProfiles(){
+      partyProfilesNote.replaceChildren();
+      partyProfilesNote.append(el('p','',renderPartyProfile(broker.value,'Corretor')),el('p','',renderPartyProfile(sdr.value,'SDR')),
+        el('p','field-hint','Os dados pessoais são carregados do cadastro em Administração > Equipe. Para corrigir ou completar, feche este rascunho e edite o usuário. O SDR selecionado é registrado neste contrato, mesmo que a equipe tenha mais de um SDR.'));
+    }
+    grid.appendChild(partyProfilesNote);
+    broker.addEventListener('change',updatePartyProfiles);sdr.addEventListener('change',updatePartyProfiles);
     const splitPreview=el('div','ops-note');
     function updateContractPreview(){const base=Number(currencyPayload(unitValue)||0);const rate=Number(commissionRate.value||0);const managerPct=Number(managerRate.value||0);const prizePct=hasPrize.checked?Number(prizeRate.value||0):0;const gross=Math.round(base*rate)/100;const cents=Math.round(gross*100);const brokerCents=Math.floor(cents/2);const managerAmount=Math.round(base*managerPct)/100;const prizeGross=Math.round(base*prizePct)/100;const prizeCents=Math.round(prizeGross*100);const brokerPrizeCents=Math.floor(prizeCents/2);commission.value=gross>0?brl(gross):'';managerCommission.value=managerAmount>0?brl(managerAmount):'';prize.value=hasPrize.checked&&prizeGross>0?brl(prizeGross):'';splitPreview.textContent='Comissão bruta '+brl(gross)+' · Corretor '+brl(brokerCents/100)+' · SDR '+brl((cents-brokerCents)/100)+' · Gerente '+(managerAmount>0?brl(managerAmount):'Não se aplica')+(hasPrize.checked?' · Prêmio total '+brl(prizeGross)+' (corretor '+brl(brokerPrizeCents/100)+' / SDR '+brl((prizeCents-brokerPrizeCents)/100)+')':'')+'. Percentuais calculados sobre o valor da unidade.';}
     [unitValue,commissionRate,managerRate,prizeRate].forEach((input)=>input.addEventListener('input',updateContractPreview));hasPrize.addEventListener('change',()=>{prizeRate.disabled=!hasPrize.checked;prizeRate.required=hasPrize.checked;updateContractPreview();});
@@ -1867,12 +1902,12 @@
       }
       updateContractPreview();
     }
-    sale.addEventListener('change',applySaleSelection);
-    lead.addEventListener('change',()=>{if(sale.value)return;const chosen=leads.find((item)=>item.id===lead.value);if(!chosen)return;buyer.value=chosen.name;development.value=chosen.developmentId;broker.value=chosen.brokerId;});
+    sale.addEventListener('change',()=>{applySaleSelection();updatePartyProfiles();});
+    lead.addEventListener('change',()=>{if(sale.value)return;const chosen=leads.find((item)=>item.id===lead.value);if(!chosen)return;buyer.value=chosen.name;development.value=chosen.developmentId;broker.value=chosen.brokerId;updatePartyProfiles();});
     if(sale.value)applySaleSelection();
     form.appendChild(grid);const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar rascunho');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
-    updateContractPreview();
-    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{if(hasPrize.checked&&!prizeRate.value)throw new Error('Informe o percentual do prêmio ou desmarque a opção.');const result=await callApi('apiSaveContract',state.token,{id:contract?contract.id:'',saleId:sale.value,leadId:lead.value,processNumber:process.value,brokerId:broker.value,sdrId:sdr.value,sdrCpf:sdrCpf.value,managerId:manager.value,buyerName:buyer.value,buyerCpf:cpf.value,buyerAddress:address.value,developmentId:development.value,unit:unit.value,proposalNumber:proposal.value,unitValue:currencyPayload(unitValue),commissionBase:currencyPayload(unitValue),commissionRatePct:commissionRate.value,grossCommission:currencyPayload(commission),managerCommissionRatePct:managerRate.value,managerCommissionValue:currencyPayload(managerCommission),hasPrize:hasPrize.checked,prizeRatePct:prizeRate.value,grossPrize:currencyPayload(prize)});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar o contrato.');dialog.close();toast(result.message,'success');await renderContracts();}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});
+    updateContractPreview();updatePartyProfiles();
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{if(hasPrize.checked&&!prizeRate.value)throw new Error('Informe o percentual do prêmio ou desmarque a opção.');if(!sdr.value)throw new Error('Selecione o SDR responsável por este contrato.');const result=await callApi('apiSaveContract',state.token,{id:contract?contract.id:'',saleId:sale.value,leadId:lead.value,processNumber:process.value,brokerId:broker.value,sdrId:sdr.value,managerId:manager.value,buyerName:buyer.value,buyerCpf:cpf.value,buyerAddress:address.value,developmentId:development.value,unit:unit.value,proposalNumber:proposal.value,unitValue:currencyPayload(unitValue),commissionBase:currencyPayload(unitValue),commissionRatePct:commissionRate.value,grossCommission:currencyPayload(commission),managerCommissionRatePct:managerRate.value,managerCommissionValue:currencyPayload(managerCommission),hasPrize:hasPrize.checked,prizeRatePct:prizeRate.value,grossPrize:currencyPayload(prize)});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar o contrato.');dialog.close();toast(result.message,'success');await renderContracts();}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});
     dialog.showModal();
   }
 
@@ -1888,19 +1923,6 @@
     addField(grid,'Documento',kind);addField(grid,'Conteúdo HTML aprovado',template,true);form.appendChild(grid);form.appendChild(placeholders);form.appendChild(status);showTemplate(kind.value);kind.addEventListener('change',()=>showTemplate(kind.value));
     const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar modelo selecionado');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
     form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveContractTemplate',state.token,{kind:kind.value,html:template.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar.');dialog.close();toast(result.message,'success');}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});dialog.showModal();
-  }
-
-  async function renderBrokerProfiles() {
-    const rows=await callApi('apiListBrokerProfiles',state.token);const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');box.append(el('h2','','Dados cadastrais dos corretores'),el('p','muted','Essas informações serão carregadas no documento de contrato gerado.'));
-    const panel=el('section','table-panel');const table=el('table','data-table');const head=el('thead');const h=el('tr');['Corretor','CPF','CNPJ','CRECI','Endereço','Ação'].forEach((x)=>h.appendChild(el('th','',x)));head.appendChild(h);table.appendChild(head);const body=el('tbody');
-    rows.forEach((item)=>{const tr=el('tr');tr.append(el('td','',item.name),el('td','',item.cpf||'—'),el('td','',item.cnpj||'—'),el('td','',item.creci||'—'),el('td','',item.address||'—'));const action=el('td');action.appendChild(button('Editar','button-small',()=>openBrokerProfileDialog(item,renderBrokerProfiles)));tr.appendChild(action);body.appendChild(tr);});table.appendChild(body);const scroll=el('div','table-scroll');scroll.appendChild(table);panel.appendChild(scroll);box.appendChild(panel);box.appendChild(button('Fechar','button-small',()=>dialog.close()));content.appendChild(box);if(!dialog.open)dialog.showModal();
-  }
-
-  function openBrokerProfileDialog(profile, onSaved) {
-    const dialog=byId('user-dialog');const content=byId('user-dialog-content');content.replaceChildren();const box=el('div','modal-content');box.append(el('h2','','Cadastro do corretor'),el('p','muted',profile.name));const form=el('form');const grid=el('div','form-grid');
-    const cpf=document.createElement('input');cpf.value=profile.cpf;const cnpj=document.createElement('input');cnpj.value=profile.cnpj;const creci=document.createElement('input');creci.value=profile.creci;const address=document.createElement('textarea');address.value=profile.address;address.maxLength=500;
-    addField(grid,'CPF',cpf);addField(grid,'CNPJ',cnpj);addField(grid,'CRECI',creci);addField(grid,'Endereço',address,true);form.appendChild(grid);const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar dados');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
-    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveBrokerProfile',state.token,{brokerId:profile.brokerId,cpf:cpf.value,cnpj:cnpj.value,creci:creci.value,address:address.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar.');dialog.close();toast(result.message,'success');await onSaved();}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});dialog.showModal();
   }
 
   async function generateContract(contract, kind) {

@@ -109,3 +109,13 @@ test('auditoria informa e-mail do autor e tela administrativa de senha respeita 
   assert.match(client,/state\.user\.canApplySharedTemporaryPassword/);
   assert.match(client,/user\.canManageOperations/);
 });
+
+test('cadastro da equipe centraliza dados contratuais de corretores e SDRs e o rascunho seleciona o SDR', () => {
+  assert.match(client,/Dados para documentos · ficam no cadastro deste usuário/);
+  assert.match(client,/contractCpf:contractCpf\.value,contractCnpj:contractCnpj\.value,contractCreci:contractCreci\.value,contractAddress:contractAddress\.value/);
+  assert.match(client,/callApi\('apiListUsers',state\.token\)\]\);/);
+  assert.match(client,/item\.role==='SDR'&&item\.active/);
+  assert.match(client,/SDR selecionado é registrado neste contrato/);
+  assert.doesNotMatch(client,/CPF do SDR \(necessário para gerar\)/);
+  assert.match(styles,/\.contract-party-preview\{grid-column:1\/-1/);
+});
