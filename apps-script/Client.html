@@ -1,7 +1,7 @@
 <script>
 (() => {
   'use strict';
-  const state = { token: '', refreshToken: '', user: null, refs: null, page: 'dashboard', pageNumber: 1, lastDashboard: null, pollId: null, queryTimer: null, realtimeClient: null, realtimeChannel: null, realtimeTimer: null, operationsPeriod: 'week', operationsBrokerId: '', operationsDateFrom: '', operationsDateTo: '', operationsQuery: '', operationsAttendanceDay: '' };
+  const state = { token: '', refreshToken: '', user: null, refs: null, page: 'dashboard', pageNumber: 1, lastDashboard: null, pollId: null, queryTimer: null, realtimeClient: null, realtimeChannel: null, realtimeTimer: null, operationsPeriod: 'week', operationsBrokerId: '', operationsDateFrom: '', operationsDateTo: '', operationsQuery: '', operationsAttendanceDay: '', operationsBrokers: [], operationsBrokersUpdatedAt: 0 };
   const byId = (id) => document.getElementById(id);
   const ADMIN_ROLES = ['Administrador', 'Gerente', 'Coordenador', 'Assistente'];
   const ROLE_LIST = ['Administrador', 'Gerente', 'Coordenador', 'Assistente', 'SDR', 'Corretor'];
@@ -86,6 +86,7 @@
 
   function scheduleRealtimeRefresh() {
     if (state.realtimeTimer) window.clearTimeout(state.realtimeTimer);
+    state.operationsBrokersUpdatedAt = 0;
     state.realtimeTimer = window.setTimeout(() => {
       state.realtimeTimer = null;
       if (!document.hidden && state.token) refreshPage(true).catch(handleFailure);
@@ -113,7 +114,7 @@
   }
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && state.token) refreshPage(true).catch(handleFailure);
+    if (!document.hidden && state.token) { state.operationsBrokersUpdatedAt = 0; refreshPage(true).catch(handleFailure); }
   });
 
   function showLoading(message) {
@@ -358,6 +359,16 @@
   const OPERATION_SHIFTS = [
     { id: 'morning', label: 'Manhã' }, { id: 'afternoon', label: 'Tarde' }, { id: 'night', label: 'Noite' }
   ];
+  async function refreshOperationBrokers() {
+    const currentTime = Date.now();
+    if (state.operationsBrokersUpdatedAt && currentTime - state.operationsBrokersUpdatedAt < 15000) return state.operationsBrokers;
+    const brokers = await callApi('apiListOperationBrokers', state.token);
+    if (!Array.isArray(brokers)) throw new Error('Não foi possível atualizar a lista de corretores da operação.');
+    state.operationsBrokers = brokers;
+    state.operationsBrokersUpdatedAt = currentTime;
+    return state.operationsBrokers;
+  }
+  function canExportOperations() { return ['viewer','manager'].includes(operationsAccess()); }
   function operationFilters() {
     return { period: state.operationsPeriod || 'week', brokerId: state.operationsBrokerId || '', dateFrom: state.operationsDateFrom || '', dateTo: state.operationsDateTo || '' };
   }
@@ -367,7 +378,7 @@
     period.setAttribute('aria-label', 'Período operacional');
     const periodWrap = el('label', 'filter-field'); periodWrap.append(el('span', '', 'Período'), period); bar.appendChild(periodWrap);
     if (isOperationsTeamReader()) {
-      const broker = makeSelect([{ label: 'Toda a equipe', value: '' }, ...state.refs.brokers.map((item) => ({ label: item.name, value: item.id }))], state.operationsBrokerId || '');
+      const broker = makeSelect([{ label: 'Toda a equipe', value: '' }, ...(state.operationsBrokers || []).map((item) => ({ label: item.name + (item.active ? '' : ' · inativo'), value: item.id }))], state.operationsBrokerId || '');
       broker.setAttribute('aria-label', 'Filtrar por corretor');
       const brokerWrap = el('label', 'filter-field'); brokerWrap.append(el('span', '', 'Corretor'), broker); bar.appendChild(brokerWrap);
       broker.onchange = () => { state.operationsBrokerId = broker.value; onChange(); };
@@ -412,6 +423,7 @@
 
   async function renderOperationsDashboard() {
     if (!canReadOperations()) { state.page = 'dashboard'; setActiveNav('dashboard'); return renderDashboard(); }
+    await refreshOperationBrokers();
     const data = await callApi('apiGetOperationsDashboard', state.token, operationFilters());
     const area = byId('content-area'); area.replaceChildren();
     const page = operationsPage(() => renderOperationsDashboard().catch(handleFailure));
@@ -496,9 +508,11 @@
 
   async function renderProduction() {
     if (!canReadOperations()) { state.page = 'dashboard'; setActiveNav('dashboard'); return renderDashboard(); }
+    await refreshOperationBrokers();
     const filters = operationFilters(); const rows = await callApi('apiListProduction', state.token, filters);
     const area = byId('content-area'); area.replaceChildren(); const actions = el('div','ops-actions');
     if (canManageOperations() || operationsAccess() === 'broker') actions.appendChild(button('+ Novo lançamento','button-primary',()=>openProductionDialog(null)));
+    if (canExportOperations()) actions.appendChild(button('Exportar lançamentos CSV','button-small',()=>exportOperationSection('production',filters)));
     const page = operationsPage(() => renderProduction().catch(handleFailure));
     page.prepend(operationsHeader('Lançamentos de produção', 'Cada lançamento é individual e pode ser feito mais de uma vez no mesmo dia. Corretores editam apenas os próprios registros; contas de gestão designadas podem corrigir os registros da equipe.', actions));
     page.appendChild(el('div','ops-note','Os dados informam quantidade de atividades: prospecções, interações, agendamentos, visitas e vendas. Alterações ficam registradas no histórico administrativo do CRM.'));
@@ -522,7 +536,7 @@
     const dialog = byId('admin-dialog'); const content = byId('admin-dialog-content'); content.replaceChildren();
     const box = el('div','modal-content'); box.append(el('h2','',entry?'Editar lançamento':'Novo lançamento de produção'),el('p','muted','É permitido registrar vários lançamentos na mesma data. Cada alteração será auditada.'));
     const form = document.createElement('form'); const grid = el('div','form-grid');
-    const brokerSelect = makeSelect(state.refs.brokers.map((item)=>({label:item.name,value:item.id})), entry ? entry.brokerId : operationsAccess()==='broker' ? state.user.id : '');
+    const brokerSelect = makeSelect((state.operationsBrokers || []).filter((item)=>item.active).map((item)=>({label:item.name,value:item.id})), entry ? entry.brokerId : operationsAccess()==='broker' ? state.user.id : '');
     if (operationsAccess()==='broker') { brokerSelect.value=state.user.id; brokerSelect.disabled=true; }
     addField(grid,'Corretor responsável',brokerSelect,true);
     const date = document.createElement('input'); date.type='date'; date.required=true; date.max=todayBrazil(); date.value=entry?entry.workDate:todayBrazil(); addField(grid,'Data do lançamento',date,true);
@@ -547,6 +561,7 @@
 
   async function renderOperationGoals() {
     if (!canReadOperations()) { state.page='dashboard';setActiveNav('dashboard');return renderDashboard(); }
+    await refreshOperationBrokers();
     const filters=operationFilters();filters.cycle=state.operationsGoalCycle||'';
     const goals=await callApi('apiListOperationGoals',state.token,filters);
     const area=byId('content-area');area.replaceChildren();const actions=el('div','ops-actions');
@@ -561,7 +576,7 @@
   function operationGoalPeriod(cycle,reference){if(cycle==='weekly'){const start=mondayOfOperationWeek(reference);return {start,end:shiftOperationDate(start,6)};}const start=String(reference).slice(0,7)+'-01';const date=new Date(String(reference).slice(0,7)+'-01T00:00:00Z');date.setUTCMonth(date.getUTCMonth()+1);date.setUTCDate(0);return {start,end:date.toISOString().slice(0,10)};}
 
   function openOperationGoalsBatchDialog(existingGoals) {
-    if(!canManageOperations())return;const brokers=(state.refs.brokers||[]).filter((item)=>item.active);if(!brokers.length){toast('Não há corretores ativos para configurar.','error');return;}
+    if(!canManageOperations())return;const brokers=(state.operationsBrokers||[]).filter((item)=>item.active);if(!brokers.length){toast('Não há corretores ativos para configurar.','error');return;}
     const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');box.append(el('h2','','Configurar metas da equipe'),el('p','muted','Preencha prospecções, visitas e vendas para todos os corretores ativos e salve a matriz em uma única operação. As metas anteriores não serão apagadas.'));
     const form=el('form');const controls=el('div','form-grid');const cycle=makeSelect([{label:'Semanal (segunda a domingo)',value:'weekly'},{label:'Mensal (mês calendário)',value:'monthly'}],state.operationsGoalCycle==='monthly'?'monthly':'weekly');const reference=document.createElement('input');reference.type='date';reference.required=true;reference.value=state.operationsGoalReferenceDate||todayBrazil();addField(controls,'Ciclo de metas',cycle);addField(controls,'Data dentro do período',reference);form.appendChild(controls);
     const hint=el('p','field-hint');const tableWrap=el('div','table-scroll');const table=el('table','data-table');table.style.minWidth='780px';const head=el('thead');const header=el('tr');['Corretor','Prospecções','Visitas','Vendas'].forEach((label)=>header.appendChild(el('th','',label)));head.appendChild(header);table.appendChild(head);const body=el('tbody');table.appendChild(body);tableWrap.appendChild(table);form.appendChild(tableWrap);
@@ -584,6 +599,7 @@
 
   async function renderAttendance() {
     if(!canReadOperations()){state.page='dashboard';setActiveNav('dashboard');return renderDashboard();}
+    await refreshOperationBrokers();
     const filters=operationFilters();
     const rows=await callApi('apiListAttendance',state.token,filters);
     const selectedDay=state.operationsAttendanceDay&&state.operationsAttendanceDay<=todayBrazil()?state.operationsAttendanceDay:todayBrazil();
@@ -595,7 +611,8 @@
     const selectedDayRows=weekRows.filter((row)=>row.attendanceDate===selectedDay);
     const area=byId('content-area');area.replaceChildren();
     const page=operationsPage(()=>renderAttendance().catch(handleFailure));
-    page.prepend(operationsHeader('Frequência nos plantões','Consulte os totais por período e acompanhe a semana de segunda a domingo. Cada turno conta separadamente; este módulo não controla jornada.'));
+    const actions=el('div','ops-actions');if(canExportOperations())actions.appendChild(button('Exportar plantões CSV','button-small button-primary',()=>exportOperationSection('attendance',filters)));
+    page.prepend(operationsHeader('Frequência nos plantões','Consulte os totais por período e acompanhe a semana de segunda a domingo. Cada turno conta separadamente; este módulo não controla jornada.',actions));
     const summary={morning:0,afternoon:0,night:0};rows.forEach((row)=>{if(summary[row.shift]!==undefined)summary[row.shift]+=1;});
     const summaryCards=el('section','ops-shift-grid');OPERATION_SHIFTS.forEach((shift)=>{const card=el('div','ops-shift-card');card.append(el('span','',shift.label),el('strong','',String(summary[shift.id])),el('small','','presenças no período selecionado'));summaryCards.appendChild(card);});
     const totalCard=el('div','ops-shift-card');totalCard.append(el('span','','Total'),el('strong','',String(rows.length)),el('small','','frequências registradas'));summaryCards.appendChild(totalCard);page.appendChild(summaryCards);
@@ -617,7 +634,7 @@
     const dayLabel=el('label','filter-field');dayLabel.append(el('span','','Dia'),dayInput);dayHead.append(dayTitle,dayLabel);dayPanel.appendChild(dayHead);
     if(canManageOperations()){
       const matrix=el('div','ops-table-wrap');const table=el('table','ops-table');table.style.minWidth='620px';const thead=el('thead');const headRow=el('tr');['Corretor','Manhã','Tarde','Noite','Total do dia'].forEach((label)=>headRow.appendChild(el('th','',label)));thead.appendChild(headRow);table.appendChild(thead);const body=el('tbody');const active=new Set(selectedDayRows.map((row)=>[row.brokerId,row.shift].join(':')));
-      state.refs.brokers.forEach((broker)=>{const row=el('tr');row.appendChild(el('td','',broker.name));let dailyTotal=0;OPERATION_SHIFTS.forEach((shift)=>{const cell=el('td','ops-attendance-cell');const present=active.has([broker.id,shift.id].join(':'));if(present)dailyTotal+=1;const toggle=button(present?'Presente':'Marcar presença','ops-attendance-toggle'+(present?' is-present':''),async()=>{toggle.disabled=true;try{const result=await callApi('apiSetAttendance',state.token,{brokerId:broker.id,attendanceDate:selectedDay,shift:shift.id,present:!present});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível atualizar.');toast(result.message,'success');await renderAttendance();}catch(err){toggle.disabled=false;handleFailure(err);}});toggle.setAttribute('aria-pressed',present?'true':'false');cell.appendChild(toggle);row.appendChild(cell);});row.appendChild(el('td','numeric',String(dailyTotal)));body.appendChild(row);});
+      (state.operationsBrokers||[]).filter((broker)=>broker.active).forEach((broker)=>{const row=el('tr');row.appendChild(el('td','',broker.name));let dailyTotal=0;OPERATION_SHIFTS.forEach((shift)=>{const cell=el('td','ops-attendance-cell');const present=active.has([broker.id,shift.id].join(':'));if(present)dailyTotal+=1;const toggle=button(present?'Presente':'Marcar presença','ops-attendance-toggle'+(present?' is-present':''),async()=>{toggle.disabled=true;try{const result=await callApi('apiSetAttendance',state.token,{brokerId:broker.id,attendanceDate:selectedDay,shift:shift.id,present:!present});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível atualizar.');toast(result.message,'success');await renderAttendance();}catch(err){toggle.disabled=false;handleFailure(err);}});toggle.setAttribute('aria-pressed',present?'true':'false');cell.appendChild(toggle);row.appendChild(cell);});row.appendChild(el('td','numeric',String(dailyTotal)));body.appendChild(row);});
       table.appendChild(body);matrix.appendChild(table);dayPanel.appendChild(matrix);
     } else {
       const dayRows=selectedDayRows.map((row)=>[row.brokerName,OPERATION_SHIFTS.find((item)=>item.id===row.shift)?.label||row.shift,formatDate(row.updatedAt)]);
@@ -632,6 +649,7 @@
 
   async function renderOperationsReports() {
     if(!canReadOperations()){state.page='dashboard';setActiveNav('dashboard');return renderDashboard();}
+    await refreshOperationBrokers();
     const filters=operationFilters();const data=await callApi('apiGetOperationsDashboard',state.token,filters);const area=byId('content-area');area.replaceChildren();const actions=el('div','ops-actions');
     if(data.canExport)actions.appendChild(button('Exportar CSV','button-primary',()=>exportOperationsReport(filters)));
     const page=operationsPage(()=>renderOperationsReports().catch(handleFailure));page.prepend(operationsHeader('Relatórios de produção e frequência','Consolidação para consulta e comparação por semana, mês, corretor ou período personalizado.',actions));
@@ -645,6 +663,25 @@
   async function exportOperationsReport(filters) {
     try { const report=await callApi('apiExportOperationsReport',state.token,filters);const headers=['tipo_registro','data','corretor','prospeccoes','interacoes','agendamentos','visitas','vendas_quantidade','frequencia_total','frequencia_manha','frequencia_tarde','frequencia_noite','periodo_plantao','observacoes','ultima_atualizacao'];const values=[];report.rows.forEach((row)=>values.push(['Resumo do período',report.period.start+' a '+report.period.end,row.corretor,row.prospeccoes,row.interacoes,row.agendamentos,row.visitas,row.vendas,row.frequencia_total,row.frequencia_manha,row.frequencia_tarde,row.frequencia_noite,'','', '']));report.production.forEach((row)=>values.push(['Produção',row.date,row.broker,row.prospeccoes,row.interacoes,row.agendamentos,row.visitas,row.vendas,'','','','','',row.observacoes,row.updatedAt]));report.attendance.forEach((row)=>values.push(['Frequência',row.date,row.broker,'','','','','','','','','',row.shift,'',row.updatedAt]));downloadCsv('relatorio-operacao-'+report.period.start+'-'+report.period.end+'.csv',headers,values);toast(values.length+' linha(s) de resumo, produção e frequência exportadas para CSV.','success'); }
     catch(error){handleFailure(error);}
+  }
+
+  async function exportOperationSection(section, filters) {
+    if (!canExportOperations() || !['production','attendance'].includes(section)) return;
+    try {
+      const report = await callApi('apiExportOperationsReport', state.token, filters);
+      if (section === 'production') {
+        const query = (state.operationsQuery || '').trim().toLocaleLowerCase('pt-BR');
+        const rows = (report.production || []).filter((row) => !query || [row.broker,row.observacoes,row.date].some((value) => String(value || '').toLocaleLowerCase('pt-BR').includes(query)));
+        const values = rows.map((row) => [row.date,row.broker,row.prospeccoes,row.interacoes,row.agendamentos,row.visitas,row.vendas,row.observacoes,row.updatedAt]);
+        downloadCsv('lancamentos-producao-'+report.period.start+'-'+report.period.end+'.csv', ['data','corretor','prospeccoes','interacoes','agendamentos','visitas','vendas_quantidade','observacoes','ultima_atualizacao'], values);
+        toast(rows.length+' lançamento(s) exportado(s) para CSV no período selecionado.','success');
+        return;
+      }
+      const rows = report.attendance || [];
+      const values = rows.map((row) => [row.date,row.broker,row.shift,row.updatedAt]);
+      downloadCsv('frequencias-plantoes-'+report.period.start+'-'+report.period.end+'.csv', ['data','corretor','periodo','ultima_atualizacao'], values);
+      toast(rows.length+' frequência(s) exportada(s) para CSV no período selecionado.','success');
+    } catch (error) { handleFailure(error); }
   }
 
   function buildOperationsOverview() {
@@ -1285,8 +1322,8 @@
 
   function exportSalesCsv(rows) {
     if (!isAdmin()) return;
-    const headers = ['numero_processo','cliente','empreendimento','unidade','corretor','data_venda','valor_unidade','percentual_comissao_total','comissao_bruta_total','comissao_corretor_50','comissao_sdr_50','percentual_comissao_gerente','comissao_gerente','premio_aplicavel','percentual_premio','premio_bruto_total','premio_corretor_50','premio_sdr_50','status_venda','fase_repasse','possui_pendencia','detalhe_pendencia','historico_recebimentos','observacoes'];
-    const values = rows.map((item) => [item.processNumber,item.buyerName,item.developmentName,item.unit,item.brokerName,item.soldAt,item.unitValue,item.commissionRatePct,item.grossCommission,item.brokerCommission,item.sdrCommission,item.managerCommissionRatePct,item.managerCommissionValue,item.hasPrize?'Sim':'Não',item.prizeRatePct,item.grossPrize,item.brokerPrize,item.sdrPrize,item.saleStatus,item.repassStatus,item.hasPending?'Sim':'Não',item.pendingDescription,(item.receipts||[]).map((receipt)=>`${receipt.receivedAt} — ${brl(receipt.amount)}${receipt.notes?' ('+receipt.notes+')':''}${receipt.voidedAt?' [ANULADO: '+receipt.voidReason+']':''}`).join(' | '),item.notes]);
+    const headers = ['numero_processo','cliente','empreendimento','unidade','corretor','venda_originada_pelo_sdr','data_venda','valor_unidade','percentual_comissao_total','comissao_bruta_total','comissao_corretor_50','comissao_sdr_50','percentual_comissao_gerente','comissao_gerente','premio_aplicavel','percentual_premio','premio_bruto_total','premio_corretor_50','premio_sdr_50','status_venda','fase_repasse','possui_pendencia','detalhe_pendencia','historico_recebimentos','observacoes'];
+    const values = rows.map((item) => [item.processNumber,item.buyerName,item.developmentName,item.unit,item.brokerName,item.isSdrSale===null?'Não informado':item.isSdrSale?'Sim':'Não',item.soldAt,item.unitValue,item.commissionRatePct,item.grossCommission,item.brokerCommission,item.sdrCommission,item.managerCommissionRatePct,item.managerCommissionValue,item.hasPrize?'Sim':'Não',item.prizeRatePct,item.grossPrize,item.brokerPrize,item.sdrPrize,item.saleStatus,item.repassStatus,item.hasPending?'Sim':'Não',item.pendingDescription,(item.receipts||[]).map((receipt)=>`${receipt.receivedAt} — ${brl(receipt.amount)}${receipt.notes?' ('+receipt.notes+')':''}${receipt.voidedAt?' [ANULADO: '+receipt.voidReason+']':''}`).join(' | '),item.notes]);
     downloadCsv('vendas-repasses-mundo-apto-'+new Date().toISOString().slice(0,10)+'.csv',headers,values);
     toast(rows.length+' venda(s) exportada(s) com os filtros atuais.','success');
   }
@@ -1468,6 +1505,7 @@
     try {
       const result = await callApi('apiArchiveUser', state.token, user.id);
       if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível excluir o usuário.');
+      state.operationsBrokersUpdatedAt = 0;
       state.refs = await callApi('apiGetReferenceData', state.token); fillFilters();
       toast(result.message, 'success'); await refreshPage(true);
     } catch (error) { handleFailure(error); }
@@ -1478,6 +1516,7 @@
     try {
       const result = await callApi('apiRestoreUser', state.token, user.id);
       if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível restaurar o usuário.');
+      state.operationsBrokersUpdatedAt = 0;
       state.refs = await callApi('apiGetReferenceData', state.token); fillFilters();
       toast(result.message, 'success'); await refreshPage(true);
     } catch (error) { handleFailure(error); }
@@ -1569,6 +1608,7 @@
         if(state.user.role==='Administrador')payload.operationsAccess=operationsPermission.value;
         const result = await callApi('apiSaveUser', state.token, payload);
         if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível salvar.');
+        state.operationsBrokersUpdatedAt = 0;
         dialog.close(); toast(result.message, 'success'); await renderUsers();
       } catch (err) { error.textContent=err.message; }
       finally { save.disabled=false; }
@@ -1644,8 +1684,8 @@
     let visibleRows=[];
     const summary = el('section', 'kpi-grid');
     const panel = el('section', 'table-panel'); const scroll = el('div', 'table-scroll'); const table = el('table', 'data-table');
-    const head = el('thead'); const header = el('tr');
-    ['Nº do processo','Cliente','Empreendimento / unidade','Corretor','Data da venda','Valor da unidade','Comissão do corretor','Status da venda','Fase do repasse','Ações'].forEach((label) => header.appendChild(el('th','',label)));
+    const head = el('thead'); const header = el('tr'); table.style.minWidth='1420px';
+    ['Nº do processo','Cliente','Empreendimento / unidade','Corretor','Origem da venda','Data da venda','Valor da unidade','Comissão bruta total','Corretor (50%)','SDR (50%)','Status da venda','Fase do repasse','Ações'].forEach((label) => header.appendChild(el('th','',label)));
     head.appendChild(header); table.appendChild(head); const body = el('tbody');
     table.appendChild(body); scroll.appendChild(table); panel.appendChild(scroll); area.appendChild(panel);
     function update(){
@@ -1662,12 +1702,26 @@
       filterMessage.textContent=invalidRange?'A data inicial não pode ser posterior à data final.':`Exibindo ${visibleRows.length} de ${rows.length} venda(s) ${showArchived?'excluída(s)':'ativa(s)'}. A exportação incluirá exatamente os resultados filtrados.`;
       exportButton.disabled=visibleRows.length===0;
       const pending=visibleRows.filter((item)=>item.saleStatus==='Pendência para contabilização');
-      const commissionTotal=visibleRows.reduce((sum,item)=>sum+Number(item.brokerCommission||0),0);
-      summary.replaceChildren(kpi('Vendas na seleção',visibleRows.length,'Com os filtros atuais','#EE7A00'),kpi('Pendentes para contabilização',pending.length,'Status da venda','#f59e0b'),kpi('Comissão dos corretores',brl(commissionTotal),'Valor calculado sobre as unidades','#3b82f6'));
+      const grossCommissionTotal=visibleRows.reduce((sum,item)=>sum+Number(item.grossCommission||0),0);
+      const brokerCommissionTotal=visibleRows.reduce((sum,item)=>sum+Number(item.brokerCommission||0),0);
+      const sdrCommissionTotal=visibleRows.reduce((sum,item)=>sum+Number(item.sdrCommission||0),0);
+      const sdrOriginCount=visibleRows.filter((item)=>item.isSdrSale===true).length;
+      const otherOriginCount=visibleRows.filter((item)=>item.isSdrSale===false).length;
+      const unclassifiedOriginCount=visibleRows.filter((item)=>item.isSdrSale===null||item.isSdrSale===undefined).length;
+      summary.classList.add('sales-commission-kpis');
+      summary.replaceChildren(
+        kpi('Vendas na seleção',visibleRows.length,'Com os filtros atuais','#EE7A00'),
+        kpi('Pendentes para contabilização',pending.length,'Status da venda','#f59e0b'),
+        kpi('Comissão bruta total',brl(grossCommissionTotal),'Antes da divisão entre corretor e SDR','#93651D'),
+        kpi('Parte do corretor · 50%',brl(brokerCommissionTotal),'Base do recebimento do corretor','#3b82f6'),
+        kpi('Parte do SDR · 50%',brl(sdrCommissionTotal),'Divisão da comissão bruta','#76502A'),
+        kpi('Vendas por origem',sdrOriginCount+' / '+otherOriginCount,unclassifiedOriginCount+' sem classificação histórica · SDR / outras','#25231F')
+      );
       body.replaceChildren();
-      if(!visibleRows.length){const tr=el('tr');const td=el('td','table-empty',rows.length?'Nenhuma venda corresponde aos filtros.':'Nenhuma venda cadastrada.');td.colSpan=10;tr.appendChild(td);body.appendChild(tr);return;}
+      if(!visibleRows.length){const tr=el('tr');const td=el('td','table-empty',rows.length?'Nenhuma venda corresponde aos filtros.':'Nenhuma venda cadastrada.');td.colSpan=13;tr.appendChild(td);body.appendChild(tr);return;}
       visibleRows.forEach((sale)=>{
-        const tr=el('tr');tr.append(el('td','',sale.processNumber||'—'),el('td','',sale.buyerName),el('td','',sale.developmentName+(sale.unit?' · '+sale.unit:'')),el('td','',sale.brokerName),el('td','',formatDateOnly(sale.soldAt)),el('td','',brl(sale.unitValue)),el('td','',brl(sale.brokerCommission)),el('td','',sale.saleStatus+(sale.hasPending?' · pendência':'')),el('td','',sale.repassStatus));
+        const originLabel=sale.isSdrSale===true?'Sim · SDR':sale.isSdrSale===false?'Não · outra origem':'Não informado · registro antigo';
+        const tr=el('tr');tr.append(el('td','',sale.processNumber||'—'),el('td','',sale.buyerName),el('td','',sale.developmentName+(sale.unit?' · '+sale.unit:'')),el('td','',sale.brokerName),el('td','',originLabel),el('td','',formatDateOnly(sale.soldAt)),el('td','',brl(sale.unitValue)),el('td','',brl(sale.grossCommission)),el('td','',brl(sale.brokerCommission)),el('td','',brl(sale.sdrCommission)),el('td','',sale.saleStatus+(sale.hasPending?' · pendência':'')),el('td','',sale.repassStatus));
         const action=el('td');const actions=el('div','row-actions');
         if(showArchived){actions.append(button('Restaurar','button-small button-primary',()=>restoreSale(sale)));}
         else {actions.append(button('Editar','button-small',()=>openSaleDialog(sale)));if(sale.receipts.length)actions.append(button('Ver recebimento','button-small',()=>showSaleReceipts(sale)));if(!sale.receipts.some((item)=>!item.voidedAt)&&sale.brokerCommission>0)actions.append(button('Lançar recebimento','button-small button-primary',()=>openReceiptDialog(sale)));actions.append(button('Excluir','button-small button-danger',()=>archiveSale(sale)));}
@@ -1691,13 +1745,14 @@
 
   function openSaleDialog(sale) {
     const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();
-    const box=el('div','modal-content');box.append(el('h2','',sale?'Editar venda':'Registrar venda'),el('p','muted','Cadastre também vendas fechadas fora do CRM. Os percentuais são calculados sobre o valor da unidade; a comissão e o prêmio são divididos em 50% para o corretor e 50% para o SDR. A comissão do gerente é um cálculo separado.'));
+    const box=el('div','modal-content');box.append(el('h2','',sale?'Editar venda':'Registrar venda'),el('p','muted','Cadastre também vendas fechadas fora do CRM. Indique se a origem foi o SDR ou outra; a classificação fica registrada para consulta e relatório. A comissão e o prêmio continuam seguindo a divisão de 50% para o corretor e 50% para o SDR, conforme a regra definida.'));
     const form=el('form');const grid=el('div','form-grid');
     const process=document.createElement('input');process.maxLength=100;process.value=sale?sale.processNumber:'';
     const buyer=document.createElement('input');buyer.maxLength=150;buyer.required=true;buyer.value=sale?sale.buyerName:'';
     const developmentOptions=state.refs.developments.map((item)=>({label:item.name,value:item.id}));if(sale&&sale.developmentId&&!developmentOptions.some((item)=>item.value===sale.developmentId))developmentOptions.push({label:(sale.developmentName||'Empreendimento')+' · inativo',value:sale.developmentId});
     const brokerOptions=state.refs.brokers.filter((item)=>item.active).map((item)=>({label:item.name,value:item.id}));if(sale&&sale.brokerId&&!brokerOptions.some((item)=>item.value===sale.brokerId))brokerOptions.push({label:(sale.brokerName||'Corretor')+' · inativo',value:sale.brokerId});
     const development=makeSelect([{label:'Selecione o empreendimento',value:''},...developmentOptions],sale?sale.developmentId:'');const broker=makeSelect([{label:'Selecione o corretor',value:''},...brokerOptions],sale?sale.brokerId:'');
+    const sdrOrigin=makeSelect([{label:'Selecione se a venda foi do SDR',value:''},{label:'Sim — venda originada pelo SDR',value:'true'},{label:'Não — corretor ou outra origem',value:'false'}],sale&&sale.isSdrSale!==null&&sale.isSdrSale!==undefined?String(sale.isSdrSale):'');sdrOrigin.required=true;
     const date=document.createElement('input');date.type='date';date.required=true;date.value=sale?sale.soldAt:todayBrazil();
     const unit=document.createElement('input');unit.maxLength=100;unit.required=true;unit.value=sale?sale.unit:'';
     const unitValue=document.createElement('input');unitValue.required=true;configureCurrencyInput(unitValue,sale?sale.unitValue:0);
@@ -1719,9 +1774,9 @@
       preview.textContent=`Comissão bruta: ${brl(total)} · Corretor (50%): ${brl(brokerPart)} · SDR (50%): ${brl(sdrPart)} · Gerente: ${brl(managerPart)}${hasPrize.checked?' · Prêmio: '+brl(prizeTotal)+' (corretor '+brl(brokerPrize)+' / SDR '+brl(sdrPrize)+')':''}${preserved}. A comissão do gerente é adicional e não reduz a divisão corretor/SDR.`;
     }
     [unitValue,commissionRate,managerRate,prizeRate].forEach((input)=>input.addEventListener('input',updateFinancialPreview));hasPrize.addEventListener('change',()=>{prizeRate.disabled=!hasPrize.checked;prizeRate.required=hasPrize.checked;updateFinancialPreview();});
-    addField(grid,'Número do processo (opcional)',process);addField(grid,'Cliente / comprador',buyer);addField(grid,'Empreendimento',development);addField(grid,'Corretor responsável',broker);addField(grid,'Data da venda',date);addField(grid,'Unidade',unit);addField(grid,'Valor da unidade (R$)',unitValue);addField(grid,'Percentual da comissão total (%)',commissionRate);addField(grid,'Percentual da comissão do gerente (%)',managerRate);grid.appendChild(prizeLabel);addField(grid,'Percentual do prêmio sobre o imóvel (%)',prizeRate);addField(grid,'Status da venda',saleStatus);addField(grid,'Fase do repasse',repassStatus);grid.appendChild(preview);grid.append(pendingLabel);addField(grid,'Descrição da pendência',pendingDescription,true);addField(grid,'Observações',notes,true);updateFinancialPreview();
+    addField(grid,'Número do processo (opcional)',process);addField(grid,'Cliente / comprador',buyer);addField(grid,'Empreendimento',development);addField(grid,'Corretor responsável',broker);addField(grid,'A venda foi originada pelo SDR?',sdrOrigin);addField(grid,'Data da venda',date);addField(grid,'Unidade',unit);addField(grid,'Valor da unidade (R$)',unitValue);addField(grid,'Percentual da comissão total (%)',commissionRate);addField(grid,'Percentual da comissão do gerente (%)',managerRate);grid.appendChild(prizeLabel);addField(grid,'Percentual do prêmio sobre o imóvel (%)',prizeRate);addField(grid,'Status da venda',saleStatus);addField(grid,'Fase do repasse',repassStatus);grid.appendChild(preview);grid.append(pendingLabel);addField(grid,'Descrição da pendência',pendingDescription,true);addField(grid,'Observações',notes,true);updateFinancialPreview();
     form.appendChild(grid);const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar venda');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
-    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveSale',state.token,{id:sale?sale.id:'',processNumber:process.value,buyerName:buyer.value,developmentId:development.value,brokerId:broker.value,soldAt:date.value,unit:unit.value,unitValue:currencyPayload(unitValue),expectedRepass:sale?sale.expectedRepass:'',saleStatus:saleStatus.value,repassStatus:repassStatus.value,commissionRatePct:commissionRate.value,managerCommissionRatePct:managerRate.value,hasPrize:hasPrize.checked,prizeRatePct:prizeRate.value,hasPending:hasPending.checked,pendingDescription:pendingDescription.value,notes:notes.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar a venda.');dialog.close();toast(result.message,'success');await renderSales();}catch(err){error.textContent=err.message||'Não foi possível salvar.';}finally{save.disabled=false;}});
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveSale',state.token,{id:sale?sale.id:'',processNumber:process.value,buyerName:buyer.value,developmentId:development.value,brokerId:broker.value,soldAt:date.value,unit:unit.value,unitValue:currencyPayload(unitValue),expectedRepass:sale?sale.expectedRepass:'',saleStatus:saleStatus.value,repassStatus:repassStatus.value,commissionRatePct:commissionRate.value,managerCommissionRatePct:managerRate.value,hasPrize:hasPrize.checked,prizeRatePct:prizeRate.value,hasPending:hasPending.checked,pendingDescription:pendingDescription.value,isSdrSale:sdrOrigin.value==='true',notes:notes.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar a venda.');dialog.close();toast(result.message,'success');await renderSales();}catch(err){error.textContent=err.message||'Não foi possível salvar.';}finally{save.disabled=false;}});
     dialog.showModal();
   }
 

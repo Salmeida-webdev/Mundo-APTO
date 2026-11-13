@@ -17,7 +17,7 @@ const ALLOWED_METHODS = new Set([
   'apiListArchivedUsers', 'apiArchiveUser', 'apiRestoreUser',
   'apiResetUserPassword', 'apiApplySharedTemporaryPassword', 'apiListDevelopments',
   'apiSaveDevelopment', 'apiPreviewLeadImport', 'apiImportLeads', 'apiExportLeads', 'apiExportReport', 'apiSaveFollowupDays',
-  'apiGetOperationsDashboard', 'apiListProduction', 'apiSaveProduction', 'apiArchiveProduction',
+  'apiGetOperationsDashboard', 'apiListOperationBrokers', 'apiListProduction', 'apiSaveProduction', 'apiArchiveProduction',
   'apiListOperationGoals', 'apiSaveOperationGoal', 'apiSaveOperationGoalsBatch', 'apiListAttendance', 'apiSetAttendance', 'apiExportOperationsReport'
 ]);
 const MUTATING_METHODS = new Set([
@@ -742,6 +742,15 @@ async function apiGetOperationsDashboard(token, filters = {}) {
   return loadOperationsSnapshot(actor, filters && typeof filters === 'object' ? filters : {});
 }
 
+async function apiListOperationBrokers(token) {
+  const actor = await verifyActor(token);
+  requireOperationsAccess(actor);
+  const query = { select: 'id,name,role,active,deleted_at', role: 'eq.Corretor', deleted_at: 'is.null', order: 'name.asc' };
+  if (operationsAccessOf(actor) === 'broker') query.id = `eq.${actor.id}`;
+  const rows = await listAll('crm_users', query);
+  return (rows || []).map((row) => ({ id: row.id, name: row.name, active: row.active === true }));
+}
+
 async function apiListProduction(token, filters = {}) {
   const actor = await verifyActor(token); requireOperationsAccess(actor);
   const range = operationsDateRange(filters || {});
@@ -1231,6 +1240,10 @@ async function apiListSales(token, filters = {}) {
     const development = developments.find((item) => String(item.id) === String(row.development_id));
     const payments = receiptGroups.get(String(row.id)) || [];
     const received = Math.round(payments.filter((item) => !item.voidedAt).reduce((sum, item) => sum + item.amount, 0) * 100) / 100;
+    const brokerCommission = Number(row.broker_commission === null || row.broker_commission === undefined ? row.expected_repass || 0 : row.broker_commission);
+    const sdrCommission = Number(row.sdr_commission || 0);
+    const storedGrossCommission = Number(row.gross_commission || 0);
+    const grossCommission = storedGrossCommission > 0 ? storedGrossCommission : Math.round((brokerCommission + sdrCommission) * 100) / 100;
     return { id: row.id, internalNumber: row.internal_number, processNumber: row.process_number || '', leadId: row.lead_id || '', buyerName: row.buyer_name,
       developmentId: row.development_id || '', developmentName: development ? development.name : '', brokerId: row.broker_id,
       brokerName: broker ? broker.name : 'Corretor inativo', soldAt: row.sold_at, unit: row.unit || '', unitValue: Number(row.unit_value || 0),
@@ -1238,19 +1251,19 @@ async function apiListSales(token, filters = {}) {
       legacySaleStatus: ['Contabilizado','Pendência para contabilização'].includes(row.sale_status) ? '' : row.sale_status,
       hasPending: row.has_pending === true, pendingDescription: row.pending_description || '',
       accounted: row.accounted === true, accountedAt: row.accounted_at || '', commissionRatePct: row.commission_rate_pct === null || row.commission_rate_pct === undefined ? null : Number(row.commission_rate_pct),
-      grossCommission: Number(row.gross_commission || 0), brokerCommission: Number(row.broker_commission === null || row.broker_commission === undefined ? row.expected_repass || 0 : row.broker_commission),
-      sdrCommission: Number(row.sdr_commission || 0), managerCommissionRatePct: row.manager_commission_rate_pct === null || row.manager_commission_rate_pct === undefined ? null : Number(row.manager_commission_rate_pct),
+      isSdrSale: row.is_sdr_sale === null || row.is_sdr_sale === undefined ? null : row.is_sdr_sale === true,
+      grossCommission, brokerCommission, sdrCommission, managerCommissionRatePct: row.manager_commission_rate_pct === null || row.manager_commission_rate_pct === undefined ? null : Number(row.manager_commission_rate_pct),
       managerCommissionValue: Number(row.manager_commission_value || 0), hasPrize: row.has_prize === true,
       prizeRatePct: row.prize_rate_pct === null || row.prize_rate_pct === undefined ? null : Number(row.prize_rate_pct), grossPrize: Number(row.gross_prize || 0),
-      brokerPrize: Number(row.broker_prize || 0), sdrPrize: Number(row.sdr_prize || 0), expectedRepass: Number(row.broker_commission === null || row.broker_commission === undefined ? row.expected_repass || 0 : row.broker_commission),
-      receivedRepass: received, balanceRepass: Math.round((Number(row.broker_commission === null || row.broker_commission === undefined ? row.expected_repass || 0 : row.broker_commission) - received) * 100) / 100,
+      brokerPrize: Number(row.broker_prize || 0), sdrPrize: Number(row.sdr_prize || 0), expectedRepass: brokerCommission,
+      receivedRepass: received, balanceRepass: Math.round((brokerCommission - received) * 100) / 100,
       repassStatus: row.repass_status, notes: row.notes || '', deletedAt: row.deleted_at || '', deletedBy: row.deleted_by || '', receipts: payments.sort((a, b) => String(b.receivedAt).localeCompare(String(a.receivedAt))) };
   }).sort((a, b) => String(b.soldAt).localeCompare(String(a.soldAt)) || String(b.internalNumber).localeCompare(String(a.internalNumber)));
 }
 
 async function apiSaveSale(token, payload = {}) {
   const actor = await verifyActor(token); requireAdmin(actor);
-  const allowed = ['id','processNumber','leadId','buyerName','developmentId','brokerId','soldAt','unit','unitValue','saleStatus','hasPending','pendingDescription','accounted','expectedRepass','repassStatus','notes','commissionRatePct','managerCommissionRatePct','hasPrize','prizeRatePct'];
+  const allowed = ['id','processNumber','leadId','buyerName','developmentId','brokerId','soldAt','unit','unitValue','saleStatus','hasPending','pendingDescription','accounted','expectedRepass','repassStatus','notes','commissionRatePct','managerCommissionRatePct','hasPrize','prizeRatePct','isSdrSale'];
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).some((key) => !allowed.includes(key))) return { ok: false, message: 'Campos da venda inválidos.' };
   const buyerName = String(payload.buyerName || '').trim();
   const processNumber = String(payload.processNumber || '').trim().slice(0, 100);
@@ -1284,6 +1297,10 @@ async function apiSaveSale(token, payload = {}) {
   const existingRows = id ? await dbRequest('crm_sales', { query: { select: '*', id: `eq.${id}`, deleted_at: 'is.null', limit: 1 } }) : null;
   const existing = Array.isArray(existingRows) ? existingRows[0] || null : null;
   if (id && !existing) return { ok: false, message: 'Venda não encontrada.' };
+  const hasSdrOrigin = Object.prototype.hasOwnProperty.call(payload, 'isSdrSale');
+  if (hasSdrOrigin && typeof payload.isSdrSale !== 'boolean') return { ok: false, message: 'Informe se a venda foi originada pelo SDR.' };
+  if (!existing && !hasSdrOrigin) return { ok: false, message: 'Informe se a venda foi originada pelo SDR.' };
+  const isSdrSale = hasSdrOrigin ? payload.isSdrSale : existing.is_sdr_sale === null || existing.is_sdr_sale === undefined ? null : existing.is_sdr_sale === true;
   if (!['Contabilizado','Pendência para contabilização'].includes(saleStatus) && !(existing && saleStatus === existing.sale_status)) return { ok: false, message: 'Status da venda inválido.' };
   const legacyRepassStatuses = new Set(['AGUARDANDO PJ','LIBERADO P/ REPASSE','IR FUTURO','PENDÊNCIA PARA LIBERAÇÃO DO REPASSE','REPASSE SFH','ANÁLISE DE CRÉDITO','EMISSÃO DE FORMULÁRIOS','FGTS EM DÉBITO','FGTS EM RESSARCIMENTO','FGTS COM ERRO','FORMULÁRIOS EM ASSINATURA','FORMULÁRIOS ASSINADOS','CRITICADO E ENVIADO P/ CONFORMIDADE','PENDÊNCIA DURANTE O REPASSE','INCONFORME','REANÁLISE DA CONFORMIDADE','CONFORME','AGUARDANDO DEMANDA MÍNIMA','CONFIRMAÇÃO DE VALORES COM CLIENTE','EMISSÃO CONFISSÃO DE DÍVIDA / SOLICITAÇÃO DE CONTRATO','CONTRATO EMITIDO','CONTRATO E CONFISSÃO DE DÍVIDA EM ASSINATURA','CONTRATO EM ASSINATURA E CONFISSÃO ASSINADA','CONTRATO ASSINADO E CONFISSÃO PENDENTE','PROBLEMA NA ASSINATURA DO FINANCIAMENTO','CONTRATO E CONFISSÃO ASSINADOS','CHECK-LIST DE REPASSE APTO PARA CONFERENCIA','AGUARDANDO REPACTUAÇÃO','CHECK-LIST DE REPASSE REPROVADO','CHECK-LIST DE REPASSE APROVADO','Aguardando repasse','Em andamento','Repasse parcial','Repasse concluído','Suspenso','Cancelado']);
   const validNewRepass = CRM_CONFIG.repassStatuses.includes(repassStatus);
@@ -1328,6 +1345,7 @@ async function apiSaveSale(token, payload = {}) {
   const stamp = now();
   const values = { process_number: processNumber, lead_id: leadId || null, buyer_name: buyerName, development_id: developmentId, broker_id: brokerId,
     sold_at: soldAt, unit, unit_value: unitValue, sale_status: saleStatus, has_pending: payload.hasPending === true,
+    is_sdr_sale: isSdrSale,
     pending_description: pendingDescription, accounted, accounted_at: accounted ? (existing && existing.accounted_at || stamp) : null,
     accounted_by: accounted ? (existing && existing.accounted ? existing.accounted_by : actor.id) : null, expected_repass: expectedRepass, repass_status: repassStatus,
     commission_rate_pct: effectiveCommissionRate, gross_commission: effectiveGrossCommission, broker_commission: effectiveBrokerCommission === null ? Number(existing && existing.broker_commission === null ? existing.expected_repass : existing && existing.broker_commission || expectedRepass) : effectiveBrokerCommission,
@@ -1335,8 +1353,8 @@ async function apiSaveSale(token, payload = {}) {
     has_prize: Boolean(effectiveHasPrize), prize_rate_pct: effectiveHasPrize ? effectivePrizeRate : null, gross_prize: effectiveHasPrize ? effectiveGrossPrize : 0,
     broker_prize: effectiveHasPrize ? effectiveBrokerPrize : 0, sdr_prize: effectiveHasPrize ? effectiveSdrPrize : 0,
     notes, updated_at: stamp, updated_by: actor.id };
-  const before = existing ? { internalNumber: existing.internal_number, processNumber: existing.process_number || '', leadId: existing.lead_id || '', buyerName: existing.buyer_name, developmentId: existing.development_id, brokerId: existing.broker_id, soldAt: existing.sold_at, unit: existing.unit, unitValue: Number(existing.unit_value), saleStatus: existing.sale_status, hasPending: existing.has_pending, pendingDescription: existing.pending_description, accounted: existing.accounted, expectedRepass: Number(existing.expected_repass), commissionRatePct: existing.commission_rate_pct, grossCommission: existing.gross_commission, brokerCommission: existing.broker_commission, managerCommissionRatePct: existing.manager_commission_rate_pct, managerCommissionValue: existing.manager_commission_value, hasPrize: existing.has_prize, prizeRatePct: existing.prize_rate_pct, grossPrize: existing.gross_prize, repassStatus: existing.repass_status, notes: existing.notes } : {};
-  const after = { processNumber, leadId: leadId || '', buyerName, developmentId, brokerId, soldAt, unit, unitValue, saleStatus, hasPending: payload.hasPending === true, pendingDescription, accounted, expectedRepass,
+  const before = existing ? { internalNumber: existing.internal_number, processNumber: existing.process_number || '', leadId: existing.lead_id || '', buyerName: existing.buyer_name, developmentId: existing.development_id, brokerId: existing.broker_id, soldAt: existing.sold_at, unit: existing.unit, unitValue: Number(existing.unit_value), saleStatus: existing.sale_status, hasPending: existing.has_pending, isSdrSale: existing.is_sdr_sale ?? null, pendingDescription: existing.pending_description, accounted: existing.accounted, expectedRepass: Number(existing.expected_repass), commissionRatePct: existing.commission_rate_pct, grossCommission: existing.gross_commission, brokerCommission: existing.broker_commission, managerCommissionRatePct: existing.manager_commission_rate_pct, managerCommissionValue: existing.manager_commission_value, hasPrize: existing.has_prize, prizeRatePct: existing.prize_rate_pct, grossPrize: existing.gross_prize, repassStatus: existing.repass_status, notes: existing.notes } : {};
+  const after = { processNumber, leadId: leadId || '', buyerName, developmentId, brokerId, soldAt, unit, unitValue, saleStatus, hasPending: payload.hasPending === true, isSdrSale, pendingDescription, accounted, expectedRepass,
     commissionRatePct: values.commission_rate_pct, grossCommission: values.gross_commission, brokerCommission: values.broker_commission, sdrCommission: values.sdr_commission,
     managerCommissionRatePct: values.manager_commission_rate_pct, managerCommissionValue: values.manager_commission_value, hasPrize: values.has_prize, prizeRatePct: values.prize_rate_pct, grossPrize: values.gross_prize, repassStatus, notes };
   const changedFields = auditChangedFields(before, after);
@@ -2222,7 +2240,7 @@ const api = {
   apiCreateContractUpload, apiConfirmContractSigned, apiGetContractDocument,
   apiResetUserPassword, apiApplySharedTemporaryPassword,
   apiListDevelopments, apiSaveDevelopment, apiPreviewLeadImport, apiImportLeads, apiExportLeads, apiExportReport, apiSaveFollowupDays,
-  apiGetOperationsDashboard, apiListProduction, apiSaveProduction, apiArchiveProduction,
+  apiGetOperationsDashboard, apiListOperationBrokers, apiListProduction, apiSaveProduction, apiArchiveProduction,
   apiListOperationGoals, apiSaveOperationGoal, apiSaveOperationGoalsBatch, apiListAttendance, apiSetAttendance, apiExportOperationsReport
 };
 

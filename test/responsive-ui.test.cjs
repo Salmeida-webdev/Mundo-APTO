@@ -96,6 +96,40 @@ test('módulo Sharks está integrado ao mesmo CRM, com filtros diário/semanal/m
   assert.match(styles,/\.ops-freshness/);
 });
 
+test('módulos operacionais atualizam o cadastro de corretores e oferecem exportação separada autorizada', () => {
+  assert.match(client,/async function refreshOperationBrokers\(\)/);
+  assert.match(client,/callApi\('apiListOperationBrokers', state\.token\)/);
+  assert.match(client,/await refreshOperationBrokers\(\)/);
+  assert.match(client,/state\.operationsBrokersUpdatedAt = 0/);
+  assert.match(client,/Exportar lançamentos CSV/);
+  assert.match(client,/exportOperationSection\('production',filters\)/);
+  assert.match(client,/Exportar plantões CSV/);
+  assert.match(client,/exportOperationSection\('attendance',filters\)/);
+  assert.match(client,/if \(!canExportOperations\(\) \|\| !\['production','attendance'\]\.includes\(section\)\) return/);
+  assert.match(client,/apiExportOperationsReport/);
+  assert.match(client,/downloadCsv\('lancamentos-producao-/);
+  assert.match(client,/downloadCsv\('frequencias-plantoes-/);
+});
+
+test('vendas exibem comissão bruta e as duas partes de 50% com resumo responsivo', () => {
+  assert.match(client,/Comissão bruta total/);
+  assert.match(client,/Corretor \(50%\)/);
+  assert.match(client,/SDR \(50%\)/);
+  assert.match(client,/grossCommissionTotal=visibleRows\.reduce/);
+  assert.match(client,/brokerCommissionTotal=visibleRows\.reduce/);
+  assert.match(client,/sdrCommissionTotal=visibleRows\.reduce/);
+  assert.match(client,/brl\(sale\.grossCommission\)/);
+  assert.match(client,/brl\(sale\.brokerCommission\)/);
+  assert.match(client,/brl\(sale\.sdrCommission\)/);
+  assert.match(client,/A venda foi originada pelo SDR\?/);
+  assert.match(client,/Sim · SDR/);
+  assert.match(client,/Não · outra origem/);
+  assert.match(client,/venda_originada_pelo_sdr/);
+  assert.match(client,/isSdrSale:sdrOrigin\.value==='true'/);
+  assert.match(styles,/\.sales-commission-kpis\{grid-template-columns:repeat\(6,minmax\(0,1fr\)\)\}/);
+  assert.match(styles,/@media\(max-width:760px\)\{\.sales-commission-kpis\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)\}\}/);
+});
+
 test('corretor tem acesso rápido aos próprios lançamentos e pode cancelar com trilha preservada', () => {
   assert.match(client,/Meus lançamentos recentes/);
   assert.match(client,/recentOwnEntries/);

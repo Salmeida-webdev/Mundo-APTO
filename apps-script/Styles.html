@@ -281,6 +281,9 @@
     .ops-filterbar .filter-search{grid-column:auto}
     .ops-shift-grid{grid-template-columns:1fr}
   }
+  .sales-commission-kpis{grid-template-columns:repeat(6,minmax(0,1fr))}
+  @media(max-width:1100px){.sales-commission-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}}
+  @media(max-width:760px){.sales-commission-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
   @media(prefers-reduced-motion:reduce){.sidebar{transition:none}}
 
 </style>

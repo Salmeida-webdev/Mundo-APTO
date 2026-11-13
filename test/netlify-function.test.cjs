@@ -208,6 +208,7 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
         const workDateFilter = url.searchParams.get('work_date');
         const attendanceDateFilter = url.searchParams.get('attendance_date');
         const shiftFilter = url.searchParams.get('shift');
+        const roleFilter = url.searchParams.get('role');
         if (idFilter && idFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.id) === idFilter.slice(3));
         if (leadFilter && leadFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.lead_id) === leadFilter.slice(3));
         if (keyFilter && keyFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.key) === keyFilter.slice(3));
@@ -226,6 +227,7 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
         if (workDateFilter && workDateFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.work_date) === workDateFilter.slice(3));
         if (attendanceDateFilter && attendanceDateFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.attendance_date) === attendanceDateFilter.slice(3));
         if (shiftFilter && shiftFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.shift) === shiftFilter.slice(3));
+        if (roleFilter && roleFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.role) === roleFilter.slice(3));
         if (deletedFilter === 'is.null') filtered = filtered.filter((row) => !row.deleted_at);
         if (deletedFilter === 'not.is.null') filtered = filtered.filter((row) => Boolean(row.deleted_at));
         const andFilter=url.searchParams.get('and')||'';
@@ -320,6 +322,34 @@ function operationShiftDate(value, amount) {
   const [year, month, day] = value.split('-').map(Number);
   return new Date(Date.UTC(year, month - 1, day + amount)).toISOString().slice(0, 10);
 }
+
+test('lista operacional atualiza corretores ativos sem expor a equipe a outros corretores', async (t) => {
+  const originalUsers=structuredClone(rows.crm_users);
+  t.after(()=>rows.crm_users.splice(0,rows.crm_users.length,...originalUsers));
+  const newBrokerId='10000000-0000-4000-8000-000000000096';
+  const archivedBrokerId='10000000-0000-4000-8000-000000000097';
+  const inactiveBrokerId='10000000-0000-4000-8000-000000000098';
+  rows.crm_users.push(
+    {id:newBrokerId,name:'Corretora recém-cadastrada',email:'nova@example.test',role:'Corretor',active:true,must_change_password:false,session_version:0},
+    {id:inactiveBrokerId,name:'Corretor inativo',email:'inativo@example.test',role:'Corretor',active:false,must_change_password:false,session_version:0},
+    {id:archivedBrokerId,name:'Corretor excluído',email:'excluido@example.test',role:'Corretor',active:false,deleted_at:'2026-11-12T10:00:00Z',must_change_password:false,session_version:0}
+  );
+  const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test',operationsManagerIds:[userIdManager]});
+  const team=await invoke('apiListOperationBrokers',[manager.token],manager.token);
+  assert.deepEqual(team.body.map((item)=>item.id).sort(),[userIdBrokerA,userIdBrokerB,newBrokerId,inactiveBrokerId].sort());
+  assert.ok(team.body.every((item)=>Object.keys(item).sort().join(',')==='active,id,name'));
+  assert.ok(team.body.find((item)=>item.id===newBrokerId).active);
+  assert.equal(team.body.some((item)=>item.id===archivedBrokerId),false);
+
+  const broker=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerA,email:'a@example.test'});
+  const own=await invoke('apiListOperationBrokers',[broker.token],broker.token);
+  assert.deepEqual(own.body,[{id:userIdBrokerA,name:'Corretor A',active:true}]);
+
+  const restrictedId='10000000-0000-4000-8000-000000000099';
+  rows.crm_users.push({id:restrictedId,name:'Administrativo sem módulo',email:'restrito@example.test',role:'Coordenador',operations_access:'none',active:true,must_change_password:false,session_version:0});
+  const restricted=mockEnvironmentAndFetch(t,{role:'Coordenador',userId:restrictedId,email:'restrito@example.test'});
+  assert.equal((await invoke('apiListOperationBrokers',[restricted.token],restricted.token)).response.status,403);
+});
 
 test('produção aceita lançamentos repetidos e históricos, mantém auditoria e bloqueia carteiras cruzadas', async (t) => {
   const originals={entries:rows.crm_production_entries.slice(),audit:rows.crm_audit.slice()};
@@ -1004,8 +1034,9 @@ test('contrato pode partir de venda manual e controla contrato e confissão com 
   const originals={sales:rows.crm_sales.slice(),receipts:rows.crm_sales_receipts.slice(),contracts:rows.crm_contracts.slice(),documents:rows.crm_contract_documents.slice(),profiles:rows.crm_broker_profiles.slice(),teamProfiles:structuredClone(rows.crm_user_contract_profiles),settings:rows.crm_settings.slice(),audit:rows.crm_audit.slice()};
   t.after(()=>{rows.crm_sales.splice(0,rows.crm_sales.length,...originals.sales);rows.crm_sales_receipts.splice(0,rows.crm_sales_receipts.length,...originals.receipts);rows.crm_contracts.splice(0,rows.crm_contracts.length,...originals.contracts);rows.crm_contract_documents.splice(0,rows.crm_contract_documents.length,...originals.documents);rows.crm_broker_profiles.splice(0,rows.crm_broker_profiles.length,...originals.profiles);rows.crm_user_contract_profiles.splice(0,rows.crm_user_contract_profiles.length,...originals.teamProfiles);rows.crm_settings.splice(0,rows.crm_settings.length,...originals.settings);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
   const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
-  const sale=await invoke('apiSaveSale',[manager.token,{processNumber:'PROC-EXT-77',buyerName:'Comprador fora do CRM',developmentId:'E001',brokerId:userIdBrokerA,soldAt:'2026-11-12',unit:'B-204',unitValue:245000,commissionRatePct:2.5,saleStatus:'Pendência para contabilização',repassStatus:'FASE DO REGISTRO',hasPending:false,pendingDescription:'',accounted:false,notes:'Venda manual externa'}],manager.token);
+  const sale=await invoke('apiSaveSale',[manager.token,{processNumber:'PROC-EXT-77',buyerName:'Comprador fora do CRM',developmentId:'E001',brokerId:userIdBrokerA,soldAt:'2026-11-12',unit:'B-204',unitValue:245000,commissionRatePct:2.5,isSdrSale:true,saleStatus:'Pendência para contabilização',repassStatus:'FASE DO REGISTRO',hasPending:false,pendingDescription:'',accounted:false,notes:'Venda manual externa'}],manager.token);
   assert.equal(sale.body.ok,true,JSON.stringify(sale.body));
+  assert.equal(rows.crm_sales.find((item)=>item.id===sale.body.saleId).is_sdr_sale,true);
   const profile={user_id:userIdBrokerA,cpf:'111.222.333-44',cnpj:'12.345.678/0001-90',creci:'12345',address:'Rua de Teste, 100'};rows.crm_user_contract_profiles.push(profile);
   rows.crm_user_contract_profiles.push({user_id:userIdSdr,cpf:'222.333.444-55',cnpj:'22.333.444/0001-90',creci:'',address:'Rua SDR, 50'});
   const saved=await invoke('apiSaveContract',[manager.token,{saleId:sale.body.saleId,sdrId:userIdSdr,managerId:userIdManager,buyerCpf:'333.444.555-66',buyerAddress:'Rua Externa, 10',proposalNumber:'PASTA-EXT-77',commissionBase:245000,commissionRatePct:2.5,grossCommission:6125,hasPrize:false}],manager.token);
@@ -1073,7 +1104,7 @@ test('gestão registra venda manual sem lead e confirma recebimento integral ún
   const manager = mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
   const saved = await invoke('apiSaveSale',[manager.token,{
     buyerName:'Cliente externo ao CRM',processNumber:'PROC-2026-77',developmentId:'E001',brokerId:userIdBrokerA,
-    soldAt:'2026-11-11',unit:'B-201',unitValue:'250000.00',commissionRatePct:'2',managerCommissionRatePct:'0.5',hasPrize:true,prizeRatePct:'2',saleStatus:'Pendência para contabilização',hasPending:true,
+    soldAt:'2026-11-11',unit:'B-201',unitValue:'250000.00',commissionRatePct:'2',isSdrSale:true,managerCommissionRatePct:'0.5',hasPrize:true,prizeRatePct:'2',saleStatus:'Pendência para contabilização',hasPending:true,
     pendingDescription:'Aguardando conferência documental',accounted:false,
     repassStatus:'FASE DO REGISTRO',notes:'Venda inserida manualmente pela gestão'
   }],manager.token);
@@ -1087,6 +1118,7 @@ test('gestão registra venda manual sem lead e confirma recebimento integral ún
   assert.equal(Number(sale.gross_commission),5000);
   assert.equal(Number(sale.broker_commission),2500);
   assert.equal(Number(sale.sdr_commission),2500);
+  assert.equal(sale.is_sdr_sale,true);
   assert.equal(Number(sale.manager_commission_value),1250);
   assert.equal(Number(sale.gross_prize),5000);
   assert.equal(Number(sale.broker_prize),2500);
@@ -1116,6 +1148,30 @@ test('gestão registra venda manual sem lead e confirma recebimento integral ún
   assert.equal(listed.body.length,2);
   assert.equal(savedSale.receivedRepass,2500);
   assert.equal(savedSale.balanceRepass,0);
+});
+
+test('vendas retornam comissão bruta e divisões corretas, mantendo repasse do corretor', async (t) => {
+  const originals={sales:rows.crm_sales.slice(),receipts:rows.crm_sales_receipts.slice()};
+  t.after(()=>{rows.crm_sales.splice(0,rows.crm_sales.length,...originals.sales);rows.crm_sales_receipts.splice(0,rows.crm_sales_receipts.length,...originals.receipts);});
+  const currentId='10000000-0000-4000-8000-000000000095';
+  const legacyId='10000000-0000-4000-8000-000000000096';
+  rows.crm_sales.push(
+    {id:currentId,internal_number:'MA-VENDA-COMISSAO',process_number:'PROC-COMISSAO',buyer_name:'Comissão atual',development_id:'E001',broker_id:userIdBrokerA,sold_at:'2026-11-12',unit:'C-301',unit_value:200000,sale_status:'Contabilizado',has_pending:false,accounted:true,gross_commission:5000,broker_commission:2500,sdr_commission:2500,expected_repass:2500,repass_status:'AGUARDANDO PJ',created_by:userIdManager,updated_by:userIdManager},
+    {id:legacyId,internal_number:'MA-VENDA-LEGADA',process_number:'PROC-LEGADO',buyer_name:'Comissão legada',development_id:'E001',broker_id:userIdBrokerA,sold_at:'2026-11-11',unit:'C-302',unit_value:180000,sale_status:'Contabilizado',has_pending:false,accounted:true,gross_commission:0,broker_commission:1000,sdr_commission:1000,expected_repass:1000,repass_status:'AGUARDANDO PJ',created_by:userIdManager,updated_by:userIdManager}
+  );
+  rows.crm_sales_receipts.push({id:'receipt-commission-test',sale_id:currentId,amount:500,received_at:'2026-11-13',created_by:userIdManager});
+  const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
+  const listed=await invoke('apiListSales',[manager.token],manager.token);
+  const current=listed.body.find((item)=>item.id===currentId);
+  const legacy=listed.body.find((item)=>item.id===legacyId);
+  assert.equal(current.grossCommission,5000);
+  assert.equal(current.brokerCommission,2500);
+  assert.equal(current.sdrCommission,2500);
+  assert.equal(current.expectedRepass,2500);
+  assert.equal(current.balanceRepass,2000);
+  assert.equal(current.isSdrSale,null,'Vendas antigas sem classificação permanecem explicitamente como não informadas.');
+  assert.equal(legacy.grossCommission,2000,'Vendas antigas derivam o bruto pela soma das duas partes quando o total não está gravado.');
+  assert.equal(legacy.expectedRepass,1000,'O recebimento continua vinculado somente à parte do corretor.');
 });
 
 test('anulação de recebimento preserva auditoria e não infla lançamentos posteriores', async (t) => {
@@ -1189,12 +1245,15 @@ test('fase do repasse mantém a lista anterior e acrescenta as 16 opções envia
   const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
   const refs=await invoke('apiGetReferenceData',[manager.token],manager.token);
   assert.deepEqual(refs.body.repassStatuses,expected);
-  const priorOption=await invoke('apiSaveSale',[manager.token,{buyerName:'Cliente histórico',developmentId:'E001',brokerId:userIdBrokerA,soldAt:'2026-11-12',unit:'A-0',unitValue:100000,commissionRatePct:2.5,saleStatus:'Pendência para contabilização',repassStatus:'AGUARDANDO PJ'}],manager.token);
+  const missingOrigin=await invoke('apiSaveSale',[manager.token,{buyerName:'Venda sem origem informada',developmentId:'E001',brokerId:userIdBrokerA,soldAt:'2026-11-12',unit:'A-00',unitValue:100000,commissionRatePct:2.5}],manager.token);
+  assert.equal(missingOrigin.body.ok,false);
+  assert.match(missingOrigin.body.message,/originada pelo sdr/i);
+  const priorOption=await invoke('apiSaveSale',[manager.token,{buyerName:'Cliente histórico',developmentId:'E001',brokerId:userIdBrokerA,soldAt:'2026-11-12',unit:'A-0',unitValue:100000,commissionRatePct:2.5,isSdrSale:false,saleStatus:'Pendência para contabilização',repassStatus:'AGUARDANDO PJ'}],manager.token);
   assert.equal(priorOption.body.ok,true,JSON.stringify(priorOption.body));
-  const invalidLegacy=await invoke('apiSaveSale',[manager.token,{buyerName:'Cliente',developmentId:'E001',brokerId:userIdBrokerA,soldAt:'2026-11-12',unit:'A-2',unitValue:100000,commissionRatePct:2.5,saleStatus:'Pendência para contabilização',repassStatus:'Repasse parcial'}],manager.token);
+  const invalidLegacy=await invoke('apiSaveSale',[manager.token,{buyerName:'Cliente',developmentId:'E001',brokerId:userIdBrokerA,soldAt:'2026-11-12',unit:'A-2',unitValue:100000,commissionRatePct:2.5,isSdrSale:false,saleStatus:'Pendência para contabilização',repassStatus:'Repasse parcial'}],manager.token);
   assert.equal(invalidLegacy.body.ok,false);
   assert.match(invalidLegacy.body.message,/fase do repasse inválida/i);
-  const saved=await invoke('apiSaveSale',[manager.token,{buyerName:'Cliente',developmentId:'E001',brokerId:userIdBrokerA,soldAt:'2026-11-12',unit:'A-1',unitValue:100000,commissionRatePct:2.5,saleStatus:'Pendência para contabilização'}],manager.token);
+  const saved=await invoke('apiSaveSale',[manager.token,{buyerName:'Cliente',developmentId:'E001',brokerId:userIdBrokerA,soldAt:'2026-11-12',unit:'A-1',unitValue:100000,commissionRatePct:2.5,isSdrSale:false,saleStatus:'Pendência para contabilização'}],manager.token);
   assert.equal(saved.body.ok,true,JSON.stringify(saved.body));
   assert.equal(rows.crm_sales.at(-1).repass_status,'FASE DO REGISTRO');
 });
@@ -1337,6 +1396,14 @@ test('migration indexa o responsável por anulações de recebimentos', () => {
   const sql=fs.readFileSync(path.join(root,'supabase/migrations/20261112170738_crm_receipt_void_fk_index.sql'),'utf8');
   assert.match(sql,/create index if not exists crm_sales_receipts_voided_by_idx[\s\S]*on public\.crm_sales_receipts\s*\(voided_by\)/i);
   assert.doesNotMatch(sql,/(^|\n)\s*(drop\s+table|truncate\s+|delete\s+from)\b/i);
+});
+
+test('migration de origem SDR só acrescenta campo nullable e preserva vendas antigas sem classificação inventada', () => {
+  const sql=fs.readFileSync(path.join(root,'supabase/migrations/20261113182548_crm_sales_sdr_origin.sql'),'utf8');
+  const executableSql=sql.replace(/--[^\n]*/g,'');
+  assert.match(executableSql,/alter table public\.crm_sales\s+add column if not exists is_sdr_sale boolean/i);
+  assert.doesNotMatch(executableSql,/default\s+(true|false)/i);
+  assert.doesNotMatch(executableSql,/(^|\n)\s*(update|delete from|drop table|truncate)\b/i);
 });
 
 test('migration Sharks acrescenta produção, metas, frequência e permissões sem expor tabelas operacionais', () => {

@@ -10,11 +10,11 @@ Os módulos ficam separados pela navegação e pelo domínio: relacionamento e c
 
 - Carteira de clientes por corretor, cadastro também pelo SDR com atribuição obrigatória, histórico de contatos, tentativas, solicitações de correção de telefone, follow-ups, etapas e alertas visíveis no CRM.
 - Gestão de empreendimentos, importação validada, exportações autorizadas, indicadores gerenciais e trilha administrativa.
-- Lançamentos de produção por data para prospecções, interações, agendamentos, visitas e vendas, com entradas repetidas, edição própria, cancelamento lógico e histórico.
+- Lançamentos de produção por data para prospecções, interações, agendamentos, visitas e vendas, com entradas repetidas, edição própria, cancelamento lógico e histórico. A lista de corretores ativos acompanha o cadastro da equipe sem duplicação manual.
 - Metas semanais e mensais por corretor para prospecções, visitas e vendas, com revisões preservadas.
-- Frequências por manhã, tarde e noite, com lançamentos/correções restritos às contas operacionais autorizadas e consulta limitada por perfil.
-- Painéis e relatórios com visões diária, semanal e mensal, comparação de períodos, totais individuais/de equipe e exportação CSV com proteção contra fórmulas.
-- Registro manual de vendas e repasses, independente do cadastro de lead, com os 30 status enviados pela cliente, pendências, parcelas e anulação justificada auditada.
+- Frequências por manhã, tarde e noite, com lançamentos/correções restritos às contas operacionais autorizadas e consulta limitada por perfil. Novos corretores ativos entram automaticamente na lista de frequência.
+- Painéis e relatórios com visões diária, semanal e mensal, comparação de períodos, totais individuais/de equipe e exportação CSV separada de lançamentos e frequências, protegida contra fórmulas.
+- Registro manual de vendas e repasses, independente do cadastro de lead, com os 30 status enviados pela cliente, pendências, parcelas e anulação justificada auditada. A visão geral discrimina a comissão bruta, os valores de 50% do corretor e de 50% do SDR e se a venda veio do SDR ou de outra origem; o recebimento integral permanece associado somente à parte do corretor. Vendas antigas ficam sem classificação até revisão, e marcar a origem não altera a divisão 50/50 previamente definida.
 - Contratos gerados apenas pela gestão, com origem em venda manual, lead ou preenchimento sem vínculo; divisão de comissão/prêmio; cadastro documental unificado para corretores e múltiplos SDRs; seleção do SDR responsável em cada venda; cópia dos dados usados dentro do contrato para preservar documentos antigos; contrato/termo e confissão separados; arquivo assinado e confirmação individual. O corretor e o SDR vinculados acessam documentos somente após as confirmações previstas.
 
 ## Permissões operacionais
