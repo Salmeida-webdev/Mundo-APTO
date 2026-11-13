@@ -551,23 +551,25 @@
     const goals=await callApi('apiListOperationGoals',state.token,filters);
     const area=byId('content-area');area.replaceChildren();const actions=el('div','ops-actions');
     const cycle=makeSelect([{label:'Todos os ciclos',value:''},{label:'Semanal',value:'weekly'},{label:'Mensal',value:'monthly'}],state.operationsGoalCycle||'');cycle.setAttribute('aria-label','Filtrar metas por ciclo');cycle.onchange=()=>{state.operationsGoalCycle=cycle.value;renderOperationGoals().catch(handleFailure);};
-    actions.appendChild(cycle);if(canManageOperations())actions.appendChild(button('+ Configurar meta','button-primary',()=>openOperationGoalDialog()));
+    actions.appendChild(cycle);if(canManageOperations())actions.appendChild(button('Configurar metas da equipe','button-primary',()=>openOperationGoalsBatchDialog(goals)));
     const page=operationsPage(()=>renderOperationGoals().catch(handleFailure));page.prepend(operationsHeader('Metas de produção','Metas individuais configuradas para prospecções, visitas e vendas, por semana (segunda a domingo) ou mês calendário.',actions));
-    page.appendChild(el('div','ops-note','Ajustar uma meta cria uma nova versão e mantém as versões anteriores para consulta e auditoria.'));
+    page.appendChild(el('div','ops-note','A gestão configura todas as metas da equipe de uma só vez. A cada alteração, o sistema cria revisões e mantém os valores anteriores para consulta e auditoria.'));
     const values=goals.map((goal)=>[goal.brokerName,goal.metric==='prospections'?'Prospecções':goal.metric==='visits'?'Visitas':'Vendas',goal.cycle==='weekly'?'Semanal':'Mensal',formatDateOnly(goal.startsOn)+' – '+formatDateOnly(goal.endsOn),goal.target,'v'+goal.revision,goal.isCurrent?'Atual':'Histórico']);
     page.appendChild(operationsTable([{label:'Corretor'},{label:'Indicador'},{label:'Ciclo'},{label:'Período'},{label:'Meta',numeric:true},{label:'Versão'},{label:'Situação'}],values,'820px'));area.appendChild(page);
   }
 
-  function openOperationGoalDialog() {
-    if(!canManageOperations())return;const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();
-    const box=el('div','modal-content');box.append(el('h2','','Configurar meta de produção'),el('p','muted','Se já existir uma meta para o corretor, indicador e período, será criada uma revisão preservando a anterior.'));
-    const form=document.createElement('form');const grid=el('div','form-grid');const broker=makeSelect(state.refs.brokers.map((item)=>({label:item.name,value:item.id})),'');addField(grid,'Corretor',broker,true);
-    const metric=makeSelect([{label:'Prospecções',value:'prospections'},{label:'Visitas',value:'visits'},{label:'Vendas (quantidade)',value:'sales'}],'prospections');addField(grid,'Indicador',metric);
-    const cycle=makeSelect([{label:'Semanal (segunda a domingo)',value:'weekly'},{label:'Mensal (mês calendário)',value:'monthly'}],'weekly');addField(grid,'Ciclo',cycle);
-    const reference=document.createElement('input');reference.type='date';reference.required=true;reference.value=todayBrazil();reference.setAttribute('aria-label','Data dentro do período da meta');addField(grid,'Data dentro do período',reference);
-    const target=document.createElement('input');target.type='number';target.min='1';target.max='1000000';target.step='1';target.required=true;target.setAttribute('aria-label','Meta total do período');addField(grid,'Quantidade alvo',target);
-    form.appendChild(grid);const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar meta');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
-    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveOperationGoal',state.token,{brokerId:broker.value,metric:metric.value,cycle:cycle.value,referenceDate:reference.value,target:target.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar.');dialog.close();toast(result.message,'success');await renderOperationGoals();}catch(err){error.textContent=err.message||'Não foi possível salvar.';}finally{save.disabled=false;}});dialog.showModal();
+  function operationGoalPeriod(cycle,reference){if(cycle==='weekly'){const start=mondayOfOperationWeek(reference);return {start,end:shiftOperationDate(start,6)};}const start=String(reference).slice(0,7)+'-01';const date=new Date(String(reference).slice(0,7)+'-01T00:00:00Z');date.setUTCMonth(date.getUTCMonth()+1);date.setUTCDate(0);return {start,end:date.toISOString().slice(0,10)};}
+
+  function openOperationGoalsBatchDialog(existingGoals) {
+    if(!canManageOperations())return;const brokers=(state.refs.brokers||[]).filter((item)=>item.active);if(!brokers.length){toast('Não há corretores ativos para configurar.','error');return;}
+    const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');box.append(el('h2','','Configurar metas da equipe'),el('p','muted','Preencha prospecções, visitas e vendas para todos os corretores ativos e salve a matriz em uma única operação. As metas anteriores não serão apagadas.'));
+    const form=el('form');const controls=el('div','form-grid');const cycle=makeSelect([{label:'Semanal (segunda a domingo)',value:'weekly'},{label:'Mensal (mês calendário)',value:'monthly'}],state.operationsGoalCycle==='monthly'?'monthly':'weekly');const reference=document.createElement('input');reference.type='date';reference.required=true;reference.value=state.operationsGoalReferenceDate||todayBrazil();addField(controls,'Ciclo de metas',cycle);addField(controls,'Data dentro do período',reference);form.appendChild(controls);
+    const hint=el('p','field-hint');const tableWrap=el('div','table-scroll');const table=el('table','data-table');table.style.minWidth='780px';const head=el('thead');const header=el('tr');['Corretor','Prospecções','Visitas','Vendas'].forEach((label)=>header.appendChild(el('th','',label)));head.appendChild(header);table.appendChild(head);const body=el('tbody');table.appendChild(body);tableWrap.appendChild(table);form.appendChild(tableWrap);
+    const inputs=new Map();
+    function renderMatrix(){const range=operationGoalPeriod(cycle.value,reference.value);hint.textContent='Período selecionado: '+formatDateOnly(range.start)+' a '+formatDateOnly(range.end)+'. Preencha todos os campos. O sistema criará as revisões em conjunto.';body.replaceChildren();inputs.clear();const current=new Map((existingGoals||[]).filter((item)=>item.isCurrent&&item.cycle===cycle.value&&item.startsOn===range.start&&item.endsOn===range.end).map((item)=>[item.brokerId+'|'+item.metric,item.target]));brokers.forEach((broker)=>{const row=el('tr');row.appendChild(el('td','',broker.name));[['prospections','prospecções'],['visits','visitas'],['sales','vendas']].forEach(([metric])=>{const cell=el('td');const input=document.createElement('input');input.type='number';input.min='1';input.max='1000000';input.step='1';input.required=true;input.inputMode='numeric';input.value=current.has(broker.id+'|'+metric)?String(current.get(broker.id+'|'+metric)):'';input.setAttribute('aria-label','Meta de '+metric+' de '+broker.name);cell.appendChild(input);row.appendChild(cell);inputs.set(broker.id+'|'+metric,input);});body.appendChild(row);});}
+    cycle.addEventListener('change',renderMatrix);reference.addEventListener('change',renderMatrix);renderMatrix();form.appendChild(hint);
+    const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar metas da equipe');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';const goals=brokers.map((broker)=>({brokerId:broker.id,targets:{prospections:inputs.get(broker.id+'|prospections').value,visits:inputs.get(broker.id+'|visits').value,sales:inputs.get(broker.id+'|sales').value}}));save.disabled=true;try{const result=await callApi('apiSaveOperationGoalsBatch',state.token,{cycle:cycle.value,referenceDate:reference.value,goals});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar as metas.');state.operationsGoalCycle=cycle.value;state.operationsGoalReferenceDate=reference.value;dialog.close();toast(result.message,'success');await renderOperationGoals();}catch(err){error.textContent=err.message||'Não foi possível salvar as metas.';}finally{save.disabled=false;}});dialog.showModal();
   }
 
   function shiftOperationDate(value, offset) {
@@ -607,7 +609,7 @@
     weekPanel.appendChild(operationsTable([{label:'Dia'},{label:'Manhã',numeric:true},{label:'Tarde',numeric:true},{label:'Noite',numeric:true},{label:'Total',numeric:true}],weekValues,'520px'));page.appendChild(weekPanel);
 
     const dayPanel=el('section','panel');const dayHead=el('div','panel-header');const dayTitle=el('div');
-    dayTitle.append(el('h3','',canManageOperations()?'Conferir e lançar frequência':'Frequência do dia selecionado'),el('p','',canManageOperations()?'Contas de gestão designadas podem lançar e corrigir os registros da equipe.':'A frequência é somente para consulta no seu próprio perfil.'));
+    dayTitle.append(el('h3','',canManageOperations()?'Conferir e lançar frequência':'Frequência do dia selecionado'),el('p','',canManageOperations()?'Para lançar, escolha o dia e clique em “Marcar presença” no turno correspondente; clique em “Presente” para corrigir um registro.':'A frequência é somente para consulta no seu próprio perfil.'));
     const dayInput=document.createElement('input');dayInput.type='date';dayInput.max=todayBrazil();dayInput.value=selectedDay;dayInput.setAttribute('aria-label','Selecionar dia da frequência');
     const dayLabel=el('label','filter-field');dayLabel.append(el('span','','Dia'),dayInput);dayHead.append(dayTitle,dayLabel);dayPanel.appendChild(dayHead);
     if(canManageOperations()){
@@ -1280,8 +1282,8 @@
 
   function exportSalesCsv(rows) {
     if (!isAdmin()) return;
-    const headers = ['numero_interno','numero_processo','cliente','empreendimento','unidade_torre','corretor','data_venda','valor_unidade','status_venda','possui_pendencia','detalhe_pendencia','contabilizada','repasse_previsto','repasse_recebido','saldo_repasse','fase_repasse','historico_recebimentos','observacoes'];
-    const values = rows.map((item) => [item.internalNumber,item.processNumber,item.buyerName,item.developmentName,item.unit,item.brokerName,item.soldAt,item.unitValue,item.saleStatus,item.hasPending?'Sim':'Não',item.pendingDescription,item.accounted?'Sim':'Não',item.expectedRepass,item.receivedRepass,item.balanceRepass,item.repassStatus,(item.receipts||[]).map((receipt)=>`${receipt.receivedAt} — ${brl(receipt.amount)}${receipt.notes?' ('+receipt.notes+')':''}${receipt.voidedAt?' [ANULADO: '+receipt.voidReason+']':''}`).join(' | '),item.notes]);
+    const headers = ['numero_processo','cliente','empreendimento','unidade','corretor','data_venda','valor_unidade','percentual_comissao_total','comissao_bruta_total','comissao_corretor_50','comissao_sdr_50','percentual_comissao_gerente','comissao_gerente','premio_aplicavel','percentual_premio','premio_bruto_total','premio_corretor_50','premio_sdr_50','status_venda','fase_repasse','possui_pendencia','detalhe_pendencia','historico_recebimentos','observacoes'];
+    const values = rows.map((item) => [item.processNumber,item.buyerName,item.developmentName,item.unit,item.brokerName,item.soldAt,item.unitValue,item.commissionRatePct,item.grossCommission,item.brokerCommission,item.sdrCommission,item.managerCommissionRatePct,item.managerCommissionValue,item.hasPrize?'Sim':'Não',item.prizeRatePct,item.grossPrize,item.brokerPrize,item.sdrPrize,item.saleStatus,item.repassStatus,item.hasPending?'Sim':'Não',item.pendingDescription,(item.receipts||[]).map((receipt)=>`${receipt.receivedAt} — ${brl(receipt.amount)}${receipt.notes?' ('+receipt.notes+')':''}${receipt.voidedAt?' [ANULADO: '+receipt.voidReason+']':''}`).join(' | '),item.notes]);
     downloadCsv('vendas-repasses-mundo-apto-'+new Date().toISOString().slice(0,10)+'.csv',headers,values);
     toast(rows.length+' venda(s) exportada(s) com os filtros atuais.','success');
   }
@@ -1289,8 +1291,8 @@
   function exportContractsCsv(rows) {
     if (!isAdmin()) return;
     const statusFor=(item,kind)=>{const docs=item.documents||[];if(docs.some((doc)=>doc.kind===kind&&doc.type==='signed'&&doc.signatureConfirmedAt))return 'Assinado';if(docs.some((doc)=>doc.kind===kind&&doc.type==='generated'))return 'Gerado para assinatura';return 'Não gerado';};
-    const headers = ['numero_contrato','numero_processo','numero_venda','lead_crm_id','numero_proposta_pasta','cliente','empreendimento','unidade_torre','corretor','sdr','gerente','valor_venda','base_calculo_comissao','percentual_comissao','comissao_bruta','comissao_corretor','comissao_sdr','premio_aplicavel','percentual_premio','premio_bruto','premio_corretor','premio_sdr','status_contrato','status_confissao','documentos_disponiveis','gerado_em','contrato_assinado_em'];
-    const values = rows.map((item) => [item.contractNumber,item.processNumber,item.saleInternalNumber,item.leadId,item.proposalNumber,item.buyerName,item.developmentName,item.unit,item.brokerName,item.sdrName,item.managerName,item.unitValue,item.commissionBase,item.commissionRatePct===null?'':item.commissionRatePct,item.grossCommission,item.brokerCommission,item.sdrCommission,item.hasPrize?'Sim':'Não',item.prizeRatePct===null?'':item.prizeRatePct,item.grossPrize,item.brokerPrize,item.sdrPrize,statusFor(item,'agreement'),statusFor(item,'debt_confession'),(item.documents||[]).map((doc)=>`${doc.kind==='debt_confession'?'confissao':'contrato'}:${doc.type}:${doc.name}`).join(' | '),item.generatedAt,item.signedAt]);
+    const headers = ['numero_contrato','numero_processo','numero_venda','lead_crm_id','numero_proposta_pasta','cliente','empreendimento','unidade_torre','corretor','sdr','gerente','valor_venda','base_calculo_comissao','percentual_comissao','comissao_bruta','comissao_corretor','comissao_sdr','percentual_comissao_gerente','comissao_gerente','premio_aplicavel','percentual_premio','premio_bruto','premio_corretor','premio_sdr','status_contrato','status_confissao','documentos_disponiveis','gerado_em','contrato_assinado_em'];
+    const values = rows.map((item) => [item.contractNumber,item.processNumber,item.saleInternalNumber,item.leadId,item.proposalNumber,item.buyerName,item.developmentName,item.unit,item.brokerName,item.sdrName,item.managerName,item.unitValue,item.commissionBase,item.commissionRatePct===null?'':item.commissionRatePct,item.grossCommission,item.brokerCommission,item.sdrCommission,item.managerCommissionRatePct===null?'':item.managerCommissionRatePct,item.managerCommissionValue,item.hasPrize?'Sim':'Não',item.prizeRatePct===null?'':item.prizeRatePct,item.grossPrize,item.brokerPrize,item.sdrPrize,statusFor(item,'agreement'),statusFor(item,'debt_confession'),(item.documents||[]).map((doc)=>`${doc.kind==='debt_confession'?'confissao':'contrato'}:${doc.type}:${doc.name}`).join(' | '),item.generatedAt,item.signedAt]);
     downloadCsv('contratos-mundo-apto-'+new Date().toISOString().slice(0,10)+'.csv',headers,values);
     toast(rows.length+' contrato(s) exportado(s).','success');
   }
@@ -1424,7 +1426,7 @@
       const tr = el('tr'); tr.append(el('td', '', user.name), el('td', '', user.email), el('td', '', user.role), el('td', '', operationsAccessLabel(user.operationsAccess)), el('td', '', user.active ? 'Ativo' : 'Desativado'));
       const actions = el('td'); const actionWrap = el('div', 'row-actions');
       actionWrap.appendChild(button('Editar', 'button-small', () => openUserDialog(user)));
-      if (user.active && String(user.id) !== String(state.user.id)) actionWrap.appendChild(button('Gerar senha', 'button-small', () => resetPassword(user)));
+      if (user.active && String(user.id) !== String(state.user.id)) actionWrap.appendChild(button('Definir senha', 'button-small', () => resetPassword(user)));
       if (String(user.id) !== String(state.user.id)) actionWrap.appendChild(button('Excluir', 'button-small button-danger', () => archiveUser(user)));
       actions.appendChild(actionWrap); tr.appendChild(actions); tbody.appendChild(tr);
     });
@@ -1518,12 +1520,19 @@
     const form = el('form'); const grid = el('div', 'form-grid');
     const name = document.createElement('input'); name.required = true; name.maxLength = 150; name.value = user ? user.name : '';
     const email = document.createElement('input'); email.type = 'email'; email.required = true; email.value = user ? user.email : '';
+    const initialPassword = document.createElement('input'); initialPassword.type='password'; initialPassword.autocomplete='new-password'; initialPassword.minLength=12; initialPassword.maxLength=128; initialPassword.required=true;
+    const initialPasswordConfirm = document.createElement('input'); initialPasswordConfirm.type='password'; initialPasswordConfirm.autocomplete='new-password'; initialPasswordConfirm.minLength=12; initialPasswordConfirm.maxLength=128; initialPasswordConfirm.required=true;
     const role = makeSelect(ROLE_LIST.map((value) => ({label:value,value})), user ? user.role : 'Corretor');
     const operationsPermission = makeSelect([], '');
     const accessHint = el('small','ops-access-hint','Corretores e SDR recebem as permissões próprias de seu perfil. A gestão de produção, metas e frequências é concedida apenas às contas operacionais designadas.');
     const active = document.createElement('input'); active.type = 'checkbox'; active.checked = user ? user.active : true;
     const activeLabel = el('label', 'checkbox-row'); activeLabel.append(active, el('span', '', 'Usuário ativo'));
     addField(grid, 'Nome completo', name); addField(grid, 'E-mail de acesso', email); addField(grid, 'Perfil CRM', role);
+    if(isCreate){
+      addField(grid,'Senha inicial definida pela gestão (mínimo 12 caracteres)',initialPassword,true);
+      addField(grid,'Confirme a senha inicial',initialPasswordConfirm,true);
+      grid.appendChild(el('p','field-hint','A pessoa entrará com esta senha e será obrigada a trocá-la no primeiro acesso. O CRM não registra a senha em histórico nem em texto legível.'));
+    }
     const accessField=el('label','field field-full');accessField.append(el('span','','Permissão no módulo de produção e frequência'),operationsPermission,accessHint);grid.appendChild(accessField);grid.appendChild(activeLabel);
     const updateOperationsPermission=()=>{
       if(role.value==='Corretor'){operationsPermission.replaceChildren(new Option('Corretor · próprios lançamentos e frequência','broker'));operationsPermission.value='broker';operationsPermission.disabled=true;accessHint.textContent='O corretor registra e edita somente os próprios lançamentos e consulta apenas a própria frequência.';}
@@ -1545,7 +1554,9 @@
     form.addEventListener('submit', async (event) => {
       event.preventDefault(); error.textContent=''; save.disabled=true;
       try {
+        if(isCreate&&initialPassword.value!==initialPasswordConfirm.value)throw new Error('As senhas iniciais não coincidem.');
         const payload={id:user ? user.id : '',name:name.value,email:email.value,role:role.value,active:active.checked};
+        if(isCreate)payload.initialPassword=initialPassword.value;
         if(state.user.role==='Administrador')payload.operationsAccess=operationsPermission.value;
         const result = await callApi('apiSaveUser', state.token, payload);
         if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível salvar.');
@@ -1557,13 +1568,14 @@
   }
 
   async function resetPassword(user) {
-    if (!window.confirm('Gerar uma senha temporária para ' + user.name + '? A senha atual será invalidada e a próxima entrada exigirá troca.')) return;
-    try {
-      const result = await callApi('apiResetUserPassword', state.token, user.id);
-      if (!result || result.ok !== true) throw new Error(result && result.message ? result.message : 'Não foi possível gerar a senha.');
-      window.alert('Senha temporária de uso único para ' + user.email + ':\n\n' + result.temporaryPassword + '\n\nCompartilhe por um canal privado. O usuário deverá alterá-la ao entrar.');
-      toast('Senha temporária gerada.', 'success');
-    } catch (err) { handleFailure(err); }
+    const dialog=byId('user-dialog');const content=byId('user-dialog-content');content.replaceChildren();
+    const box=el('div','modal-content');box.append(el('h2','','Definir nova senha'),el('p','muted','Defina uma senha para '+user.name+'. A senha atual será invalidada, as sessões anteriores encerradas e o usuário precisará trocar esta senha ao entrar.'));
+    const form=el('form');const grid=el('div','form-grid');const password=document.createElement('input');password.type='password';password.autocomplete='new-password';password.minLength=12;password.maxLength=128;password.required=true;
+    const confirm=document.createElement('input');confirm.type='password';confirm.autocomplete='new-password';confirm.minLength=12;confirm.maxLength=128;confirm.required=true;
+    addField(grid,'Nova senha temporária (mínimo 12 caracteres)',password,true);addField(grid,'Confirme a nova senha',confirm,true);form.appendChild(grid);
+    const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar e invalidar senha anterior');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';if(password.value!==confirm.value){error.textContent='As senhas não coincidem.';return;}if(!window.confirm('Aplicar a nova senha de '+user.name+' e encerrar as sessões anteriores?'))return;save.disabled=true;try{const result=await callApi('apiResetUserPassword',state.token,user.id,{password:password.value});password.value='';confirm.value='';if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível definir a senha.');dialog.close();toast(result.message,'success');}catch(err){error.textContent=err.message||'Não foi possível definir a senha.';}finally{save.disabled=false;}});
+    dialog.showModal();password.focus();
   }
 
   function openPasswordDialog(required) {
@@ -1595,11 +1607,16 @@
 
   async function renderSales() {
     if (!isAdmin()) { state.page = 'dashboard'; setActiveNav('dashboard'); return renderDashboard(); }
-    const rows = await callApi('apiListSales', state.token);
+    const showArchived=state.salesIncludeArchived===true;
+    const allRows = await callApi('apiListSales', state.token,{includeArchived:true});
+    const rows=allRows.filter((item)=>showArchived?Boolean(item.deletedAt):!item.deletedAt);
     const area = byId('content-area'); area.replaceChildren();
     const heading = el('div', 'page-heading'); const title = el('div');
-    title.append(el('h2', '', 'Controle manual de vendas e repasses'), el('p', '', 'Registre vendas da operação, inclusive de clientes que não passaram pela carteira do CRM. Acompanhe pendências, contabilização, repasses parciais e saldo; os contratos são preparados separadamente na aba Contratos.'));
-    const headingActions=el('div','row-actions');const exportButton=button('Exportar CSV','button-small',()=>exportSalesCsv(visibleRows));headingActions.append(button('+ Registrar venda','button-primary',()=>openSaleDialog(null)),exportButton);heading.append(title,headingActions);area.appendChild(heading);
+    title.append(el('h2', '', showArchived?'Vendas excluídas':'Vendas e repasses'), el('p', '', 'Controle manual das vendas, inclusive as realizadas fora da carteira de clientes do CRM. Os recebimentos são integrais e vinculados à comissão do corretor.'));
+    const headingActions=el('div','row-actions');const exportButton=button('Exportar CSV','button-small',()=>exportSalesCsv(visibleRows));
+    headingActions.append(button(showArchived?'Voltar às vendas ativas':'Vendas excluídas','button-small',()=>{state.salesIncludeArchived=!showArchived;renderSales().catch(handleFailure);}),exportButton);
+    if(!showArchived)headingActions.append(button('+ Registrar venda','button-primary',()=>openSaleDialog(null)));
+    heading.append(title,headingActions);area.appendChild(heading);
     const filters=el('div','filters-panel');
     const search=document.createElement('input');search.type='search';search.placeholder='Cliente, processo, unidade…';search.setAttribute('aria-label','Buscar cliente, processo ou unidade');
     const from=document.createElement('input');from.type='date';from.setAttribute('aria-label','Data inicial da venda');
@@ -1608,7 +1625,7 @@
     const developmentOptions=[...new Map(rows.map((item)=>[item.developmentId,item.developmentName])).entries()].sort((a,b)=>String(a[1]).localeCompare(String(b[1]),'pt-BR')).map(([value,label])=>({value,label}));
     const broker=makeSelect([{label:'Todos os corretores',value:''},...brokerOptions],'');broker.setAttribute('aria-label','Filtrar por corretor');
     const development=makeSelect([{label:'Todos os empreendimentos',value:''},...developmentOptions],'');development.setAttribute('aria-label','Filtrar por empreendimento');
-    const saleStatus=makeSelect([{label:'Todos os status de venda',value:''},...['Cadastrada','Em conferência','Com pendência','Regularizada','Cancelada'].map((value)=>({label:value,value}))],'');saleStatus.setAttribute('aria-label','Filtrar por status da venda');
+    const saleStatus=makeSelect([{label:'Todos os status de venda',value:''},...['Contabilizado','Pendência para contabilização'].map((value)=>({label:value,value}))],'');saleStatus.setAttribute('aria-label','Filtrar por status da venda');
     const repassStatuses=state.refs.repassStatuses||[];
     const repassStatus=makeSelect([{label:'Todas as fases do repasse',value:''},...repassStatuses.map((value)=>({label:value,value}))],'');repassStatus.setAttribute('aria-label','Filtrar por fase do repasse');
     const addFilter=(label,control,extraClass)=>{const holder=el('div','filter-field '+(extraClass||''));const labelNode=document.createElement('label');labelNode.textContent=label;labelNode.appendChild(control);holder.appendChild(labelNode);filters.appendChild(holder);};
@@ -1619,7 +1636,7 @@
     const summary = el('section', 'kpi-grid');
     const panel = el('section', 'table-panel'); const scroll = el('div', 'table-scroll'); const table = el('table', 'data-table');
     const head = el('thead'); const header = el('tr');
-    ['Processo interno / externo','Cliente','Empreendimento / unidade','Corretor','Data','Valor da unidade','Repasse previsto / recebido / saldo','Status da venda','Fase do repasse','Contabilizado','Ações'].forEach((label) => header.appendChild(el('th','',label)));
+    ['Nº do processo','Cliente','Empreendimento / unidade','Corretor','Data da venda','Valor da unidade','Comissão do corretor','Status da venda','Fase do repasse','Ações'].forEach((label) => header.appendChild(el('th','',label)));
     head.appendChild(header); table.appendChild(head); const body = el('tbody');
     table.appendChild(body); scroll.appendChild(table); panel.appendChild(scroll); area.appendChild(panel);
     function update(){
@@ -1630,80 +1647,98 @@
         if(start&&item.soldAt<start)return false;if(end&&item.soldAt>end)return false;
         if(broker.value&&item.brokerId!==broker.value)return false;if(development.value&&item.developmentId!==development.value)return false;
         if(saleStatus.value&&item.saleStatus!==saleStatus.value)return false;if(repassStatus.value&&item.repassStatus!==repassStatus.value)return false;
-        if(query&&!`${item.internalNumber} ${item.processNumber} ${item.buyerName} ${item.unit} ${item.developmentName} ${item.brokerName}`.toLocaleLowerCase('pt-BR').includes(query))return false;
+        if(query&&!`${item.processNumber} ${item.buyerName} ${item.unit} ${item.developmentName} ${item.brokerName}`.toLocaleLowerCase('pt-BR').includes(query))return false;
         return true;
       });
-      filterMessage.textContent=invalidRange?'A data inicial não pode ser posterior à data final.':`Exibindo ${visibleRows.length} de ${rows.length} venda(s). A exportação incluirá exatamente os resultados filtrados.`;
+      filterMessage.textContent=invalidRange?'A data inicial não pode ser posterior à data final.':`Exibindo ${visibleRows.length} de ${rows.length} venda(s) ${showArchived?'excluída(s)':'ativa(s)'}. A exportação incluirá exatamente os resultados filtrados.`;
       exportButton.disabled=visibleRows.length===0;
-      const pending=visibleRows.filter((item)=>item.saleStatus!=='Cancelada'&&item.expectedRepass>0&&item.balanceRepass>0);
-      const expected=pending.reduce((sum,item)=>sum+item.expectedRepass,0);const received=pending.reduce((sum,item)=>sum+item.receivedRepass,0);
-      summary.replaceChildren(kpi('Vendas na seleção',visibleRows.length,'Com os filtros atuais','#EE7A00'),kpi('Repasses pendentes',pending.length,'Com saldo previsto em aberto','#f59e0b'),kpi('Previsto',brl(expected),'Nas vendas com saldo em aberto','#3b82f6'),kpi('Recebido',brl(received),'Nas vendas com saldo em aberto','#22c55e'));
+      const pending=visibleRows.filter((item)=>item.saleStatus==='Pendência para contabilização');
+      const commissionTotal=visibleRows.reduce((sum,item)=>sum+Number(item.brokerCommission||0),0);
+      summary.replaceChildren(kpi('Vendas na seleção',visibleRows.length,'Com os filtros atuais','#EE7A00'),kpi('Pendentes para contabilização',pending.length,'Status da venda','#f59e0b'),kpi('Comissão dos corretores',brl(commissionTotal),'Valor calculado sobre as unidades','#3b82f6'));
       body.replaceChildren();
-      if(!visibleRows.length){const tr=el('tr');const td=el('td','table-empty',rows.length?'Nenhuma venda corresponde aos filtros.':'Nenhuma venda cadastrada.');td.colSpan=11;tr.appendChild(td);body.appendChild(tr);return;}
+      if(!visibleRows.length){const tr=el('tr');const td=el('td','table-empty',rows.length?'Nenhuma venda corresponde aos filtros.':'Nenhuma venda cadastrada.');td.colSpan=10;tr.appendChild(td);body.appendChild(tr);return;}
       visibleRows.forEach((sale)=>{
-        const tr=el('tr');tr.append(el('td','',sale.internalNumber+(sale.processNumber?'\n'+sale.processNumber:'')),el('td','',sale.buyerName),el('td','',sale.developmentName+(sale.unit?' · '+sale.unit:'')),el('td','',sale.brokerName),el('td','',sale.soldAt),el('td','',brl(sale.unitValue)),el('td','',brl(sale.expectedRepass)+' / '+brl(sale.receivedRepass)+' / '+brl(sale.balanceRepass)),el('td','',sale.saleStatus+(sale.hasPending?' · pendência':'')),el('td','',sale.repassStatus),el('td','',sale.accounted?'Sim':'Não'));
-        const action=el('td');const actions=el('div','row-actions');actions.append(button('Editar','button-small',()=>openSaleDialog(sale)),button('Lançar recebimento','button-small button-primary',()=>openReceiptDialog(sale)));if(sale.receipts.length)actions.append(button('Ver parcelas','button-small',()=>showSaleReceipts(sale)));action.appendChild(actions);tr.appendChild(action);body.appendChild(tr);
+        const tr=el('tr');tr.append(el('td','',sale.processNumber||'—'),el('td','',sale.buyerName),el('td','',sale.developmentName+(sale.unit?' · '+sale.unit:'')),el('td','',sale.brokerName),el('td','',formatDateOnly(sale.soldAt)),el('td','',brl(sale.unitValue)),el('td','',brl(sale.brokerCommission)),el('td','',sale.saleStatus+(sale.hasPending?' · pendência':'')),el('td','',sale.repassStatus));
+        const action=el('td');const actions=el('div','row-actions');
+        if(showArchived){actions.append(button('Restaurar','button-small button-primary',()=>restoreSale(sale)));}
+        else {actions.append(button('Editar','button-small',()=>openSaleDialog(sale)));if(sale.receipts.length)actions.append(button('Ver recebimento','button-small',()=>showSaleReceipts(sale)));if(!sale.receipts.some((item)=>!item.voidedAt)&&sale.brokerCommission>0)actions.append(button('Lançar recebimento','button-small button-primary',()=>openReceiptDialog(sale)));actions.append(button('Excluir','button-small button-danger',()=>archiveSale(sale)));}
+        action.appendChild(actions);tr.appendChild(action);body.appendChild(tr);
       });
     }
     [search,from,to,broker,development,saleStatus,repassStatus].forEach((control)=>control.addEventListener(control===search?'input':'change',update));
     area.insertBefore(summary,panel);update();
   }
 
+  function currencyPayload(input) {
+    let value=String(input.value||'').trim().replace(/R\$|\s/g,'');
+    if(value.includes(',')&&value.includes('.'))value=value.replace(/\./g,'').replace(',','.');else if(value.includes(','))value=value.replace(',','.');
+    return value;
+  }
+  function configureCurrencyInput(input,value) {
+    input.type='text';input.inputMode='decimal';input.autocomplete='off';input.placeholder='R$ 0,00';input.value=Number(value||0)>0?brl(value):'';
+    input.addEventListener('focus',()=>{const parsed=Number(currencyPayload(input));if(Number.isFinite(parsed)&&parsed>0)input.value=parsed.toFixed(2);});
+    input.addEventListener('blur',()=>{const parsed=Number(currencyPayload(input));input.value=Number.isFinite(parsed)&&parsed>0?brl(parsed):'';});
+  }
+
   function openSaleDialog(sale) {
-    const dialog = byId('admin-dialog'); const content = byId('admin-dialog-content'); content.replaceChildren();
-    const box = el('div','modal-content'); box.append(el('h2','',sale ? 'Editar venda' : 'Registrar venda'), el('p','muted','O número interno é gerado automaticamente. O número de processo externo é opcional.'));
-    const form = el('form'); const grid = el('div','form-grid');
-    const process = document.createElement('input'); process.maxLength = 100; process.value = sale ? sale.processNumber : '';
-    const buyer = document.createElement('input'); buyer.maxLength = 150; buyer.required = true; buyer.value = sale ? sale.buyerName : '';
-    const developmentOptions=state.refs.developments.map((item)=>({label:item.name,value:item.id}));
-    if(sale&&sale.developmentId&&!developmentOptions.some((item)=>item.value===sale.developmentId))developmentOptions.push({label:(sale.developmentName||'Empreendimento')+' · inativo',value:sale.developmentId});
-    const brokerOptions=state.refs.brokers.filter((item)=>item.active).map((item)=>({label:item.name,value:item.id}));
-    if(sale&&sale.brokerId&&!brokerOptions.some((item)=>item.value===sale.brokerId))brokerOptions.push({label:(sale.brokerName||'Corretor')+' · inativo',value:sale.brokerId});
-    const development = makeSelect([{label:'Selecione o empreendimento',value:''},...developmentOptions],sale?sale.developmentId:'');
-    const broker = makeSelect([{label:'Selecione o corretor',value:''},...brokerOptions],sale?sale.brokerId:'');
-    const date = document.createElement('input'); date.type='date'; date.required=true; date.value=sale?sale.soldAt:todayBrazil();
-    const unit = document.createElement('input'); unit.maxLength=100; unit.required=true; unit.value=sale?sale.unit:'';
-    const unitValue = document.createElement('input'); unitValue.type='number'; unitValue.step='0.01'; unitValue.min='0'; unitValue.required=true; unitValue.value=sale?sale.unitValue:'';
-    const expected = document.createElement('input'); expected.type='number'; expected.step='0.01'; expected.min='0'; expected.value=sale?sale.expectedRepass:'';
-    const saleStatus = makeSelect(['Cadastrada','Em conferência','Com pendência','Regularizada','Cancelada'].map((value)=>({label:value,value})),sale?sale.saleStatus:'Cadastrada');
-    const repassStatus = makeSelect((state.refs.repassStatuses||[]).map((value)=>({label:value,value})),sale?sale.repassStatus:'AGUARDANDO PJ');
-    const hasPending = document.createElement('input'); hasPending.type='checkbox'; hasPending.checked=sale?sale.hasPending:false;
-    const pendingLabel = el('label','checkbox-row'); pendingLabel.append(hasPending,el('span','','Possui pendência'));
-    const pendingDescription = document.createElement('textarea'); pendingDescription.maxLength=2000; pendingDescription.value=sale?sale.pendingDescription:'';
-    const accounted = document.createElement('input'); accounted.type='checkbox'; accounted.checked=sale?sale.accounted:false;
-    const accountedLabel = el('label','checkbox-row'); accountedLabel.append(accounted,el('span','','Contabilizado'));
-    const notes = document.createElement('textarea'); notes.maxLength=3000; notes.value=sale?sale.notes:'';
-    addField(grid,'Número do processo externo (opcional)',process); addField(grid,'Cliente / comprador',buyer); addField(grid,'Empreendimento',development); addField(grid,'Corretor responsável',broker);
-    addField(grid,'Data da venda',date); addField(grid,'Unidade',unit); addField(grid,'Valor da unidade (R$)',unitValue); addField(grid,'Valor total previsto de repasse (R$)',expected);
-    addField(grid,'Status da venda',saleStatus); addField(grid,'Fase do repasse',repassStatus); grid.append(pendingLabel,accountedLabel);
-    addField(grid,'Descrição da pendência',pendingDescription,true); addField(grid,'Observações',notes,true);
-    form.appendChild(grid); const error=el('p','form-error'); error.setAttribute('role','alert'); form.appendChild(error);
-    const actions=el('div','modal-actions'); actions.append(button('Cancelar','',()=>dialog.close())); const save=el('button','button button-primary','Salvar venda'); save.type='submit'; actions.appendChild(save); form.appendChild(actions); box.appendChild(form); content.appendChild(box);
-    form.addEventListener('submit',async(event)=>{
-      event.preventDefault(); error.textContent=''; save.disabled=true;
-      try {
-        const result=await callApi('apiSaveSale',state.token,{id:sale?sale.id:'',processNumber:process.value,buyerName:buyer.value,developmentId:development.value,brokerId:broker.value,soldAt:date.value,unit:unit.value,unitValue:unitValue.value,expectedRepass:expected.value,saleStatus:saleStatus.value,repassStatus:repassStatus.value,hasPending:hasPending.checked,pendingDescription:pendingDescription.value,accounted:accounted.checked,notes:notes.value});
-        if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar a venda.');
-        dialog.close(); toast(result.message,'success'); await renderSales();
-      } catch(err){error.textContent=err.message||'Não foi possível salvar.';} finally{save.disabled=false;}
-    });
+    const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();
+    const box=el('div','modal-content');box.append(el('h2','',sale?'Editar venda':'Registrar venda'),el('p','muted','Cadastre também vendas fechadas fora do CRM. Os percentuais são calculados sobre o valor da unidade; a comissão e o prêmio são divididos em 50% para o corretor e 50% para o SDR. A comissão do gerente é um cálculo separado.'));
+    const form=el('form');const grid=el('div','form-grid');
+    const process=document.createElement('input');process.maxLength=100;process.value=sale?sale.processNumber:'';
+    const buyer=document.createElement('input');buyer.maxLength=150;buyer.required=true;buyer.value=sale?sale.buyerName:'';
+    const developmentOptions=state.refs.developments.map((item)=>({label:item.name,value:item.id}));if(sale&&sale.developmentId&&!developmentOptions.some((item)=>item.value===sale.developmentId))developmentOptions.push({label:(sale.developmentName||'Empreendimento')+' · inativo',value:sale.developmentId});
+    const brokerOptions=state.refs.brokers.filter((item)=>item.active).map((item)=>({label:item.name,value:item.id}));if(sale&&sale.brokerId&&!brokerOptions.some((item)=>item.value===sale.brokerId))brokerOptions.push({label:(sale.brokerName||'Corretor')+' · inativo',value:sale.brokerId});
+    const development=makeSelect([{label:'Selecione o empreendimento',value:''},...developmentOptions],sale?sale.developmentId:'');const broker=makeSelect([{label:'Selecione o corretor',value:''},...brokerOptions],sale?sale.brokerId:'');
+    const date=document.createElement('input');date.type='date';date.required=true;date.value=sale?sale.soldAt:todayBrazil();
+    const unit=document.createElement('input');unit.maxLength=100;unit.required=true;unit.value=sale?sale.unit:'';
+    const unitValue=document.createElement('input');unitValue.required=true;configureCurrencyInput(unitValue,sale?sale.unitValue:0);
+    const commissionRate=document.createElement('input');commissionRate.type='number';commissionRate.step='0.0001';commissionRate.min='0';commissionRate.max='100';commissionRate.value=sale&&sale.commissionRatePct!==null?sale.commissionRatePct:'';commissionRate.required=!sale||sale.commissionRatePct!==null;
+    const managerRate=document.createElement('input');managerRate.type='number';managerRate.step='0.0001';managerRate.min='0';managerRate.max='100';managerRate.value=sale&&sale.managerCommissionRatePct!==null?sale.managerCommissionRatePct:'';
+    const hasPrize=document.createElement('input');hasPrize.type='checkbox';hasPrize.checked=sale?sale.hasPrize:false;const prizeLabel=el('label','checkbox-row');prizeLabel.append(hasPrize,el('span','','Há prêmio nesta venda'));
+    const prizeRate=document.createElement('input');prizeRate.type='number';prizeRate.step='0.0001';prizeRate.min='0';prizeRate.max='100';prizeRate.value=sale&&sale.prizeRatePct!==null?sale.prizeRatePct:'';prizeRate.disabled=!hasPrize.checked;prizeRate.required=hasPrize.checked;
+    const saleStatus=makeSelect(['Contabilizado','Pendência para contabilização'].map((value)=>({label:value,value})),sale&&sale.saleStatus!=='Cancelada'?sale.saleStatus:'Pendência para contabilização');
+    if(sale&&sale.saleStatus==='Cancelada'){const legacyStatus=new Option('Cancelada · registro histórico','Cancelada',true,true);legacyStatus.disabled=true;saleStatus.add(legacyStatus);}
+    const repassOptions=(state.refs.repassStatuses||[]).map((value)=>({label:value,value}));if(sale&&sale.repassStatus&&!repassOptions.some((item)=>item.value===sale.repassStatus))repassOptions.unshift({label:'Fase histórica mantida: '+sale.repassStatus,value:sale.repassStatus});
+    const repassStatus=makeSelect(repassOptions,sale?sale.repassStatus:'FASE DO REGISTRO');
+    const hasPending=document.createElement('input');hasPending.type='checkbox';hasPending.checked=sale?sale.hasPending:false;const pendingLabel=el('label','checkbox-row');pendingLabel.append(hasPending,el('span','','Possui pendência documental/operacional'));
+    const pendingDescription=document.createElement('textarea');pendingDescription.maxLength=2000;pendingDescription.value=sale?sale.pendingDescription:'';const notes=document.createElement('textarea');notes.maxLength=3000;notes.value=sale?sale.notes:'';
+    const preview=el('div','ops-note');
+    function updateFinancialPreview(){
+      const unitAmount=Number(currencyPayload(unitValue));const rate=Number(commissionRate.value||0);const mgr=Number(managerRate.value||0);const prize=hasPrize.checked?Number(prizeRate.value||0):0;
+      const total=Math.round(unitAmount*rate)/100;const brokerPart=Math.round(total/2*100)/100;const sdrPart=Math.round((total-brokerPart)*100)/100;const managerPart=Math.round(unitAmount*mgr)/100;const prizeTotal=Math.round(unitAmount*prize)/100;const brokerPrize=Math.round(prizeTotal/2*100)/100;const sdrPrize=Math.round((prizeTotal-brokerPrize)*100)/100;
+      const preserved=sale&&sale.commissionRatePct===null?' · Comissão anterior do corretor preservada: '+brl(sale.brokerCommission):'';
+      preview.textContent=`Comissão bruta: ${brl(total)} · Corretor (50%): ${brl(brokerPart)} · SDR (50%): ${brl(sdrPart)} · Gerente: ${brl(managerPart)}${hasPrize.checked?' · Prêmio: '+brl(prizeTotal)+' (corretor '+brl(brokerPrize)+' / SDR '+brl(sdrPrize)+')':''}${preserved}. A comissão do gerente é adicional e não reduz a divisão corretor/SDR.`;
+    }
+    [unitValue,commissionRate,managerRate,prizeRate].forEach((input)=>input.addEventListener('input',updateFinancialPreview));hasPrize.addEventListener('change',()=>{prizeRate.disabled=!hasPrize.checked;prizeRate.required=hasPrize.checked;updateFinancialPreview();});
+    addField(grid,'Número do processo (opcional)',process);addField(grid,'Cliente / comprador',buyer);addField(grid,'Empreendimento',development);addField(grid,'Corretor responsável',broker);addField(grid,'Data da venda',date);addField(grid,'Unidade',unit);addField(grid,'Valor da unidade (R$)',unitValue);addField(grid,'Percentual da comissão total (%)',commissionRate);addField(grid,'Percentual da comissão do gerente (%)',managerRate);grid.appendChild(prizeLabel);addField(grid,'Percentual do prêmio sobre o imóvel (%)',prizeRate);addField(grid,'Status da venda',saleStatus);addField(grid,'Fase do repasse',repassStatus);grid.appendChild(preview);grid.append(pendingLabel);addField(grid,'Descrição da pendência',pendingDescription,true);addField(grid,'Observações',notes,true);updateFinancialPreview();
+    form.appendChild(grid);const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar venda');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveSale',state.token,{id:sale?sale.id:'',processNumber:process.value,buyerName:buyer.value,developmentId:development.value,brokerId:broker.value,soldAt:date.value,unit:unit.value,unitValue:currencyPayload(unitValue),expectedRepass:sale?sale.expectedRepass:'',saleStatus:saleStatus.value,repassStatus:repassStatus.value,commissionRatePct:commissionRate.value,managerCommissionRatePct:managerRate.value,hasPrize:hasPrize.checked,prizeRatePct:prizeRate.value,hasPending:hasPending.checked,pendingDescription:pendingDescription.value,notes:notes.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar a venda.');dialog.close();toast(result.message,'success');await renderSales();}catch(err){error.textContent=err.message||'Não foi possível salvar.';}finally{save.disabled=false;}});
     dialog.showModal();
   }
 
   function openReceiptDialog(sale) {
     const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');
-    box.append(el('h2','','Registrar recebimento'),el('p','muted',sale.internalNumber+' · '+sale.buyerName+' · saldo atual '+brl(sale.balanceRepass)+'. A fase do repasse permanece conforme definida pela gestão.'));
-    const form=el('form');const grid=el('div','form-grid');const amount=document.createElement('input');amount.type='number';amount.step='0.01';amount.min='0.01';amount.required=true;
-    const date=document.createElement('input');date.type='date';date.required=true;date.value=todayBrazil();const notes=document.createElement('textarea');notes.maxLength=1000;
-    addField(grid,'Valor recebido (R$)',amount);addField(grid,'Data do recebimento',date);addField(grid,'Observação (opcional)',notes,true);form.appendChild(grid);
-    const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Registrar parcela');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
-    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiAddSaleReceipt',state.token,sale.id,{amount:amount.value,receivedAt:date.value,notes:notes.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível registrar.');dialog.close();toast(result.message,'success');await renderSales();}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});
+    box.append(el('h2','','Lançar recebimento integral'),el('p','muted',(sale.processNumber?'Processo '+sale.processNumber+' · ':'')+sale.buyerName+' · Comissão integral do corretor: '+brl(sale.brokerCommission)+'. O lançamento atualizará a fase para COMISSÃO PAGA. Não há parcelas nem campo de valor.'));
+    const form=el('form');const grid=el('div','form-grid');const date=document.createElement('input');date.type='date';date.required=true;date.value=todayBrazil();const notes=document.createElement('textarea');notes.maxLength=1000;
+    addField(grid,'Data do recebimento integral',date);addField(grid,'Observação (opcional)',notes,true);form.appendChild(grid);
+    const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Confirmar recebimento integral');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';if(!window.confirm('Confirmar que o valor integral da comissão do corretor foi recebido? A venda será marcada como COMISSÃO PAGA.'))return;save.disabled=true;try{const result=await callApi('apiAddSaleReceipt',state.token,sale.id,{receivedAt:date.value,notes:notes.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível registrar.');dialog.close();toast(result.message,'success');await renderSales();}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});
     dialog.showModal();
+  }
+
+  async function archiveSale(sale) {
+    if(!isAdmin()||!window.confirm('Excluir a venda de '+sale.buyerName+'? Ela sairá da lista ativa, mas recebimentos, contratos e histórico serão preservados e a gestão poderá restaurá-la.'))return;
+    try{const result=await callApi('apiArchiveSale',state.token,sale.id);if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível excluir a venda.');toast(result.message,'success');await renderSales();}catch(error){handleFailure(error);}
+  }
+
+  async function restoreSale(sale) {
+    if(!isAdmin()||!window.confirm('Restaurar a venda de '+sale.buyerName+' para a lista ativa?'))return;
+    try{const result=await callApi('apiRestoreSale',state.token,sale.id);if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível restaurar a venda.');toast(result.message,'success');await renderSales();}catch(error){handleFailure(error);}
   }
 
   function showSaleReceipts(sale) {
     const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');
-    box.append(el('h2','','Histórico de recebimentos'),el('p','muted',sale.internalNumber+' · Total ativo: '+brl(sale.receivedRepass)+' · Saldo: '+brl(sale.balanceRepass)));
+    box.append(el('h2','','Histórico de recebimentos'),el('p','muted',(sale.processNumber?'Processo '+sale.processNumber+' · ':'')+sale.buyerName+' · Comissão do corretor: '+brl(sale.brokerCommission)));
     const list=el('div','receipt-history-list');
     sale.receipts.forEach((item)=>{
       const row=el('article','receipt-history-row');const details=el('div','receipt-history-details');
@@ -1721,7 +1756,7 @@
     const reason=window.prompt('Informe a justificativa para anular este recebimento (mínimo de 5 caracteres).');
     if(reason===null)return;
     if(reason.trim().length<5){toast('A justificativa precisa ter pelo menos 5 caracteres.','error');return;}
-    if(!window.confirm('O recebimento ficará marcado como anulado e será preservado no histórico e na auditoria. A fase do repasse não será alterada. Continuar?'))return;
+    if(!window.confirm('O recebimento ficará marcado como anulado e será preservado no histórico e na auditoria. Se a fase ainda estiver como COMISSÃO PAGA, a fase anterior será restaurada. Continuar?'))return;
     try{
       const result=await callApi('apiVoidSaleReceipt',state.token,receipt.id,{reason:reason.trim()});
       if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível corrigir o recebimento.');
@@ -1744,13 +1779,14 @@
       area.appendChild(readiness);
     }
     const panel=el('section','table-panel');const scroll=el('div','table-scroll');const table=el('table','data-table');const thead=el('thead');const h=el('tr');
-    ['Registro / processo','Cliente','Empreendimento / unidade','Corretor','Comissão (50/50)','Prêmio (50/50)','Contrato / termo','Confissão de dívida','Arquivos','Ações'].forEach((label)=>h.appendChild(el('th','',label)));thead.appendChild(h);table.appendChild(thead);const body=el('tbody');
-    if(!contracts.length){const tr=el('tr');const td=el('td','table-empty',admin?'Nenhum contrato cadastrado.':'Nenhum contrato assinado foi disponibilizado para você.');td.colSpan=10;tr.appendChild(td);body.appendChild(tr);}
+    ['Registro / processo','Cliente','Empreendimento / unidade','Corretor','Comissão (50/50)','Comissão do gerente','Prêmio (50/50)','Contrato / termo','Confissão de dívida','Arquivos','Ações'].forEach((label)=>h.appendChild(el('th','',label)));thead.appendChild(h);table.appendChild(thead);const body=el('tbody');
+    if(!contracts.length){const tr=el('tr');const td=el('td','table-empty',admin?'Nenhum contrato cadastrado.':'Nenhum contrato assinado foi disponibilizado para você.');td.colSpan=11;tr.appendChild(td);body.appendChild(tr);}
     contracts.forEach((item)=>{
       const documentState=(kind)=>{const docs=(item.documents||[]).filter((doc)=>doc.kind===kind);if(docs.some((doc)=>doc.type==='signed'&&doc.signatureConfirmedAt))return 'Assinado';if(docs.some((doc)=>doc.type==='signed'))return 'Arquivo enviado · confirmação pendente';if(docs.some((doc)=>doc.type==='generated'))return 'Gerado para assinatura';return 'Não gerado';};
       const agreementState=documentState('agreement');const confessionState=documentState('debt_confession');
       const tr=el('tr');tr.append(el('td','',item.contractNumber+(item.processNumber?'\nProcesso: '+item.processNumber:'')+(item.saleInternalNumber?'\nVenda: '+item.saleInternalNumber:'')),el('td','',item.buyerName),el('td','',item.developmentName+' · '+item.unit),el('td','',item.brokerName),
         el('td','',brl(item.grossCommission)+'\nCorretor '+brl(item.brokerCommission)+' · SDR '+brl(item.sdrCommission)),
+        el('td','',item.managerCommissionRatePct===null||item.managerCommissionRatePct===undefined?'Não se aplica':String(item.managerCommissionRatePct)+'% · '+brl(item.managerCommissionValue)),
         el('td','',item.hasPrize?brl(item.grossPrize)+'\nCorretor '+brl(item.brokerPrize)+' · SDR '+brl(item.sdrPrize):'Sem prêmio'),el('td','',agreementState),el('td','',confessionState));
       const docs=el('td');(item.documents||[]).forEach((doc)=>{const fileState=doc.type==='generated'?'Gerado':doc.signatureConfirmedAt?'Assinado':'Envio pendente';const label=(doc.kind==='debt_confession'?'Confissão':'Contrato')+' · '+fileState;docs.appendChild(button(label,'button-small',()=>downloadContractDocument(doc)));});tr.appendChild(docs);
       const actionsCell=el('td');const buttons=el('div','row-actions');
@@ -1774,7 +1810,7 @@
   async function openContractDialog(contract) {
     const [leads,sales]=await Promise.all([callApi('apiListContractLeads',state.token),callApi('apiListSales',state.token)]);
     const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');
-    box.append(el('h2','',contract?'Editar rascunho de contrato':'Novo contrato'),el('p','muted','Use uma venda já lançada em “Vendas e repasses” ou preencha os dados manualmente. A divisão de comissão e prêmio é calculada em 50% para o corretor e 50% para o SDR.'));
+    box.append(el('h2','',contract?'Editar rascunho de contrato':'Novo contrato'),el('p','muted','Somente a gestão gera os documentos. O corretor e o SDR poderão consultar os arquivos após as assinaturas serem confirmadas. A comissão e o prêmio são divididos em 50% para cada; a comissão do gerente é calculada separadamente.'));
     const form=el('form');const grid=el('div','form-grid');
     const sale=makeSelect([{label:'Sem venda vinculada — preencher manualmente',value:''},...sales.map((item)=>({label:item.internalNumber+(item.processNumber?' · Processo '+item.processNumber:'')+' · '+item.buyerName+' · '+item.developmentName+' / '+item.unit,value:item.id}))],contract?contract.saleId||'':'');
     const lead=makeSelect([{label:'Sem lead vinculado (venda externa/manual)',value:''},...leads.map((item)=>({label:item.name+' · '+item.phone+' · '+item.brokerName,value:item.id}))],contract?contract.leadId||'':'');
@@ -1790,32 +1826,50 @@
     if(contract&&contract.brokerId&&!brokerOptions.some((item)=>item.value===contract.brokerId))brokerOptions.push({label:contract.brokerName+' · inativo',value:contract.brokerId});
     const broker=makeSelect([{label:'Selecione o corretor',value:''},...brokerOptions],contract?contract.brokerId:'');
     const sdr=makeSelect([{label:'Selecione o SDR',value:''},...(state.refs.sdrs||[]).map((item)=>({label:item.name,value:item.id}))],contract?contract.sdrId:'');
-    const managerOptions=state.refs.managers||[];const defaultManager=contract?contract.managerId:(state.user.role==='Gerente'?state.user.id:(managerOptions[0]||{}).id||'');const manager=makeSelect([{label:'Selecione o gerente signatário',value:''},...managerOptions.map((item)=>({label:item.name,value:item.id}))],defaultManager);
+    const managerOptions=state.refs.managers||[];const defaultManager=contract?contract.managerId:(managerOptions.find((item)=>item.id===state.user.id)||managerOptions[0]||{}).id||'';const manager=makeSelect([{label:'Selecione o gerente ou administrador signatário',value:''},...managerOptions.map((item)=>({label:item.name+' · '+item.role,value:item.id}))],defaultManager);
     const unit=document.createElement('input');unit.required=true;unit.maxLength=100;unit.value=contract?contract.unit:'';
-    const unitValue=document.createElement('input');unitValue.type='number';unitValue.step='0.01';unitValue.min='0.01';unitValue.required=true;unitValue.value=contract?contract.unitValue:'';
-    const commissionBase=document.createElement('input');commissionBase.type='number';commissionBase.step='0.01';commissionBase.min='0';commissionBase.value=contract&&contract.commissionBase?contract.commissionBase:'';
-    const commissionRate=document.createElement('input');commissionRate.type='number';commissionRate.step='0.0001';commissionRate.min='0';commissionRate.max='100';commissionRate.value=contract&&contract.commissionRatePct!==null?contract.commissionRatePct:'';
-    const commission=document.createElement('input');commission.type='number';commission.step='0.01';commission.min='0.01';commission.required=true;commission.value=contract?contract.grossCommission:'';
+    const unitValue=document.createElement('input');unitValue.required=true;configureCurrencyInput(unitValue,contract?contract.unitValue:0);
+    const commissionRate=document.createElement('input');commissionRate.type='number';commissionRate.step='0.0001';commissionRate.min='0';commissionRate.max='100';commissionRate.required=true;commissionRate.value=contract&&contract.commissionRatePct!==null?contract.commissionRatePct:'';
+    const commission=document.createElement('input');commission.type='text';commission.readOnly=true;commission.setAttribute('aria-label','Comissão bruta total calculada');
+    const managerRate=document.createElement('input');managerRate.type='number';managerRate.step='0.0001';managerRate.min='0';managerRate.max='100';managerRate.value=contract&&contract.managerCommissionRatePct!==null?contract.managerCommissionRatePct:'';
+    const managerCommission=document.createElement('input');managerCommission.type='text';managerCommission.readOnly=true;managerCommission.setAttribute('aria-label','Comissão do gerente calculada');
     const hasPrize=document.createElement('input');hasPrize.type='checkbox';hasPrize.checked=contract?contract.hasPrize:false;const prizeLabel=el('label','checkbox-row');prizeLabel.append(hasPrize,el('span','','Há prêmio nesta venda'));
-    const prizeRate=document.createElement('input');prizeRate.type='number';prizeRate.step='0.0001';prizeRate.min='0';prizeRate.max='100';prizeRate.value=contract&&contract.prizeRatePct!==null?contract.prizeRatePct:'';
-    const prize=document.createElement('input');prize.type='number';prize.step='0.01';prize.min='0.01';prize.value=contract?contract.grossPrize:'';
+    const prizeRate=document.createElement('input');prizeRate.type='number';prizeRate.step='0.0001';prizeRate.min='0';prizeRate.max='100';prizeRate.value=contract&&contract.prizeRatePct!==null?contract.prizeRatePct:'';prizeRate.disabled=!hasPrize.checked;prizeRate.required=hasPrize.checked;
+    const prize=document.createElement('input');prize.type='text';prize.readOnly=true;prize.setAttribute('aria-label','Prêmio bruto total calculado');
     addField(grid,'Venda já registrada (opcional)',sale,true);addField(grid,'Lead do CRM (opcional)',lead,true);addField(grid,'Número do processo (manual, quando não houver venda vinculada)',process,true);
     addField(grid,'Nome do comprador',buyer);addField(grid,'CPF do comprador (necessário para gerar)',cpf);addField(grid,'CPF do SDR (necessário para gerar)',sdrCpf);addField(grid,'Endereço do comprador',address,true);
     addField(grid,'Empreendimento',development);addField(grid,'Corretor responsável',broker);addField(grid,'SDR signatário',sdr);addField(grid,'Gerente signatário',manager);
-    addField(grid,'Unidade / torre',unit);addField(grid,'Valor da unidade (R$)',unitValue);addField(grid,'Nº da proposta / pasta',proposal);addField(grid,'Base de cálculo da comissão (R$)',commissionBase);addField(grid,'Percentual de comissão (%)',commissionRate);addField(grid,'Comissão bruta total (R$)',commission);grid.appendChild(prizeLabel);addField(grid,'Percentual do prêmio (%)',prizeRate);addField(grid,'Prêmio bruto total (R$)',prize);
-    const splitHint=el('p','field-hint','Quando uma venda for selecionada, comprador, processo, empreendimento, corretor, unidade e valor da unidade vêm do registro de venda e ficam bloqueados neste formulário. Para corrigir esses dados, atualize a venda em “Vendas e repasses”. Percentuais e valores de comissão/prêmio podem variar por produto. Os documentos não são assinados digitalmente pelo CRM.');grid.appendChild(splitHint);
+    const splitPreview=el('div','ops-note');
+    function updateContractPreview(){const base=Number(currencyPayload(unitValue)||0);const rate=Number(commissionRate.value||0);const managerPct=Number(managerRate.value||0);const prizePct=hasPrize.checked?Number(prizeRate.value||0):0;const gross=Math.round(base*rate)/100;const cents=Math.round(gross*100);const brokerCents=Math.floor(cents/2);const managerAmount=Math.round(base*managerPct)/100;const prizeGross=Math.round(base*prizePct)/100;const prizeCents=Math.round(prizeGross*100);const brokerPrizeCents=Math.floor(prizeCents/2);commission.value=gross>0?brl(gross):'';managerCommission.value=managerAmount>0?brl(managerAmount):'';prize.value=hasPrize.checked&&prizeGross>0?brl(prizeGross):'';splitPreview.textContent='Comissão bruta '+brl(gross)+' · Corretor '+brl(brokerCents/100)+' · SDR '+brl((cents-brokerCents)/100)+' · Gerente '+(managerAmount>0?brl(managerAmount):'Não se aplica')+(hasPrize.checked?' · Prêmio total '+brl(prizeGross)+' (corretor '+brl(brokerPrizeCents/100)+' / SDR '+brl((prizeCents-brokerPrizeCents)/100)+')':'')+'. Percentuais calculados sobre o valor da unidade.';}
+    [unitValue,commissionRate,managerRate,prizeRate].forEach((input)=>input.addEventListener('input',updateContractPreview));hasPrize.addEventListener('change',()=>{prizeRate.disabled=!hasPrize.checked;prizeRate.required=hasPrize.checked;updateContractPreview();});
+    addField(grid,'Unidade / torre',unit);addField(grid,'Valor da unidade (R$)',unitValue);addField(grid,'Nº da proposta / pasta',proposal);addField(grid,'Percentual de comissão (%)',commissionRate);addField(grid,'Comissão bruta calculada (R$)',commission);addField(grid,'Percentual da comissão do gerente (%)',managerRate);addField(grid,'Comissão do gerente calculada (R$)',managerCommission);grid.appendChild(prizeLabel);addField(grid,'Percentual do prêmio sobre o imóvel (%)',prizeRate);addField(grid,'Prêmio bruto calculado (R$)',prize);grid.appendChild(splitPreview);
+    const splitHint=el('p','field-hint','Ao vincular uma venda, os dados da unidade são carregados do registro. Se a venda antiga ainda não tiver percentuais, informe os percentuais aqui para calcular o documento. A comissão do gerente não reduz as partes do corretor e do SDR. O CRM não assina digitalmente os documentos.');grid.appendChild(splitHint);
     function applySaleSelection() {
-      const chosen=sales.find((item)=>item.id===sale.value);const locked=Boolean(chosen);
-      [buyer,process,unit,unitValue].forEach((input)=>{input.readOnly=locked;});
-      development.disabled=locked;broker.disabled=locked;lead.disabled=locked&&Boolean(chosen.leadId);
-      if(chosen){buyer.value=chosen.buyerName;process.value=chosen.processNumber||'';development.value=chosen.developmentId;broker.value=chosen.brokerId;unit.value=chosen.unit;unitValue.value=chosen.unitValue;lead.value=chosen.leadId||'';}
-      else if(contract&&contract.saleId){buyer.value=contract.buyerName;process.value=contract.processNumber||'';development.value=contract.developmentId;broker.value=contract.brokerId;unit.value=contract.unit;unitValue.value=contract.unitValue;lead.value=contract.leadId||'';}
+      const chosen=sales.find((item)=>item.id===sale.value);const sameSavedSale=Boolean(contract&&chosen&&contract.saleId===chosen.id);
+      [buyer,process,unit,unitValue].forEach((input)=>{input.readOnly=Boolean(chosen);});
+      development.disabled=Boolean(chosen);broker.disabled=Boolean(chosen);lead.disabled=Boolean(chosen&&chosen.leadId);
+      commissionRate.readOnly=false;managerRate.readOnly=false;hasPrize.disabled=false;prizeRate.disabled=!hasPrize.checked;prizeRate.required=hasPrize.checked;
+      if(chosen){
+        buyer.value=chosen.buyerName;process.value=chosen.processNumber||'';development.value=chosen.developmentId;broker.value=chosen.brokerId;unit.value=chosen.unit;unitValue.value=brl(chosen.unitValue);
+        commissionRate.value=chosen.commissionRatePct!==null?chosen.commissionRatePct:(sameSavedSale&&contract.commissionRatePct!==null?contract.commissionRatePct:'');commissionRate.readOnly=chosen.commissionRatePct!==null;
+        managerRate.value=chosen.managerCommissionRatePct!==null?chosen.managerCommissionRatePct:(sameSavedSale&&contract.managerCommissionRatePct!==null?contract.managerCommissionRatePct:'');managerRate.readOnly=chosen.managerCommissionRatePct!==null;
+        hasPrize.checked=chosen.hasPrize||(sameSavedSale&&contract.hasPrize);hasPrize.disabled=Boolean(chosen.hasPrize&&chosen.prizeRatePct!==null);
+        prizeRate.value=chosen.prizeRatePct!==null?chosen.prizeRatePct:(sameSavedSale&&contract.prizeRatePct!==null?contract.prizeRatePct:'');prizeRate.disabled=!hasPrize.checked||Boolean(chosen.prizeRatePct!==null);prizeRate.required=hasPrize.checked;lead.value=chosen.leadId||'';
+      } else if(contract){
+        buyer.value=contract.buyerName;process.value=contract.processNumber||'';development.value=contract.developmentId;broker.value=contract.brokerId;unit.value=contract.unit;unitValue.value=brl(contract.unitValue);lead.value=contract.leadId||'';
+        commissionRate.value=contract.commissionRatePct===null?'':contract.commissionRatePct;managerRate.value=contract.managerCommissionRatePct===null?'':contract.managerCommissionRatePct;
+        hasPrize.checked=contract.hasPrize;prizeRate.value=contract.prizeRatePct===null?'':contract.prizeRatePct;prizeRate.disabled=!hasPrize.checked;prizeRate.required=hasPrize.checked;
+      } else {
+        buyer.value='';process.value='';development.value='';broker.value='';unit.value='';unitValue.value='';lead.value='';commissionRate.value='';managerRate.value='';hasPrize.checked=false;prizeRate.value='';prizeRate.disabled=true;prizeRate.required=false;
+      }
+      updateContractPreview();
     }
     sale.addEventListener('change',applySaleSelection);
     lead.addEventListener('change',()=>{if(sale.value)return;const chosen=leads.find((item)=>item.id===lead.value);if(!chosen)return;buyer.value=chosen.name;development.value=chosen.developmentId;broker.value=chosen.brokerId;});
     if(sale.value)applySaleSelection();
     form.appendChild(grid);const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Salvar rascunho');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
-    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const result=await callApi('apiSaveContract',state.token,{id:contract?contract.id:'',saleId:sale.value,leadId:lead.value,processNumber:process.value,brokerId:broker.value,sdrId:sdr.value,sdrCpf:sdrCpf.value,managerId:manager.value,buyerName:buyer.value,buyerCpf:cpf.value,buyerAddress:address.value,developmentId:development.value,unit:unit.value,proposalNumber:proposal.value,unitValue:unitValue.value,commissionBase:commissionBase.value,commissionRatePct:commissionRate.value,grossCommission:commission.value,hasPrize:hasPrize.checked,prizeRatePct:prizeRate.value,grossPrize:prize.value});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar o contrato.');dialog.close();toast(result.message,'success');await renderContracts();}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});
+    updateContractPreview();
+    form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{if(hasPrize.checked&&!prizeRate.value)throw new Error('Informe o percentual do prêmio ou desmarque a opção.');const result=await callApi('apiSaveContract',state.token,{id:contract?contract.id:'',saleId:sale.value,leadId:lead.value,processNumber:process.value,brokerId:broker.value,sdrId:sdr.value,sdrCpf:sdrCpf.value,managerId:manager.value,buyerName:buyer.value,buyerCpf:cpf.value,buyerAddress:address.value,developmentId:development.value,unit:unit.value,proposalNumber:proposal.value,unitValue:currencyPayload(unitValue),commissionBase:currencyPayload(unitValue),commissionRatePct:commissionRate.value,grossCommission:currencyPayload(commission),managerCommissionRatePct:managerRate.value,managerCommissionValue:currencyPayload(managerCommission),hasPrize:hasPrize.checked,prizeRatePct:prizeRate.value,grossPrize:currencyPayload(prize)});if(!result||result.ok!==true)throw new Error(result&&result.message?result.message:'Não foi possível salvar o contrato.');dialog.close();toast(result.message,'success');await renderContracts();}catch(err){error.textContent=err.message;}finally{save.disabled=false;}});
     dialog.showModal();
   }
 

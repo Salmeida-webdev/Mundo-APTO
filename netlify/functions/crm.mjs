@@ -10,7 +10,7 @@ const ALLOWED_METHODS = new Set([
   'apiChangePassword', 'apiGetReferenceData', 'apiGetDashboard', 'apiListLeads',
   'apiGetSdrHistory', 'apiSaveLead', 'apiListUsers', 'apiSaveUser',
   'apiGetSdrWorklist', 'apiListLeadAttempts', 'apiAddLeadAttempt', 'apiFlagPhoneIncorrect',
-  'apiListAudit', 'apiListSales', 'apiSaveSale', 'apiAddSaleReceipt', 'apiVoidSaleReceipt', 'apiListBrokerProfiles', 'apiSaveBrokerProfile',
+  'apiListAudit', 'apiListSales', 'apiSaveSale', 'apiArchiveSale', 'apiRestoreSale', 'apiAddSaleReceipt', 'apiVoidSaleReceipt', 'apiListBrokerProfiles', 'apiSaveBrokerProfile',
   'apiListContracts', 'apiListContractLeads', 'apiSaveContract', 'apiGenerateContract', 'apiGetContractTemplate', 'apiSaveContractTemplate',
   'apiCreateContractUpload', 'apiConfirmContractSigned', 'apiGetContractDocument',
   'apiListArchivedLeads', 'apiArchiveLead', 'apiRestoreLead',
@@ -18,7 +18,7 @@ const ALLOWED_METHODS = new Set([
   'apiResetUserPassword', 'apiApplySharedTemporaryPassword', 'apiListDevelopments',
   'apiSaveDevelopment', 'apiPreviewLeadImport', 'apiImportLeads', 'apiExportLeads', 'apiExportReport', 'apiSaveFollowupDays',
   'apiGetOperationsDashboard', 'apiListProduction', 'apiSaveProduction', 'apiArchiveProduction',
-  'apiListOperationGoals', 'apiSaveOperationGoal', 'apiListAttendance', 'apiSetAttendance', 'apiExportOperationsReport'
+  'apiListOperationGoals', 'apiSaveOperationGoal', 'apiSaveOperationGoalsBatch', 'apiListAttendance', 'apiSetAttendance', 'apiExportOperationsReport'
 ]);
 const MUTATING_METHODS = new Set([
   'apiChangePassword', 'apiSaveFollowupDays', 'apiSaveLead', 'apiArchiveLead', 'apiRestoreLead',
@@ -26,7 +26,7 @@ const MUTATING_METHODS = new Set([
   'apiSaveBrokerProfile', 'apiSaveContract', 'apiGenerateContract', 'apiCreateContractUpload',
   'apiConfirmContractSigned', 'apiSaveContractTemplate', 'apiSaveDevelopment', 'apiImportLeads',
   'apiSaveUser', 'apiArchiveUser', 'apiRestoreUser', 'apiResetUserPassword', 'apiApplySharedTemporaryPassword',
-  'apiSaveProduction', 'apiArchiveProduction', 'apiSaveOperationGoal', 'apiSetAttendance'
+  'apiSaveProduction', 'apiArchiveProduction', 'apiSaveOperationGoal', 'apiSaveOperationGoalsBatch', 'apiSetAttendance', 'apiArchiveSale', 'apiRestoreSale'
 ]);
 
 class HttpError extends Error {
@@ -66,7 +66,9 @@ async function loadOperationsSecurityPolicy() {
 }
 
 function isConfiguredOperationsManager(user) {
-  return Boolean(user && user.active !== false && isUuid(user.id) && operationsSecurityPolicy.managerIds.has(String(user.id).toLowerCase()) && isAdmin(user));
+  return Boolean(user && user.active !== false && isUuid(user.id)
+    && operationsSecurityPolicy.managerIds.has(String(user.id).toLowerCase())
+    && ['Administrador','Gerente','Coordenador','Assistente'].includes(String(user.role || '')));
 }
 
 function isSharedTemporaryPasswordOperator(user) {
@@ -347,7 +349,7 @@ async function apiLogin(email, password) {
   if (!email || password.length > 128) return { ok: false, message: 'E-mail ou senha inválidos.' };
   try { return await signInResult(await authPasswordGrant(email, password)); }
   catch (error) {
-    if (error.status === 401) return { ok: false, message: 'E-mail ou senha inválidos.' };
+    if ([400, 401].includes(error.status)) return { ok: false, message: 'E-mail ou senha inválidos.' };
     throw error;
   }
 }
@@ -399,9 +401,26 @@ async function apiChangePassword(token, currentPassword, newPassword) {
     if ([400, 401].includes(error.status)) return { ok: false, message: 'Senha atual incorreta.' };
     throw new HttpError(error.status === 429 ? 429 : 502, 'Não foi possível validar a senha atual. Tente novamente.');
   }
-  await authRequest('user', { method: 'PUT', token, body: { password: newPassword } });
-  await dbRequest('crm_users', { method: 'PATCH', query: { id: `eq.${actor.id}` }, prefer: 'return=minimal', body: { must_change_password: false, updated_at: now() } });
-  await audit(actor, 'user.password_change', 'user', actor.id, ['password'], { password: '[redigida]' }, { password: '[redigida]' });
+  const nextVersion = actor.sessionVersion + 1;
+  const locked = await dbRequest('crm_users', {
+    method: 'PATCH', query: { id: `eq.${actor.id}`, session_version: `eq.${actor.sessionVersion}`, active: 'eq.true', deleted_at: 'is.null' },
+    prefer: 'return=representation', body: { must_change_password: true, session_version: nextVersion, updated_at: now() }
+  });
+  if (!Array.isArray(locked) || !locked.length) return { ok: false, message: 'A conta foi alterada durante a operação. Entre novamente e tente trocar a senha.' };
+  await dbRequest('crm_sessions', { method: 'DELETE', query: { user_id: `eq.${actor.id}` } }).catch(() => null);
+  try {
+    await setAuthPassword(actor.id, newPassword, nextVersion);
+    const completed = await dbRequest('crm_users', {
+      method: 'PATCH', query: { id: `eq.${actor.id}`, session_version: `eq.${nextVersion}`, active: 'eq.true', deleted_at: 'is.null' },
+      prefer: 'return=representation', body: { must_change_password: false, updated_at: now() }
+    });
+    if (!Array.isArray(completed) || !completed.length) throw new HttpError(409, 'A senha foi atualizada, mas a conta precisa de nova validação. Entre novamente.');
+  } catch (error) {
+    await audit(actor, 'user.password_change_blocked', 'user', actor.id, ['mustChangePassword','sessionVersion'], { mustChangePassword: actor.mustChangePassword, sessionVersion: actor.sessionVersion }, { mustChangePassword: true, sessionVersion: nextVersion, authenticationSync: 'pending' }).catch(() => null);
+    if (error instanceof HttpError && error.status === 409) throw error;
+    throw new HttpError(502, 'A sessão anterior foi bloqueada preventivamente, mas não foi possível concluir a troca. Use a nova senha se ela já tiver sido salva ou solicite uma redefinição à gestão.');
+  }
+  await audit(actor, 'user.password_change', 'user', actor.id, ['password','sessionVersion','mustChangePassword'], { password: '[redigida]', mustChangePassword: actor.mustChangePassword, sessionVersion: actor.sessionVersion }, { password: '[redigida]', mustChangePassword: false, sessionVersion: nextVersion });
   return { ok: true, message: 'Senha alterada. Entre novamente com a nova senha.' };
 }
 
@@ -409,7 +428,7 @@ async function apiGetReferenceData(token) {
   const actor = await verifyActor(token, true);
   const [developments, users] = await Promise.all([
     dbRequest('crm_developments', { query: { select: 'id,name,active', active: 'eq.true', order: 'name.asc' } }),
-    isAdmin(actor) || actor.role === 'SDR' ? listAll('crm_users', { select: '*' }) : Promise.resolve([])
+    isAdmin(actor) || actor.role === 'SDR' || isConfiguredOperationsManager(actor) ? listAll('crm_users', { select: '*' }) : Promise.resolve([])
   ]);
   return {
     systemName: CRM_CONFIG.systemName, user: publicUser(await getProfile(actor.id)), statuses: CRM_CONFIG.statuses,
@@ -418,7 +437,7 @@ async function apiGetReferenceData(token) {
     developments: (developments || []).map((item) => ({ id: item.id, name: item.name, active: item.active })),
     brokers: (users || []).map(mapUser).filter((item) => item.role === 'Corretor' && !item.deletedAt).map((item) => ({ id: item.id, name: item.name, email: item.email, role: item.role, active: item.active })),
     sdrs: (users || []).map(mapUser).filter((item) => item.role === 'SDR' && item.active && !item.deletedAt).map((item) => ({ id: item.id, name: item.name })),
-    managers: (users || []).map(mapUser).filter((item) => item.role === 'Gerente' && item.active && !item.deletedAt).map((item) => ({ id: item.id, name: item.name, role: item.role })),
+    managers: (users || []).map(mapUser).filter((item) => ['Gerente','Administrador'].includes(item.role) && item.active && !item.deletedAt).map((item) => ({ id: item.id, name: item.name, role: item.role })),
     sharedTemporaryPasswordAvailable: isAdmin(actor) && !((await dbRequest('crm_settings', { query: { select: 'key', key: 'eq.shared_temporary_password_applied', limit: 1 } })) || []).length
   };
 }
@@ -822,6 +841,43 @@ async function apiSaveOperationGoal(token, payload = {}) {
   return { ok: true, goalId: saved.id, revision: Number(saved.revision), message: `Meta salva para ${broker.name}; versão ${saved.revision} preservada no histórico.` };
 }
 
+async function apiSaveOperationGoalsBatch(token, payload = {}) {
+  const actor = await verifyActor(token); requireOperationsAccess(actor, ['manager']);
+  payload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  const cycle = String(payload.cycle || ''); const referenceDate = String(payload.referenceDate || '');
+  if (!['weekly','monthly'].includes(cycle) || !isValidDateOnly(referenceDate)) return { ok: false, message: 'Selecione um ciclo e uma data de referência válidos.' };
+  let startsOn; let endsOn;
+  if (cycle === 'weekly') {
+    const weekday = new Date(`${referenceDate}T00:00:00Z`).getUTCDay();
+    startsOn = addDateOnly(referenceDate, -((weekday + 6) % 7)); endsOn = addDateOnly(startsOn, 6);
+  } else { startsOn = `${referenceDate.slice(0,7)}-01`; endsOn = monthEndDateOnly(referenceDate); }
+  const users = await listAll('crm_users', { select: 'id,name,role,active,deleted_at' });
+  const brokers = users.filter((row) => row.role === 'Corretor' && row.active === true && !row.deleted_at);
+  if (!brokers.length) return { ok: false, message: 'Não há corretores ativos para configurar metas.' };
+  const entries = Array.isArray(payload.goals) ? payload.goals : [];
+  if (entries.length !== brokers.length) return { ok: false, message: 'A matriz precisa conter exatamente todos os corretores ativos. Atualize a tela e tente novamente.' };
+  const byId = new Map(entries.map((entry) => [String(entry && entry.brokerId || ''), entry]));
+  if (byId.size !== brokers.length || brokers.some((broker) => !byId.has(String(broker.id)))) return { ok: false, message: 'Cada corretor ativo deve aparecer uma única vez na matriz.' };
+  const goals = [];
+  for (const broker of brokers) {
+    const entry = byId.get(String(broker.id));
+    const metrics = entry && entry.targets && typeof entry.targets === 'object' ? entry.targets : {};
+    for (const [metric, key] of [['prospections','prospections'],['visits','visits'],['sales','sales']]) {
+      const target = parseOperationCount(metrics[key], `Meta de ${key}`);
+      if (target < 1) return { ok: false, message: `A meta de ${key} para ${broker.name} deve ser maior que zero.` };
+      goals.push({ broker_id: broker.id, metric, cycle, starts_on: startsOn, ends_on: endsOn, target_count: target });
+    }
+  }
+  const previousRows = await listAll('crm_production_goals', { select: 'broker_id,metric,target_count,revision,is_current', cycle: `eq.${cycle}`, starts_on: `eq.${startsOn}`, ends_on: `eq.${endsOn}`, is_current: 'eq.true' });
+  const response = await dbRequest('rpc/crm_save_operation_goals_batch', { method: 'POST', body: { p_goals: goals, p_actor_id: actor.id } });
+  const result = Array.isArray(response) ? response[0] : response;
+  if (!result || !result.results) throw new HttpError(502, 'Não foi possível salvar a matriz de metas. Nenhuma meta deve ser considerada atualizada.');
+  const previous = (previousRows || []).map((item) => ({ brokerId: item.broker_id, metric: item.metric, target: Number(item.target_count), revision: Number(item.revision) }));
+  const after = goals.map((item) => ({ brokerId: item.broker_id, metric: item.metric, target: Number(item.target_count), cycle, startsOn, endsOn }));
+  await audit(actor, 'operations.goal.batch_revise', 'operation_goal_batch', `${cycle}:${startsOn}`, ['targets'], { targets: previous }, { targets: after, revisions: result.results });
+  return { ok: true, count: goals.length, message: `Metas de ${brokers.length} corretor(es) atualizadas em uma única operação. As versões anteriores foram preservadas.` };
+}
+
 async function apiListAttendance(token, filters = {}) {
   const actor = await verifyActor(token); requireOperationsAccess(actor);
   const range = operationsDateRange(filters || {}); const access = operationsAccessOf(actor);
@@ -1043,7 +1099,7 @@ async function apiGetSdrWorklist(token) {
     byLead.set(key, current);
   });
   const timestamp = Date.now();
-  const terminal = new Set(['Desistência', 'Já comprou', 'Reprovado pela Caixa']);
+  const terminal = new Set(['Desistência', 'Já comprou']);
   const rows = context.leads.filter((lead) => !terminal.has(lead.status)).map((lead) => {
     const history = byLead.get(String(lead.id)) || [];
     const latest = history.slice().sort((a, b) => Number(b.attempt_number) - Number(a.attempt_number))[0];
@@ -1092,6 +1148,12 @@ function parseMoney(value, fieldName) {
   return Math.round(amount * 100) / 100;
 }
 
+function splitMoneyHalf(value) {
+  const cents = Math.max(0, Math.round(Number(value || 0) * 100));
+  const first = Math.floor(cents / 2);
+  return { first: first / 100, second: (cents - first) / 100 };
+}
+
 function parseOptionalPercent(value, fieldName) {
   const raw = String(value === undefined || value === null ? '' : value).trim();
   if (!raw) return null;
@@ -1117,10 +1179,11 @@ function safeFileName(value) {
   return base || 'documento';
 }
 
-async function apiListSales(token) {
+async function apiListSales(token, filters = {}) {
   const actor = await verifyActor(token); requireAdmin(actor);
+  const includeArchived = Boolean(filters && filters.includeArchived === true);
   const [sales, receipts, users, developments] = await Promise.all([
-    listAll('crm_sales', { select: '*', deleted_at: 'is.null' }), listAll('crm_sales_receipts', { select: '*' }),
+    listAll('crm_sales', includeArchived ? { select: '*' } : { select: '*', deleted_at: 'is.null' }), listAll('crm_sales_receipts', { select: '*' }),
     listAll('crm_users', { select: '*' }), listAll('crm_developments', { select: '*' })
   ]);
   const receiptGroups = new Map();
@@ -1139,16 +1202,23 @@ async function apiListSales(token) {
     return { id: row.id, internalNumber: row.internal_number, processNumber: row.process_number || '', leadId: row.lead_id || '', buyerName: row.buyer_name,
       developmentId: row.development_id || '', developmentName: development ? development.name : '', brokerId: row.broker_id,
       brokerName: broker ? broker.name : 'Corretor inativo', soldAt: row.sold_at, unit: row.unit || '', unitValue: Number(row.unit_value || 0),
-      saleStatus: row.sale_status, hasPending: row.has_pending === true, pendingDescription: row.pending_description || '',
-      accounted: row.accounted === true, accountedAt: row.accounted_at || '', expectedRepass: Number(row.expected_repass || 0),
-      receivedRepass: received, balanceRepass: Math.round((Number(row.expected_repass || 0) - received) * 100) / 100,
-      repassStatus: row.repass_status, notes: row.notes || '', receipts: payments.sort((a, b) => String(b.receivedAt).localeCompare(String(a.receivedAt))) };
+      saleStatus: ['Contabilizado','Pendência para contabilização'].includes(row.sale_status) ? row.sale_status : (row.sale_status === 'Cancelada' ? 'Cancelada' : (row.accounted === true ? 'Contabilizado' : 'Pendência para contabilização')),
+      legacySaleStatus: ['Contabilizado','Pendência para contabilização'].includes(row.sale_status) ? '' : row.sale_status,
+      hasPending: row.has_pending === true, pendingDescription: row.pending_description || '',
+      accounted: row.accounted === true, accountedAt: row.accounted_at || '', commissionRatePct: row.commission_rate_pct === null || row.commission_rate_pct === undefined ? null : Number(row.commission_rate_pct),
+      grossCommission: Number(row.gross_commission || 0), brokerCommission: Number(row.broker_commission === null || row.broker_commission === undefined ? row.expected_repass || 0 : row.broker_commission),
+      sdrCommission: Number(row.sdr_commission || 0), managerCommissionRatePct: row.manager_commission_rate_pct === null || row.manager_commission_rate_pct === undefined ? null : Number(row.manager_commission_rate_pct),
+      managerCommissionValue: Number(row.manager_commission_value || 0), hasPrize: row.has_prize === true,
+      prizeRatePct: row.prize_rate_pct === null || row.prize_rate_pct === undefined ? null : Number(row.prize_rate_pct), grossPrize: Number(row.gross_prize || 0),
+      brokerPrize: Number(row.broker_prize || 0), sdrPrize: Number(row.sdr_prize || 0), expectedRepass: Number(row.broker_commission === null || row.broker_commission === undefined ? row.expected_repass || 0 : row.broker_commission),
+      receivedRepass: received, balanceRepass: Math.round((Number(row.broker_commission === null || row.broker_commission === undefined ? row.expected_repass || 0 : row.broker_commission) - received) * 100) / 100,
+      repassStatus: row.repass_status, notes: row.notes || '', deletedAt: row.deleted_at || '', deletedBy: row.deleted_by || '', receipts: payments.sort((a, b) => String(b.receivedAt).localeCompare(String(a.receivedAt))) };
   }).sort((a, b) => String(b.soldAt).localeCompare(String(a.soldAt)) || String(b.internalNumber).localeCompare(String(a.internalNumber)));
 }
 
 async function apiSaveSale(token, payload = {}) {
   const actor = await verifyActor(token); requireAdmin(actor);
-  const allowed = ['id','processNumber','leadId','buyerName','developmentId','brokerId','soldAt','unit','unitValue','saleStatus','hasPending','pendingDescription','accounted','expectedRepass','repassStatus','notes'];
+  const allowed = ['id','processNumber','leadId','buyerName','developmentId','brokerId','soldAt','unit','unitValue','saleStatus','hasPending','pendingDescription','accounted','expectedRepass','repassStatus','notes','commissionRatePct','managerCommissionRatePct','hasPrize','prizeRatePct'];
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).some((key) => !allowed.includes(key))) return { ok: false, message: 'Campos da venda inválidos.' };
   const buyerName = String(payload.buyerName || '').trim();
   const processNumber = String(payload.processNumber || '').trim().slice(0, 100);
@@ -1156,14 +1226,25 @@ async function apiSaveSale(token, payload = {}) {
   const brokerId = String(payload.brokerId || '').trim();
   const soldAt = String(payload.soldAt || '').slice(0, 10);
   const unit = String(payload.unit || '').trim().slice(0, 100);
-  const saleStatus = String(payload.saleStatus || 'Cadastrada');
-  const repassStatus = String(payload.repassStatus || 'AGUARDANDO PJ');
+  const saleStatus = String(payload.saleStatus || 'Pendência para contabilização');
+  const repassStatus = String(payload.repassStatus || 'FASE DO REGISTRO');
   if (!buyerName || buyerName.length > 150) return { ok: false, message: 'Informe o nome do cliente da venda.' };
   if (!developmentId || !brokerId || !isValidDateOnly(soldAt) || !unit) return { ok: false, message: 'Empreendimento, corretor, data da venda válida e unidade são obrigatórios.' };
-  if (!['Cadastrada','Em conferência','Com pendência','Regularizada','Cancelada'].includes(saleStatus)) return { ok: false, message: 'Status da venda inválido.' };
-  if (!CRM_CONFIG.repassStatuses.includes(repassStatus)) return { ok: false, message: 'Fase do repasse inválida.' };
   const unitValue = parseMoney(payload.unitValue, 'Valor da unidade');
-  const expectedRepass = parseMoney(payload.expectedRepass, 'Valor previsto do repasse');
+  const commissionRatePct = parseOptionalPercent(payload.commissionRatePct, 'Percentual de comissão');
+  const managerCommissionRatePct = parseOptionalPercent(payload.managerCommissionRatePct, 'Percentual de comissão do gerente');
+  const hasPrize = payload.hasPrize === true;
+  const prizeRatePct = hasPrize ? parseOptionalPercent(payload.prizeRatePct, 'Percentual do prêmio') : null;
+  if (hasPrize && prizeRatePct === null) return { ok: false, message: 'Informe o percentual do prêmio ou desmarque a opção de prêmio.' };
+  const grossCommission = commissionRatePct === null ? null : Math.round(unitValue * commissionRatePct) / 100;
+  const commissionSplit = grossCommission === null ? null : splitMoneyHalf(grossCommission);
+  const brokerCommission = commissionSplit ? commissionSplit.first : null;
+  const sdrCommission = commissionSplit ? commissionSplit.second : null;
+  const managerCommissionValue = managerCommissionRatePct === null ? 0 : Math.round(unitValue * managerCommissionRatePct) / 100;
+  const grossPrize = prizeRatePct === null ? 0 : Math.round(unitValue * prizeRatePct) / 100;
+  const prizeSplit = splitMoneyHalf(grossPrize);
+  const brokerPrize = prizeSplit.first;
+  const sdrPrize = prizeSplit.second;
   const pendingDescription = String(payload.pendingDescription || '').trim().slice(0, 2000);
   const notes = String(payload.notes || '').trim().slice(0, 3000);
   const id = String(payload.id || '').trim();
@@ -1171,6 +1252,28 @@ async function apiSaveSale(token, payload = {}) {
   const existingRows = id ? await dbRequest('crm_sales', { query: { select: '*', id: `eq.${id}`, deleted_at: 'is.null', limit: 1 } }) : null;
   const existing = Array.isArray(existingRows) ? existingRows[0] || null : null;
   if (id && !existing) return { ok: false, message: 'Venda não encontrada.' };
+  if (!['Contabilizado','Pendência para contabilização'].includes(saleStatus) && !(existing && saleStatus === existing.sale_status)) return { ok: false, message: 'Status da venda inválido.' };
+  const legacyRepassStatuses = new Set(['AGUARDANDO PJ','LIBERADO P/ REPASSE','IR FUTURO','PENDÊNCIA PARA LIBERAÇÃO DO REPASSE','REPASSE SFH','ANÁLISE DE CRÉDITO','EMISSÃO DE FORMULÁRIOS','FGTS EM DÉBITO','FGTS EM RESSARCIMENTO','FGTS COM ERRO','FORMULÁRIOS EM ASSINATURA','FORMULÁRIOS ASSINADOS','CRITICADO E ENVIADO P/ CONFORMIDADE','PENDÊNCIA DURANTE O REPASSE','INCONFORME','REANÁLISE DA CONFORMIDADE','CONFORME','AGUARDANDO DEMANDA MÍNIMA','CONFIRMAÇÃO DE VALORES COM CLIENTE','EMISSÃO CONFISSÃO DE DÍVIDA / SOLICITAÇÃO DE CONTRATO','CONTRATO EMITIDO','CONTRATO E CONFISSÃO DE DÍVIDA EM ASSINATURA','CONTRATO EM ASSINATURA E CONFISSÃO ASSINADA','CONTRATO ASSINADO E CONFISSÃO PENDENTE','PROBLEMA NA ASSINATURA DO FINANCIAMENTO','CONTRATO E CONFISSÃO ASSINADOS','CHECK-LIST DE REPASSE APTO PARA CONFERENCIA','AGUARDANDO REPACTUAÇÃO','CHECK-LIST DE REPASSE REPROVADO','CHECK-LIST DE REPASSE APROVADO','Aguardando repasse','Em andamento','Repasse parcial','Repasse concluído','Suspenso','Cancelado']);
+  const validNewRepass = CRM_CONFIG.repassStatuses.includes(repassStatus);
+  const validUnchangedLegacyRepass = existing && repassStatus === existing.repass_status && legacyRepassStatuses.has(repassStatus);
+  if (!validNewRepass && !validUnchangedLegacyRepass) return { ok: false, message: 'Fase do repasse inválida.' };
+  if (!existing && commissionRatePct === null) return { ok: false, message: 'Informe o percentual da comissão para calcular automaticamente o valor bruto e a parte do corretor.' };
+  const effectiveCommissionRate = commissionRatePct === null && existing && existing.commission_rate_pct !== null && existing.commission_rate_pct !== undefined ? Number(existing.commission_rate_pct) : commissionRatePct;
+  const effectiveGrossCommission = effectiveCommissionRate === null ? Number(existing && existing.gross_commission || 0) : Math.round(unitValue * effectiveCommissionRate) / 100;
+  const effectiveCommissionSplit = effectiveCommissionRate === null ? null : splitMoneyHalf(effectiveGrossCommission);
+  const effectiveBrokerCommission = effectiveCommissionSplit ? effectiveCommissionSplit.first : null;
+  const effectiveSdrCommission = effectiveCommissionSplit ? effectiveCommissionSplit.second : Number(existing && existing.sdr_commission || 0);
+  const expectedRepass = effectiveBrokerCommission === null
+    ? parseMoney(payload.expectedRepass === undefined ? (existing ? existing.expected_repass : 0) : payload.expectedRepass, 'Comissão do corretor')
+    : effectiveBrokerCommission;
+  const effectiveManagerRate = managerCommissionRatePct === null && existing && existing.manager_commission_rate_pct !== null && existing.manager_commission_rate_pct !== undefined ? Number(existing.manager_commission_rate_pct) : managerCommissionRatePct;
+  const effectiveManagerValue = effectiveManagerRate === null ? Number(existing && existing.manager_commission_value || 0) : Math.round(unitValue * effectiveManagerRate) / 100;
+  const effectiveHasPrize = Object.prototype.hasOwnProperty.call(payload,'hasPrize') ? hasPrize : existing && existing.has_prize === true;
+  const effectivePrizeRate = prizeRatePct === null && effectiveHasPrize && existing && existing.prize_rate_pct !== null && existing.prize_rate_pct !== undefined ? Number(existing.prize_rate_pct) : prizeRatePct;
+  const effectiveGrossPrize = effectivePrizeRate === null ? Number(existing && existing.gross_prize || 0) : Math.round(unitValue * effectivePrizeRate) / 100;
+  const effectivePrizeSplit = splitMoneyHalf(effectiveGrossPrize);
+  const effectiveBrokerPrize = effectivePrizeSplit.first;
+  const effectiveSdrPrize = effectivePrizeSplit.second;
   const userRows = await listAll('crm_users', { select: '*' });
   const broker = userRows.find((item) => String(item.id) === brokerId && item.role === 'Corretor' && ((item.active === true && !item.deleted_at) || (existing && String(existing.broker_id) === brokerId)));
   const developmentRows = await listAll('crm_developments', { select: 'id,name,active' });
@@ -1189,14 +1292,21 @@ async function apiSaveSale(token, payload = {}) {
     if (!lead || lead.deleted_at) return { ok: false, message: 'O cliente vinculado não está disponível.' };
     if (String(lead.broker_id) !== brokerId) return { ok: false, message: 'O corretor da venda precisa ser o responsável pelo cliente vinculado.' };
   }
-  const accounted = payload.accounted === true;
+  const accounted = saleStatus === 'Contabilizado';
   const stamp = now();
   const values = { process_number: processNumber, lead_id: leadId || null, buyer_name: buyerName, development_id: developmentId, broker_id: brokerId,
     sold_at: soldAt, unit, unit_value: unitValue, sale_status: saleStatus, has_pending: payload.hasPending === true,
     pending_description: pendingDescription, accounted, accounted_at: accounted ? (existing && existing.accounted_at || stamp) : null,
-    accounted_by: accounted ? (existing && existing.accounted ? existing.accounted_by : actor.id) : null, expected_repass: expectedRepass, repass_status: repassStatus, notes, updated_at: stamp, updated_by: actor.id };
-  const before = existing ? { internalNumber: existing.internal_number, processNumber: existing.process_number || '', leadId: existing.lead_id || '', buyerName: existing.buyer_name, developmentId: existing.development_id, brokerId: existing.broker_id, soldAt: existing.sold_at, unit: existing.unit, unitValue: Number(existing.unit_value), saleStatus: existing.sale_status, hasPending: existing.has_pending, pendingDescription: existing.pending_description, accounted: existing.accounted, expectedRepass: Number(existing.expected_repass), repassStatus: existing.repass_status, notes: existing.notes } : {};
-  const after = { processNumber, leadId: leadId || '', buyerName, developmentId, brokerId, soldAt, unit, unitValue, saleStatus, hasPending: payload.hasPending === true, pendingDescription, accounted, expectedRepass, repassStatus, notes };
+    accounted_by: accounted ? (existing && existing.accounted ? existing.accounted_by : actor.id) : null, expected_repass: expectedRepass, repass_status: repassStatus,
+    commission_rate_pct: effectiveCommissionRate, gross_commission: effectiveGrossCommission, broker_commission: effectiveBrokerCommission === null ? Number(existing && existing.broker_commission === null ? existing.expected_repass : existing && existing.broker_commission || expectedRepass) : effectiveBrokerCommission,
+    sdr_commission: effectiveSdrCommission, manager_commission_rate_pct: effectiveManagerRate, manager_commission_value: effectiveManagerValue,
+    has_prize: Boolean(effectiveHasPrize), prize_rate_pct: effectiveHasPrize ? effectivePrizeRate : null, gross_prize: effectiveHasPrize ? effectiveGrossPrize : 0,
+    broker_prize: effectiveHasPrize ? effectiveBrokerPrize : 0, sdr_prize: effectiveHasPrize ? effectiveSdrPrize : 0,
+    notes, updated_at: stamp, updated_by: actor.id };
+  const before = existing ? { internalNumber: existing.internal_number, processNumber: existing.process_number || '', leadId: existing.lead_id || '', buyerName: existing.buyer_name, developmentId: existing.development_id, brokerId: existing.broker_id, soldAt: existing.sold_at, unit: existing.unit, unitValue: Number(existing.unit_value), saleStatus: existing.sale_status, hasPending: existing.has_pending, pendingDescription: existing.pending_description, accounted: existing.accounted, expectedRepass: Number(existing.expected_repass), commissionRatePct: existing.commission_rate_pct, grossCommission: existing.gross_commission, brokerCommission: existing.broker_commission, managerCommissionRatePct: existing.manager_commission_rate_pct, managerCommissionValue: existing.manager_commission_value, hasPrize: existing.has_prize, prizeRatePct: existing.prize_rate_pct, grossPrize: existing.gross_prize, repassStatus: existing.repass_status, notes: existing.notes } : {};
+  const after = { processNumber, leadId: leadId || '', buyerName, developmentId, brokerId, soldAt, unit, unitValue, saleStatus, hasPending: payload.hasPending === true, pendingDescription, accounted, expectedRepass,
+    commissionRatePct: values.commission_rate_pct, grossCommission: values.gross_commission, brokerCommission: values.broker_commission, sdrCommission: values.sdr_commission,
+    managerCommissionRatePct: values.manager_commission_rate_pct, managerCommissionValue: values.manager_commission_value, hasPrize: values.has_prize, prizeRatePct: values.prize_rate_pct, grossPrize: values.gross_prize, repassStatus, notes };
   const changedFields = auditChangedFields(before, after);
   if (existing && !changedFields.length) return { ok: true, saleId: existing.id, internalNumber: existing.internal_number, message: 'Nenhuma alteração detectada.' };
   let saved;
@@ -1215,20 +1325,47 @@ async function apiSaveSale(token, payload = {}) {
   return { ok: true, saleId: saved.id, internalNumber: saved.internal_number, message: existing ? 'Venda atualizada.' : `Venda cadastrada com o número ${saved.internal_number}.` };
 }
 
+async function apiArchiveSale(token, saleId) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  if (!isUuid(saleId)) return { ok: false, message: 'Venda inválida.' };
+  const rows = await dbRequest('crm_sales', { query: { select: '*', id: `eq.${saleId}`, deleted_at: 'is.null', limit: 1 } });
+  const row = Array.isArray(rows) ? rows[0] : null;
+  if (!row) return { ok: false, message: 'Venda não encontrada ou já excluída.' };
+  const stamp = now();
+  const updated = await dbRequest('crm_sales', { method: 'PATCH', query: { id: `eq.${saleId}`, deleted_at: 'is.null' }, prefer: 'return=representation', body: { deleted_at: stamp, deleted_by: actor.id, updated_at: stamp, updated_by: actor.id } });
+  if (!Array.isArray(updated) || !updated.length) return { ok: false, message: 'A venda foi alterada por outro usuário. Atualize a tela.' };
+  await audit(actor, 'sale.archive', 'sale', saleId, ['deletedAt'], { deletedAt: null, processNumber: row.process_number, buyerName: row.buyer_name }, { deletedAt: stamp, processNumber: row.process_number, buyerName: row.buyer_name, receiptsPreserved: true });
+  return { ok: true, message: 'Venda excluída da visão ativa e preservada com contratos, recebimentos e histórico. Ela pode ser restaurada pela gestão.' };
+}
+
+async function apiRestoreSale(token, saleId) {
+  const actor = await verifyActor(token); requireAdmin(actor);
+  if (!isUuid(saleId)) return { ok: false, message: 'Venda inválida.' };
+  const rows = await dbRequest('crm_sales', { query: { select: '*', id: `eq.${saleId}`, deleted_at: 'not.is.null', limit: 1 } });
+  const row = Array.isArray(rows) ? rows[0] : null;
+  if (!row) return { ok: false, message: 'Venda excluída não encontrada.' };
+  const stamp = now();
+  const updated = await dbRequest('crm_sales', { method: 'PATCH', query: { id: `eq.${saleId}`, deleted_at: 'not.is.null' }, prefer: 'return=representation', body: { deleted_at: null, deleted_by: null, updated_at: stamp, updated_by: actor.id } });
+  if (!Array.isArray(updated) || !updated.length) return { ok: false, message: 'A venda foi alterada por outro usuário. Atualize a tela.' };
+  await audit(actor, 'sale.restore', 'sale', saleId, ['deletedAt'], { deletedAt: row.deleted_at, processNumber: row.process_number, buyerName: row.buyer_name }, { deletedAt: null, processNumber: row.process_number, buyerName: row.buyer_name, receiptsPreserved: true });
+  return { ok: true, message: 'Venda restaurada para a visão ativa. O histórico e os documentos vinculados foram preservados.' };
+}
+
 async function apiAddSaleReceipt(token, saleId, payload = {}) {
   const actor = await verifyActor(token); requireAdmin(actor);
   if (!isUuid(saleId)) return { ok: false, message: 'Venda inválida.' };
-  const amount = parseMoney(payload.amount, 'Valor recebido');
   const receivedAt = String(payload.receivedAt || '').slice(0, 10);
   const notes = String(payload.notes || '').trim().slice(0, 1000);
-  if (amount <= 0 || !isValidDateOnly(receivedAt)) return { ok: false, message: 'Informe um valor maior que zero e uma data válida para o recebimento.' };
-  const response = await dbRequest('rpc/crm_add_sale_receipt', { method: 'POST', body: { p_sale_id: saleId, p_actor_id: actor.id, p_amount: amount, p_received_at: receivedAt, p_notes: notes } });
+  if (!isValidDateOnly(receivedAt)) return { ok: false, message: 'Informe uma data válida para o recebimento integral.' };
+  const response = await dbRequest('rpc/crm_add_sale_receipt_full', { method: 'POST', body: { p_sale_id: saleId, p_actor_id: actor.id, p_received_at: receivedAt, p_notes: notes } });
   const result = Array.isArray(response) ? response[0] : response;
   if (!result) throw new HttpError(502, 'Não foi possível registrar o recebimento.');
+  const amount = Number(result.amount || 0);
   const beforeValues = { receivedAmount: Math.round((Number(result.received_total) - amount) * 100) / 100, balanceRepass: Number(result.balance) + amount };
   const afterValues = { receivedAmount: Number(result.received_total), receivedAt, balanceRepass: Number(result.balance), notes };
   await audit(actor, 'sale.receipt.create', 'sale', saleId, auditChangedFields(beforeValues, afterValues), beforeValues, afterValues);
-  return { ok: true, message: 'Recebimento registrado; a fase selecionada pela gestão foi preservada.', totalReceived: Number(result.received_total), balance: Number(result.balance), repassStatus: result.repass_status };
+  await audit(actor, 'sale.repass.phase_auto_paid', 'sale', saleId, ['repassStatus'], { repassStatus: result.previous_status }, { repassStatus: 'COMISSÃO PAGA', receivedAt });
+  return { ok: true, message: 'Recebimento integral registrado. A fase do repasse foi atualizada para COMISSÃO PAGA.', totalReceived: Number(result.received_total), balance: Number(result.balance), repassStatus: result.repass_status };
 }
 
 async function apiVoidSaleReceipt(token, receiptId, payload = {}) {
@@ -1249,7 +1386,7 @@ async function apiVoidSaleReceipt(token, receiptId, payload = {}) {
     ['recebimento','repasse_recebido','saldo_repasse','motivo'],
     { receiptId, receivedAmount: totalBefore, balanceRepass: balance - amount },
     { receiptId, voidedAmount: amount, receivedAmount: totalAfter, balanceRepass: balance, receivedAt: result.received_at, reason });
-  return { ok: true, message: 'Recebimento anulado com justificativa; o histórico foi preservado e a fase do repasse não foi alterada.', totalReceived: totalAfter, balance, repassStatus: result.repass_status };
+  return { ok: true, message: result.phase_restored ? 'Recebimento anulado com justificativa. A fase anterior do repasse foi restaurada e o histórico foi preservado.' : 'Recebimento anulado com justificativa; o histórico foi preservado. A fase foi mantida porque já havia sido alterada depois do lançamento.', totalReceived: totalAfter, balance, repassStatus: result.repass_status };
 }
 
 async function apiListBrokerProfiles(token) {
@@ -1320,6 +1457,7 @@ const DEFAULT_CONTRACT_TEMPLATE_HTML = `<!doctype html>
   <h2>3. COMISSÃO E PRÊMIO</h2>
   <table><tr><td><span class="label">Comissão total (percentual: {{percentual_comissao}})</span><span class="value">{{comissao_bruta}}</span></td><td><span class="label">Base de cálculo</span><span class="value">{{base_calculo_comissao}}</span></td></tr>
   <tr><td><span class="label">Corretor — 50%</span><span class="value">{{comissao_corretor}}</span></td><td><span class="label">SDR — 50%</span><span class="value">{{comissao_sdr}}</span></td></tr>
+  <tr><td><span class="label">Gerente — percentual / valor</span><span class="value">{{percentual_comissao_gerente}} / {{comissao_gerente}}</span></td><td><span class="label">Divisão corretor / SDR</span><span class="value">50% para cada</span></td></tr>
   <tr><td><span class="label">Prêmio aplicável?</span><span class="value">{{premio_aplicavel}}</span></td><td><span class="label">Percentual do prêmio / Prêmio total</span><span class="value">{{percentual_premio}} / {{premio_bruto}}</span></td></tr>
   <tr><td><span class="label">Prêmio corretor — 50%</span><span class="value">{{premio_corretor}}</span></td><td><span class="label">Prêmio SDR — 50%</span><span class="value">{{premio_sdr}}</span></td></tr></table>
   <h2>4. CONDIÇÕES E ACEITE DO ACORDO</h2>
@@ -1348,7 +1486,7 @@ const CONTRACT_PLACEHOLDERS = [
   '{{numero_contrato}}','{{numero_processo}}','{{numero_proposta}}','{{cliente_nome}}','{{cliente_cpf}}','{{cliente_endereco}}',
   '{{empreendimento}}','{{unidade}}','{{valor_unidade}}','{{corretor_nome}}','{{corretor_cpf}}','{{corretor_cnpj}}',
   '{{corretor_creci}}','{{corretor_endereco}}','{{sdr_nome}}','{{sdr_cpf}}','{{gerente_nome}}','{{percentual_comissao}}',
-  '{{base_calculo_comissao}}','{{comissao_bruta}}','{{comissao_corretor}}','{{comissao_sdr}}','{{premio_aplicavel}}',
+  '{{base_calculo_comissao}}','{{comissao_bruta}}','{{comissao_corretor}}','{{comissao_sdr}}','{{percentual_comissao_gerente}}','{{comissao_gerente}}','{{premio_aplicavel}}',
   '{{percentual_premio}}','{{premio_bruto}}','{{premio_corretor}}','{{premio_sdr}}','{{data_geracao}}'
 ];
 
@@ -1398,7 +1536,7 @@ async function apiSaveContract(token, payload = {}) {
   const actor = await verifyActor(token); requireAdmin(actor);
   payload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
   const id = String(payload.id || '').trim();
-  const allowed = ['id','leadId','brokerId','sdrId','sdrCpf','managerId','buyerName','buyerCpf','buyerAddress','developmentId','unit','unitValue','proposalNumber','commissionBase','commissionRatePct','grossCommission','hasPrize','prizeRatePct','grossPrize'];
+  const allowed = ['id','leadId','brokerId','sdrId','sdrCpf','managerId','buyerName','buyerCpf','buyerAddress','developmentId','unit','unitValue','proposalNumber','commissionBase','commissionRatePct','grossCommission','managerCommissionRatePct','managerCommissionValue','hasPrize','prizeRatePct','grossPrize'];
   allowed.push('saleId','processNumber');
   if (Object.keys(payload).some((key) => !allowed.includes(key))) return { ok: false, message: 'Campos do contrato inválidos.' };
   const saleId = String(payload.saleId || '').trim();
@@ -1423,7 +1561,7 @@ async function apiSaveContract(token, payload = {}) {
   if (sale && payload.brokerId && String(payload.brokerId) !== brokerId) return { ok: false, message: 'O corretor do contrato precisa corresponder ao corretor responsável pela venda.' };
   const broker = users.find((item) => item.id === brokerId && item.role === 'Corretor' && !item.deleted_at && (item.active || sale && String(sale.broker_id) === brokerId));
   const sdr = users.find((item) => item.id === String(payload.sdrId || '') && item.role === 'SDR' && item.active && !item.deleted_at);
-  const manager = users.find((item) => item.id === String(payload.managerId || actor.id) && item.role === 'Gerente' && item.active && !item.deleted_at);
+  const manager = users.find((item) => item.id === String(payload.managerId || actor.id) && ['Gerente','Administrador'].includes(item.role) && item.active && !item.deleted_at);
   if (!broker || lead && broker.id !== lead.broker_id) return { ok: false, message: 'Selecione o corretor responsável pela venda ou pela carteira do cliente.' };
   if (!sdr) return { ok: false, message: 'Selecione o SDR que assinará o documento.' };
   if (!manager) return { ok: false, message: 'Selecione um gerente ou administrador como signatário.' };
@@ -1437,19 +1575,32 @@ async function apiSaveContract(token, payload = {}) {
   if (!unit) return { ok: false, message: 'Informe a unidade escolhida.' };
   const saleBuyerName = sale ? sale.buyer_name : lead && lead.name;
   const saleUnitValue = sale ? Number(sale.unit_value || 0) : null;
+  const contractUnitValue = sale ? parseMoney(sale.unit_value, 'Valor da unidade') : parseMoney(payload.unitValue, 'Valor da unidade');
+  const inputCommissionRate = parseOptionalPercent(payload.commissionRatePct, 'Percentual da comissão');
+  const commissionRate = sale && sale.commission_rate_pct !== null && sale.commission_rate_pct !== undefined ? Number(sale.commission_rate_pct) : inputCommissionRate;
+  const storedSaleGross = sale && sale.gross_commission !== null && sale.gross_commission !== undefined ? Number(sale.gross_commission) : null;
+  const grossCommission = storedSaleGross !== null && storedSaleGross > 0 ? storedSaleGross
+    : commissionRate !== null ? Math.round(contractUnitValue * commissionRate) / 100 : parseMoney(payload.grossCommission, 'Comissão bruta');
+  const inputPrizeRate = payload.hasPrize === true ? parseOptionalPercent(payload.prizeRatePct, 'Percentual do prêmio') : null;
+  const prizeRate = sale && sale.prize_rate_pct !== null && sale.prize_rate_pct !== undefined ? Number(sale.prize_rate_pct) : inputPrizeRate;
+  const grossPrize = payload.hasPrize === true ? (sale && Number(sale.gross_prize || 0) > 0 ? Number(sale.gross_prize) : prizeRate !== null ? Math.round(contractUnitValue * prizeRate) / 100 : parseMoney(payload.grossPrize, 'Prêmio bruto')) : 0;
+  const inputManagerRate = parseOptionalPercent(payload.managerCommissionRatePct, 'Percentual da comissão do gerente');
+  const managerRate = sale && sale.manager_commission_rate_pct !== null && sale.manager_commission_rate_pct !== undefined ? Number(sale.manager_commission_rate_pct) : inputManagerRate;
+  const managerValue = sale && Number(sale.manager_commission_value || 0) > 0 ? Number(sale.manager_commission_value) : managerRate !== null ? Math.round(contractUnitValue * managerRate) / 100 : parseMoney(payload.managerCommissionValue, 'Comissão do gerente');
   const values = { sale_id: saleId || null, lead_id: leadId || null, process_number: String(sale ? sale.process_number || '' : payload.processNumber || '').trim().slice(0, 100),
     broker_id: broker.id, sdr_id: sdr.id, sdr_cpf: String(payload.sdrCpf || '').trim().slice(0, 30), manager_id: manager.id,
     buyer_name: String(sale ? saleBuyerName : payload.buyerName || saleBuyerName || '').trim().slice(0, 150), buyer_cpf: String(payload.buyerCpf || '').trim().slice(0, 30),
     buyer_address: String(payload.buyerAddress || '').trim().slice(0, 500), development_id: developmentId, unit,
     proposal_number: String(payload.proposalNumber || '').trim().slice(0, 100),
-    unit_value: sale ? parseMoney(saleUnitValue, 'Valor da unidade') : parseMoney(payload.unitValue, 'Valor da unidade'), commission_base: parseMoney(payload.commissionBase, 'Base de cálculo da comissão'),
-    commission_rate_pct: parseOptionalPercent(payload.commissionRatePct, 'Percentual da comissão'), gross_commission: parseMoney(payload.grossCommission, 'Comissão bruta'),
-    has_prize: payload.hasPrize === true, prize_rate_pct: payload.hasPrize === true ? parseOptionalPercent(payload.prizeRatePct, 'Percentual do prêmio') : null,
-    gross_prize: payload.hasPrize === true ? parseMoney(payload.grossPrize, 'Prêmio bruto') : 0, updated_at: now(), updated_by: actor.id };
+    unit_value: contractUnitValue, commission_base: contractUnitValue,
+    commission_rate_pct: commissionRate, gross_commission: grossCommission,
+    manager_commission_rate_pct: managerRate, manager_commission_value: managerValue,
+    has_prize: payload.hasPrize === true, prize_rate_pct: payload.hasPrize === true ? prizeRate : null,
+    gross_prize: grossPrize, updated_at: now(), updated_by: actor.id };
   if (!values.buyer_name) return { ok: false, message: 'Informe o nome do cliente.' };
   if (values.unit_value <= 0) return { ok: false, message: 'O valor da venda precisa ser maior que zero.' };
   if (values.gross_commission <= 0) return { ok: false, message: 'Informe a comissão bruta total da operação.' };
-  if (values.has_prize && values.gross_prize <= 0) return { ok: false, message: 'Informe o valor bruto do prêmio ou desmarque a opção de prêmio.' };
+  if (values.has_prize && values.gross_prize <= 0) return { ok: false, message: 'Informe o percentual do prêmio ou desmarque a opção de prêmio.' };
   let existing = null;
   let beforeValues = {};
   if (id) {
@@ -1460,7 +1611,8 @@ async function apiSaveContract(token, payload = {}) {
     beforeValues = { contractNumber: existing.contract_number, sale_id: existing.sale_id || null, lead_id: existing.lead_id || null, process_number: existing.process_number || '', broker_id: existing.broker_id, sdr_id: existing.sdr_id, manager_id: existing.manager_id,
       sdr_cpf: existing.sdr_cpf || '', buyer_name: existing.buyer_name, buyer_cpf: existing.buyer_cpf, buyer_address: existing.buyer_address, development_id: existing.development_id,
       unit: existing.unit, proposal_number: existing.proposal_number || '', unit_value: Number(existing.unit_value), commission_base: Number(existing.commission_base || 0), commission_rate_pct: existing.commission_rate_pct === null ? null : Number(existing.commission_rate_pct),
-      gross_commission: Number(existing.gross_commission), has_prize: existing.has_prize, prize_rate_pct: existing.prize_rate_pct === null ? null : Number(existing.prize_rate_pct), gross_prize: Number(existing.gross_prize) };
+      gross_commission: Number(existing.gross_commission), manager_commission_rate_pct: existing.manager_commission_rate_pct === null ? null : Number(existing.manager_commission_rate_pct), manager_commission_value: Number(existing.manager_commission_value || 0),
+      has_prize: existing.has_prize, prize_rate_pct: existing.prize_rate_pct === null ? null : Number(existing.prize_rate_pct), gross_prize: Number(existing.gross_prize) };
     const result = await dbRequest('crm_contracts', { method: 'PATCH', query: { id: `eq.${id}` }, prefer: 'return=representation', body: values });
     existing = Array.isArray(result) ? result[0] : existing;
   } else {
@@ -1472,7 +1624,8 @@ async function apiSaveContract(token, payload = {}) {
   const afterValues = { sale_id: values.sale_id, lead_id: values.lead_id, process_number: values.process_number, broker_id: values.broker_id, sdr_id: values.sdr_id, sdr_cpf: values.sdr_cpf, manager_id: values.manager_id,
     buyer_name: values.buyer_name, buyer_cpf: values.buyer_cpf, buyer_address: values.buyer_address, development_id: values.development_id,
     unit: values.unit, proposal_number: values.proposal_number, unit_value: values.unit_value, commission_base: values.commission_base, commission_rate_pct: values.commission_rate_pct,
-    gross_commission: values.gross_commission, has_prize: values.has_prize, prize_rate_pct: values.prize_rate_pct, gross_prize: values.gross_prize };
+    gross_commission: values.gross_commission, manager_commission_rate_pct: values.manager_commission_rate_pct, manager_commission_value: values.manager_commission_value,
+    has_prize: values.has_prize, prize_rate_pct: values.prize_rate_pct, gross_prize: values.gross_prize };
   afterValues.contractNumber = existing.contract_number;
   await audit(actor, id ? 'contract.update' : 'contract.create', 'contract', existing.id, auditChangedFields(beforeValues, afterValues), beforeValues, afterValues);
   return { ok: true, contractId: existing.id, message: id ? 'Rascunho atualizado.' : 'Rascunho de contrato criado.' };
@@ -1495,6 +1648,7 @@ async function apiListContracts(token) {
     developmentName: (developments.find((item) => item.id === row.development_id) || {}).name || '', unit: row.unit, unitValue: Number(row.unit_value),
     proposalNumber: row.proposal_number || '', sdrCpf: row.sdr_cpf || '', commissionBase: Number(row.commission_base || 0), commissionRatePct: row.commission_rate_pct === null ? null : Number(row.commission_rate_pct),
     grossCommission: Number(row.gross_commission), brokerCommission: Number(row.broker_commission), sdrCommission: Number(row.sdr_commission),
+    managerCommissionRatePct: row.manager_commission_rate_pct === null || row.manager_commission_rate_pct === undefined ? null : Number(row.manager_commission_rate_pct), managerCommissionValue: Number(row.manager_commission_value || 0),
     hasPrize: row.has_prize === true, prizeRatePct: row.prize_rate_pct === null ? null : Number(row.prize_rate_pct), grossPrize: Number(row.gross_prize), brokerPrize: Number(row.broker_prize), sdrPrize: Number(row.sdr_prize),
     status: row.status, generatedAt: row.generated_at || '', signedAt: row.signed_at || '',
     agreementTemplateConfigured: Boolean(row.template_snapshot), debtConfessionTemplateConfigured: Boolean(row.debt_confession_template_snapshot),
@@ -1529,29 +1683,37 @@ async function apiGenerateContract(token, contractId, documentKind = 'agreement'
   if ((priorDocuments || []).some((doc) => (doc.document_kind || 'agreement') === kind && doc.document_type === 'signed' && doc.signature_confirmed_at)) return { ok: false, message: 'A assinatura deste documento já foi confirmada. Não é possível gerar outra versão pelo fluxo atual.' };
   const templateInfo = await apiGetContractTemplate(token, { kind });
   if (!templateInfo.template) return { ok: false, message: `Cadastre o modelo aprovado de ${kind === 'agreement' ? 'contrato/termo' : 'confissão de dívida'} antes de gerar o documento.` };
-  const [users, developments, profiles] = await Promise.all([listAll('crm_users', { select: 'id,name,email,role' }), listAll('crm_developments', { select: 'id,name' }), listAll('crm_broker_profiles', { select: '*' })]);
+  const [users, developments, profiles] = await Promise.all([listAll('crm_users', { select: 'id,name,email,role,active,deleted_at' }), listAll('crm_developments', { select: 'id,name' }), listAll('crm_broker_profiles', { select: '*' })]);
   const broker = users.find((item) => item.id === contract.broker_id) || {};
   const sdr = users.find((item) => item.id === contract.sdr_id) || {};
   const manager = users.find((item) => item.id === contract.manager_id) || {};
   const development = developments.find((item) => item.id === contract.development_id) || {};
   const profile = profiles.find((item) => item.broker_id === contract.broker_id) || {};
-  if (!contract.buyer_cpf || !contract.sdr_cpf) return { ok: false, message: 'Preencha o CPF do comprador e do SDR no rascunho antes de gerar o termo.' };
-  if (!profile.cpf || !profile.cnpj || !profile.creci || !profile.address) return { ok: false, message: 'Complete CPF, CNPJ, CRECI e endereço no cadastro do corretor antes de gerar o termo.' };
+  if (!manager.id || !manager.active || manager.deleted_at || !['Gerente','Administrador'].includes(manager.role)) return { ok: false, message: 'Selecione um gerente ou administrador ativo como terceiro signatário e salve o rascunho novamente.' };
   const values = {
     numero_contrato: contract.contract_number, numero_processo: contract.process_number || 'Não informado', numero_proposta: contract.proposal_number || 'Não informado', cliente_nome: contract.buyer_name, cliente_cpf: contract.buyer_cpf,
     cliente_endereco: contract.buyer_address, empreendimento: development.name || '', unidade: contract.unit,
     valor_unidade: formatCurrency(contract.unit_value), corretor_nome: broker.name || '', corretor_cpf: profile.cpf || '',
     corretor_cnpj: profile.cnpj || '', corretor_creci: profile.creci || '', corretor_endereco: profile.address || '',
     sdr_nome: sdr.name || '', sdr_cpf: contract.sdr_cpf || '', gerente_nome: manager.name || '',
-    percentual_comissao: formatPercent(contract.commission_rate_pct), base_calculo_comissao: Number(contract.commission_base || 0) > 0 ? formatCurrency(contract.commission_base) : 'Não informado',
+    percentual_comissao: contract.commission_rate_pct === null || contract.commission_rate_pct === undefined ? 'Não informado' : formatPercent(contract.commission_rate_pct), base_calculo_comissao: Number(contract.commission_base || 0) > 0 ? formatCurrency(contract.commission_base) : 'Não informado',
     comissao_bruta: formatCurrency(contract.gross_commission),
     comissao_corretor: formatCurrency(contract.broker_commission), comissao_sdr: formatCurrency(contract.sdr_commission),
+    percentual_comissao_gerente: contract.manager_commission_rate_pct === null || contract.manager_commission_rate_pct === undefined ? 'Não se aplica' : formatPercent(contract.manager_commission_rate_pct),
+    comissao_gerente: Number(contract.manager_commission_value || 0) > 0 ? formatCurrency(contract.manager_commission_value) : 'Não se aplica',
     premio_aplicavel: contract.has_prize ? 'Sim' : 'Não', percentual_premio: contract.has_prize ? formatPercent(contract.prize_rate_pct) : 'Não se aplica',
     premio_bruto: contract.has_prize ? formatCurrency(contract.gross_prize) : 'Não se aplica',
     premio_corretor: contract.has_prize ? formatCurrency(contract.broker_prize) : 'Não se aplica',
     premio_sdr: contract.has_prize ? formatCurrency(contract.sdr_prize) : 'Não se aplica',
     data_geracao: new Intl.DateTimeFormat('pt-BR', { dateStyle: 'long', timeZone: 'America/Sao_Paulo' }).format(new Date())
   };
+  const labels = { cliente_nome:'nome do comprador', cliente_cpf:'CPF do comprador', cliente_endereco:'endereço do comprador', empreendimento:'empreendimento', unidade:'unidade', valor_unidade:'valor da unidade', corretor_nome:'corretor responsável', corretor_cpf:'CPF do corretor', corretor_cnpj:'CNPJ do corretor', corretor_creci:'CRECI do corretor', corretor_endereco:'endereço do corretor', sdr_nome:'SDR signatário', sdr_cpf:'CPF do SDR', gerente_nome:'terceiro signatário', comissao_bruta:'comissão total' };
+  const requiredKeys = [...new Set([...String(templateInfo.template).matchAll(/{{\s*([a-z_]+)\s*}}/g)].map((match) => match[1]))];
+  const missing = requiredKeys.filter((key) => !Object.prototype.hasOwnProperty.call(values, key) || !String(values[key] || '').trim() || String(values[key]).trim() === 'Não informado');
+  if (missing.length) {
+    const names = missing.map((key) => labels[key] || ('campo {{' + key + '}}')).join(', ');
+    return { ok: false, message: 'Não foi possível gerar ainda. Preencha estes dados usados pelo modelo (' + (kind === 'agreement' ? 'contrato/termo' : 'confissão de dívida') + '): ' + names + '. Confira também os dados cadastrais do corretor e os CPFs dos signatários.' };
+  }
   let html = templateInfo.template.replace(/{{\s*([a-z_]+)\s*}}/g, (match, key) => Object.prototype.hasOwnProperty.call(values, key) ? htmlEscape(values[key]) : match);
   if (/{{\s*[^{}]+\s*}}/.test(html)) return { ok: false, message: 'O modelo contém campos sem correspondência. Revise os marcadores antes de gerar o documento.' };
   if (!/<!doctype\s+html/i.test(html) && !/<html[\s>]/i.test(html)) html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${htmlEscape(contract.contract_number)}</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body>${html}</body></html>`;
@@ -1844,14 +2006,17 @@ async function apiRestoreUser(token, userId) {
 async function apiSaveUser(token, payload) {
   const actor = await verifyActor(token); requireAdmin(actor);
   payload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
-  const allowed = ['id', 'name', 'email', 'role', 'active', 'operationsAccess'];
+  const allowed = ['id', 'name', 'email', 'role', 'active', 'operationsAccess', 'initialPassword'];
   if (Object.keys(payload).some((key) => !allowed.includes(key))) return { ok: false, message: 'A solicitação contém campos não permitidos.' };
   if (Object.prototype.hasOwnProperty.call(payload, 'active') && typeof payload.active !== 'boolean') return { ok: false, message: 'Estado do usuário inválido.' };
   const name = String(payload.name || '').trim(); const email = normalizeEmail(payload.email); const role = String(payload.role || '').trim();
   const active = payload.active !== false; const userId = String(payload.id || '').trim();
+  const initialPassword = String(payload.initialPassword || '');
   if (!name || name.length > 150) return { ok: false, message: 'Informe o nome (até 150 caracteres).' };
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { ok: false, message: 'Informe um e-mail válido.' };
   if (!CRM_CONFIG.roles.includes(role)) return { ok: false, message: 'Perfil inválido.' };
+  if (!userId && (initialPassword.length < 12 || initialPassword.length > 128)) return { ok: false, message: 'Defina uma senha inicial entre 12 e 128 caracteres. Ela será trocada no primeiro acesso.' };
+  if (userId && Object.prototype.hasOwnProperty.call(payload, 'initialPassword')) return { ok: false, message: 'Para trocar a senha de um usuário existente, use a ação “Definir senha”.' };
   const rows = await listAll('crm_users', { select: '*' });
   const existing = rows.find((item) => String(item.id) === userId) || null;
   if (userId && !existing) return { ok: false, message: 'Usuário não encontrado.' };
@@ -1877,8 +2042,7 @@ async function apiSaveUser(token, payload) {
   if (adminsAfter < 1) return { ok: false, message: 'É necessário manter ao menos um administrador ativo.' };
   const stamp = now();
   if (!existing) {
-    const password = newTemporaryPassword();
-    const authUser = await authRequest('admin/users', { method: 'POST', admin: true, body: { email, password, email_confirm: true, app_metadata: { crm_session_version: 0 }, user_metadata: { name } } });
+    const authUser = await authRequest('admin/users', { method: 'POST', admin: true, body: { email, password: initialPassword, email_confirm: true, app_metadata: { crm_session_version: 0 }, user_metadata: { name } } });
     const user = authUser && (authUser.user || authUser);
     if (!user || !user.id) throw new HttpError(502, 'Não foi possível criar o acesso do usuário.');
     let inserted;
@@ -1890,7 +2054,7 @@ async function apiSaveUser(token, payload) {
     }
     const afterValues = { name, email, role, active, operationsAccess };
     await audit(actor, 'user.create', 'user', user.id, auditChangedFields({}, afterValues), {}, afterValues);
-    return { ok: true, user: publicUser(Array.isArray(inserted) ? inserted[0] : null), message: 'Usuário cadastrado. Use “Gerar senha” para definir a senha temporária de acesso.' };
+    return { ok: true, user: publicUser(Array.isArray(inserted) ? inserted[0] : null), message: 'Usuário cadastrado com senha inicial. A pessoa deverá criar uma senha própria no primeiro acesso.' };
   }
   const old = mapUser(existing); const beforeValues = { name: old.name, email: old.email, role: old.role, active: old.active, operationsAccess: old.operationsAccess };
   const afterValues = { name, email, role, active, operationsAccess };
@@ -1904,17 +2068,29 @@ async function apiSaveUser(token, payload) {
   return { ok: true, user: publicUser(Array.isArray(updated) ? updated[0] : null), message: 'Usuário atualizado.' };
 }
 
-async function apiResetUserPassword(token, userId) {
+async function apiResetUserPassword(token, userId, payload = {}) {
   const actor = await verifyActor(token); requireAdmin(actor);
   if (String(userId) === String(actor.id)) return { ok: false, message: 'Use a opção “Senha” para alterar sua própria senha.' };
   if (!isUuid(userId)) return { ok: false, message: 'Usuário ativo não encontrado.' };
   const row = await getProfile(String(userId || ''));
   if (!row || row.active !== true || row.deleted_at) return { ok: false, message: 'Usuário ativo não encontrado.' };
-  const user = mapUser(row); const temporaryPassword = newTemporaryPassword(); const sessionVersion = user.sessionVersion + 1;
-  await setAuthPassword(user.id, temporaryPassword, sessionVersion);
-  await dbRequest('crm_users', { method: 'PATCH', query: { id: `eq.${user.id}` }, prefer: 'return=minimal', body: { must_change_password: true, session_version: sessionVersion, updated_at: now() } });
+  const user = mapUser(row); const temporaryPassword = String(payload && payload.password || '');
+  if (temporaryPassword.length < 12 || temporaryPassword.length > 128) return { ok: false, message: 'Defina uma nova senha entre 12 e 128 caracteres.' };
+  const sessionVersion = user.sessionVersion + 1;
+  const locked = await dbRequest('crm_users', {
+    method: 'PATCH', query: { id: `eq.${user.id}`, session_version: `eq.${user.sessionVersion}`, active: 'eq.true', deleted_at: 'is.null' },
+    prefer: 'return=representation', body: { must_change_password: true, session_version: sessionVersion, updated_at: now() }
+  });
+  if (!Array.isArray(locked) || !locked.length) return { ok: false, message: 'O usuário foi alterado durante a operação. Atualize a lista e tente novamente.' };
+  await dbRequest('crm_sessions', { method: 'DELETE', query: { user_id: `eq.${user.id}` } }).catch(() => null);
+  try {
+    await setAuthPassword(user.id, temporaryPassword, sessionVersion);
+  } catch (_) {
+    await audit(actor, 'user.password_reset_blocked', 'user', user.id, ['mustChangePassword','sessionVersion'], { mustChangePassword: user.mustChangePassword, sessionVersion: user.sessionVersion }, { mustChangePassword: true, sessionVersion, authenticationSync: 'pending' }).catch(() => null);
+    throw new HttpError(502, 'A senha anterior foi bloqueada preventivamente, mas não foi possível sincronizar a nova senha. O acesso do usuário permanece bloqueado; defina novamente uma senha para concluir.');
+  }
   await audit(actor, 'user.password_reset', 'user', user.id, ['mustChangePassword','sessionVersion'], { mustChangePassword: user.mustChangePassword, sessionVersion: user.sessionVersion }, { mustChangePassword: true, sessionVersion });
-  return { ok: true, temporaryPassword, message: 'Compartilhe a senha temporária por um canal privado. Ela deverá ser alterada no primeiro acesso.' };
+  return { ok: true, message: 'Nova senha definida. Compartilhe por um canal privado; ela deverá ser trocada no próximo acesso.' };
 }
 
 async function apiApplySharedTemporaryPassword(token, password) {
@@ -1937,8 +2113,13 @@ async function apiApplySharedTemporaryPassword(token, password) {
   try {
     for (const row of targets) {
       const user = mapUser(row); const sessionVersion = user.sessionVersion + 1;
+      const locked = await dbRequest('crm_users', {
+        method: 'PATCH', query: { id: `eq.${user.id}`, session_version: `eq.${user.sessionVersion}`, active: 'eq.true', deleted_at: 'is.null' },
+        prefer: 'return=representation', body: { must_change_password: true, session_version: sessionVersion, updated_at: now() }
+      });
+      if (!Array.isArray(locked) || !locked.length) throw new HttpError(409, 'Uma conta foi alterada durante a operação. Aplique novamente após revisar os acessos.');
+      await dbRequest('crm_sessions', { method: 'DELETE', query: { user_id: `eq.${user.id}` } }).catch(() => null);
       await setAuthPassword(user.id, password, sessionVersion);
-      await dbRequest('crm_users', { method: 'PATCH', query: { id: `eq.${user.id}` }, prefer: 'return=minimal', body: { must_change_password: true, session_version: sessionVersion, updated_at: now() } });
       await audit(actor, 'user.shared_temporary_password', 'user', user.id, ['mustChangePassword','sessionVersion'], { mustChangePassword: user.mustChangePassword, sessionVersion: user.sessionVersion }, { mustChangePassword: true, sessionVersion });
       updatedCount += 1;
     }
@@ -1956,13 +2137,13 @@ const api = {
   apiGetSdrWorklist, apiListLeadAttempts, apiAddLeadAttempt, apiFlagPhoneIncorrect, apiListAudit,
   apiListUsers, apiSaveUser, apiListArchivedUsers, apiArchiveUser, apiRestoreUser,
   apiListArchivedLeads, apiArchiveLead, apiRestoreLead,
-  apiListSales, apiSaveSale, apiAddSaleReceipt, apiVoidSaleReceipt, apiListBrokerProfiles, apiSaveBrokerProfile,
+  apiListSales, apiSaveSale, apiArchiveSale, apiRestoreSale, apiAddSaleReceipt, apiVoidSaleReceipt, apiListBrokerProfiles, apiSaveBrokerProfile,
   apiListContracts, apiListContractLeads, apiSaveContract, apiGenerateContract, apiGetContractTemplate, apiSaveContractTemplate,
   apiCreateContractUpload, apiConfirmContractSigned, apiGetContractDocument,
   apiResetUserPassword, apiApplySharedTemporaryPassword,
   apiListDevelopments, apiSaveDevelopment, apiPreviewLeadImport, apiImportLeads, apiExportLeads, apiExportReport, apiSaveFollowupDays,
   apiGetOperationsDashboard, apiListProduction, apiSaveProduction, apiArchiveProduction,
-  apiListOperationGoals, apiSaveOperationGoal, apiListAttendance, apiSetAttendance, apiExportOperationsReport
+  apiListOperationGoals, apiSaveOperationGoal, apiSaveOperationGoalsBatch, apiListAttendance, apiSetAttendance, apiExportOperationsReport
 };
 
 export default async (request) => {
