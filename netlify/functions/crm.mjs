@@ -1182,11 +1182,32 @@ async function apiListAudit(token, filters = {}, requestedPage = 1, requestedPag
 }
 
 function parseMoney(value, fieldName) {
-  const raw = String(value === undefined || value === null || value === '' ? '0' : value).trim();
-  const normalized = raw.includes(',') && raw.includes('.') ? raw.replace(/\./g, '').replace(',', '.') : raw.replace(',', '.');
-  const amount = Number(normalized);
-  if (!Number.isFinite(amount) || amount < 0 || amount > 999999999999.99 || Math.round(amount * 100) !== amount * 100) throw new HttpError(400, `${fieldName} deve ser um valor monetário válido com até duas casas decimais.`);
-  return Math.round(amount * 100) / 100;
+  let raw = String(value === undefined || value === null || value === '' ? '0' : value).trim();
+  raw = raw.replace(/^R\\$\\s*/i, '').replace(/\\s/g, '');
+  if (!raw) raw = '0';
+
+  let normalized = raw;
+  const commaIndex = raw.lastIndexOf(',');
+  const dotIndex = raw.lastIndexOf('.');
+  if (commaIndex >= 0 && dotIndex >= 0) {
+    normalized = commaIndex > dotIndex
+      ? raw.replace(/\\./g, '').replace(',', '.')
+      : raw.replace(/,/g, '');
+  } else if (commaIndex >= 0) {
+    normalized = raw.replace(',', '.');
+  }
+  if (normalized.startsWith('.')) normalized = `0${normalized}`;
+
+  const match = normalized.match(/^(\\d+)(?:\\.(\\d{0,2}))?$/);
+  if (!match) throw new HttpError(400, `${fieldName} deve ser um valor monetário válido com até duas casas decimais.`);
+
+  const whole = Number(match[1]);
+  const fraction = Number((match[2] || '').padEnd(2, '0'));
+  const cents = whole * 100 + fraction;
+  if (!Number.isSafeInteger(cents) || cents < 0 || cents > 99999999999999) {
+    throw new HttpError(400, `${fieldName} deve ser um valor monetário válido com até duas casas decimais.`);
+  }
+  return cents / 100;
 }
 
 function splitMoneyHalf(value) {
