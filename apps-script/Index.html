@@ -56,15 +56,20 @@
           <button class="nav-item hidden" data-page="newLeads" id="new-leads-nav"><span class="nav-icon">✦</span>Novos cadastros <span id="new-leads-badge" class="nav-badge hidden"></span></button>
           <button class="nav-item hidden" data-page="sdrAlerts" id="sdr-alerts-nav"><span class="nav-icon">⚑</span>Alertas SDR <span id="sdr-alert-badge" class="nav-badge hidden"></span></button>
           <button class="nav-item" data-page="followups"><span class="nav-icon">◷</span>Follow-ups <span id="stale-badge" class="nav-badge hidden"></span></button>
+          <button class="nav-item" data-page="closedLeads" id="closed-leads-nav"><span class="nav-icon">✓</span>Clientes encerrados</button>
+          <button class="nav-item hidden" data-page="appointments" id="appointments-nav"><span class="nav-icon">▦</span>Agenda</button>
+          <button class="nav-item" data-page="ombudsman" id="ombudsman-nav"><span class="nav-icon">✉</span>Ouvidoria</button>
           <p class="nav-group-label hidden" id="sales-docs-nav">Vendas e documentos</p>
           <button class="nav-item hidden" data-page="sales" id="sales-nav"><span class="nav-icon">▤</span>Vendas e repasses</button>
           <button class="nav-item hidden" data-page="contracts" id="contracts-nav"><span class="nav-icon">▧</span>Contratos</button>
+          <button class="nav-item hidden" data-page="financeDocuments" id="finance-documents-nav"><span class="nav-icon">▣</span>Recibos e comprovantes</button>
           <p class="nav-group-label operations-nav hidden">Produção &amp; frequência</p>
           <button class="nav-item operations-nav hidden" data-page="operationsDashboard" id="operations-dashboard-nav"><span class="nav-icon">◈</span>Resultados</button>
           <button class="nav-item operations-nav hidden" data-page="production" id="production-nav"><span class="nav-icon">↗</span>Lançamentos</button>
           <button class="nav-item operations-nav hidden" data-page="goals" id="goals-nav"><span class="nav-icon">◎</span>Metas</button>
           <button class="nav-item operations-nav hidden" data-page="attendance" id="attendance-nav"><span class="nav-icon">◷</span>Plantões</button>
           <button class="nav-item operations-nav hidden" data-page="operationsReports" id="operations-reports-nav"><span class="nav-icon">▤</span>Relatórios</button>
+          <button class="nav-item hidden" data-page="salesHealth" id="sales-health-nav"><span class="nav-icon">◆</span>VGV e performance</button>
           <p class="nav-group-label admin-nav hidden">Administração</p>
           <button class="nav-item hidden" data-page="users" id="users-nav"><span class="nav-icon">♙</span>Equipe</button>
           <button class="nav-item hidden" data-page="developments" id="developments-nav"><span class="nav-icon">⌂</span>Empreendimentos</button>
@@ -80,7 +85,7 @@
             <img class="brand-logo brand-logo-header" src="__SHARKS_FENIX_LOGO_DATA_URI__" alt="Sharks Fênix">
             <div><p id="page-kicker" class="eyebrow">PLATAFORMA COMERCIAL</p><h1 id="page-title">Visão geral</h1></div>
           </div>
-          <div class="topbar-actions"><button id="refresh-button" class="button button-quiet" type="button">↻ <span>Atualizar</span></button><div class="user-menu"><div class="avatar" id="user-avatar">MA</div><div><strong id="user-name"></strong><small id="user-role"></small></div><button id="change-password-button" class="button button-quiet button-logout" type="button">Senha</button><button id="logout-button" class="button button-quiet button-logout" type="button">Sair</button></div></div>
+          <div class="topbar-actions"><button id="notifications-button" class="button button-quiet notifications-trigger" type="button" aria-label="Notificações">♢ <span>Notificações</span><span id="notifications-badge" class="nav-badge hidden">0</span></button><button id="refresh-button" class="button button-quiet" type="button">↻ <span>Atualizar</span></button><div class="user-menu"><div class="avatar" id="user-avatar">MA</div><div><strong id="user-name"></strong><small id="user-role"></small></div><button id="change-password-button" class="button button-quiet button-logout" type="button">Senha</button><button id="logout-button" class="button button-quiet button-logout" type="button">Sair</button></div></div>
         </header>
 
         <section id="filters-panel" class="filters-panel">
@@ -102,6 +107,7 @@
     <dialog id="lead-dialog" class="modal"><form method="dialog" class="modal-dismiss"><button aria-label="Fechar" class="icon-button">×</button></form><div id="lead-dialog-content"></div></dialog>
     <dialog id="user-dialog" class="modal modal-narrow"><form method="dialog" class="modal-dismiss"><button aria-label="Fechar" class="icon-button">×</button></form><div id="user-dialog-content"></div></dialog>
     <dialog id="admin-dialog" class="modal"><form method="dialog" class="modal-dismiss"><button aria-label="Fechar" class="icon-button">×</button></form><div id="admin-dialog-content"></div></dialog>
+    <dialog id="notifications-dialog" class="modal modal-narrow"><form method="dialog" class="modal-dismiss"><button aria-label="Fechar notificações" class="icon-button">×</button></form><div id="notifications-dialog-content" class="notifications-dialog-content"></div></dialog>
     <?!= include_('Client'); ?>
   </body>
 </html>

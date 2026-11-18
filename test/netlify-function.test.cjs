@@ -12,13 +12,17 @@ const userIdBrokerA = '10000000-0000-4000-8000-000000000005';
 const userIdBrokerB = '10000000-0000-4000-8000-000000000006';
 const userIdManager = '10000000-0000-4000-8000-000000000007';
 const userIdOtherAdmin = '10000000-0000-4000-8000-000000000008';
+const userIdAssistant = '10000000-0000-4000-8000-000000000009';
+const mockFetchByToken = new Map();
+let mockCommissionDocumentCounter = 1;
 const rows = {
   crm_users: [
     { id: userIdSdr, name: 'SDR de teste', email: 'sdr@example.test', role: 'SDR', active: true, must_change_password: false, session_version: 0 },
     { id: userIdBrokerA, name: 'Corretor A', email: 'a@example.test', role: 'Corretor', active: true, must_change_password: false, session_version: 0 },
     { id: userIdBrokerB, name: 'Corretor B', email: 'b@example.test', role: 'Corretor', active: true, must_change_password: false, session_version: 0 },
     { id: userIdManager, name: 'Gestor de teste', email: 'gestao@example.test', role: 'Gerente', operations_access: 'viewer', active: true, must_change_password: false, session_version: 0 },
-    { id: userIdOtherAdmin, name: 'Administrativo de teste', email: 'admin2@example.test', role: 'Coordenador', operations_access: 'manager', active: true, must_change_password: false, session_version: 0 }
+    { id: userIdOtherAdmin, name: 'Administrativo de teste', email: 'admin2@example.test', role: 'Coordenador', operations_access: 'manager', active: true, must_change_password: false, session_version: 0 },
+    { id: userIdAssistant, name: 'Assistente de teste', email: 'assistente@example.test', role: 'Assistente', active: true, must_change_password: false, session_version: 0 }
   ],
   crm_developments: [{ id: 'E001', name: 'Empreendimento teste', active: true }],
   crm_leads: [
@@ -35,9 +39,14 @@ const rows = {
   crm_sales_receipts: [],
   crm_contracts: [],
   crm_contract_documents: [],
+  crm_commission_documents: [],
   crm_production_entries: [],
   crm_production_goals: [],
   crm_attendance_records: [],
+  crm_appointments: [],
+  crm_in_app_notifications: [],
+  crm_manager_locations: [],
+  crm_complaints: [],
   crm_sessions: [],
   crm_settings: [],
   crm_sync_signal: [{ id: 1, changed_at: '2026-11-12T00:00:00.000Z' }]
@@ -45,7 +54,7 @@ const rows = {
 
 const jwtFor = (role, userId, email, sessionVersion = 0) => `e30.${Buffer.from(JSON.stringify({ sub: userId, app_metadata: { role, crm_session_version: sessionVersion } })).toString('base64url')}.signature`;
 
-function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA, email = 'a@example.test', sessionVersion = 0, operationsManagerIds = [], sharedPasswordOperatorId = '' } = {}) {
+function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA, email = 'a@example.test', sessionVersion = 0, operationsManagerIds = [], sharedPasswordOperatorId = '', appointmentConstraintConflict = false, financeUploadSignUnavailable = false } = {}) {
   const savedEnv = { ...process.env };
   process.env.SUPABASE_URL = 'https://supabase.example.test';
   process.env.SUPABASE_PUBLISHABLE_KEY = 'public-test-key';
@@ -61,14 +70,17 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
   let productionCounter = 1;
   let goalCounter = 1;
   let attendanceCounter = 1;
+  let appointmentCounter = 1;
+  let managerLocationCounter = 1;
+  let complaintCounter = 1;
   let authUserCounter = 1;
   const fakeUser = { id: userId, email, app_metadata: { role, crm_session_version: sessionVersion } };
   const oldFetch = global.fetch;
-  global.fetch = async (input, options = {}) => {
+  const mockFetch = async (input, options = {}) => {
     const url = new URL(String(input));
     const method = options.method || 'GET';
     let requestBody=null;
-    if(options.body){if(Buffer.isBuffer(options.body))requestBody=options.body.toString('utf8');else{try{requestBody=JSON.parse(options.body);}catch{requestBody=String(options.body);}}}
+    if(options.body){if(Buffer.isBuffer(options.body))requestBody=options.body.toString('latin1');else{try{requestBody=JSON.parse(options.body);}catch{requestBody=String(options.body);}}}
     calls.push({ path: url.pathname, method, query: Object.fromEntries(url.searchParams), headers: options.headers || {}, body: requestBody });
     if (url.pathname === '/auth/v1/user') {
       const bearer = String(options.headers && options.headers.Authorization || '').replace(/^Bearer\s+/i,'');
@@ -103,6 +115,10 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
       if (method === 'DELETE') { for(const [key,item] of authAccounts)if(String(item.id)===targetId)authAccounts.delete(key);return Response.json({}); }
     }
     if(url.pathname.startsWith('/storage/v1/')){
+      if(url.pathname.includes('/object/sign/crm-finance-documents/'))return Response.json({signedURL:'/object/sign/crm-finance-documents/test-document?token=signed'});
+      if(url.pathname.includes('/object/upload/sign/crm-finance-documents/')&&financeUploadSignUnavailable)return Response.json({});
+      if(url.pathname.includes('/object/upload/sign/crm-finance-documents/'))return Response.json({signedURL:'/object/upload/sign/crm-finance-documents/test-upload',token:'finance-upload-token'});
+      if(url.pathname.includes('/object/info/crm-finance-documents/'))return Response.json({name:'uploaded-finance-document'});
       if(url.pathname.includes('/object/sign/'))return Response.json({signedURL:'/object/sign/crm-contracts/test-document?token=signed'});
       if(url.pathname.includes('/object/upload/sign/'))return Response.json({signedURL:'/object/upload/sign/crm-contracts/test-upload',token:'upload-token'});
       if(url.pathname.includes('/object/info/'))return Response.json({name:'uploaded-document'});
@@ -182,6 +198,27 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
       else if(!payload.p_present&&record){record.deleted_at=new Date().toISOString();record.deleted_by=payload.p_actor_id;record.updated_at=record.deleted_at;record.updated_by=payload.p_actor_id;}
       return Response.json(record?[record]:[]);
     }
+    if (url.pathname === '/rest/v1/rpc/crm_import_operations') {
+      const payload=JSON.parse(options.body);let createdCount=0;let updatedCount=0;let skippedCount=0;
+      for(const value of payload.p_rows||[]){
+        const stamp=new Date().toISOString();
+        if(payload.p_section==='production'){
+          const existing=value.id?rows.crm_production_entries.find((item)=>item.id===value.id&&!item.deleted_at):null;
+          const saved=existing||{id:'10000000-0000-4000-8000-'+String(700+productionCounter++).padStart(12,'0'),broker_id:value.brokerId,work_date:value.workDate,created_at:stamp,created_by:payload.p_actor_id};
+          Object.assign(saved,{broker_id:value.brokerId,work_date:value.workDate,prospecting_count:value.prospections,interaction_count:value.interactions,appointment_count:value.appointments,visit_count:value.visits,sale_count:value.sales,folder_count:value.folders,notes:value.notes||'',updated_at:stamp,updated_by:payload.p_actor_id});
+          if(!existing)rows.crm_production_entries.push(saved);
+          const before=existing?{brokerId:existing.broker_id,workDate:existing.work_date}:{};const after={brokerId:saved.broker_id,workDate:saved.work_date,folders:saved.folder_count};
+          rows.crm_audit.push({user_id:payload.p_actor_id,email:payload.p_actor_email,actor_name:payload.p_actor_name,actor_role:payload.p_actor_role,action:existing?'operations.production.update':'operations.production.create',entity_type:'operation_production',entity_id:saved.id,changed_fields:'brokerId,workDate,folders',module:'operations',before_values:before,after_values:after});
+          if(existing)updatedCount++;else createdCount++;
+        }else{
+          const existing=rows.crm_attendance_records.find((item)=>item.broker_id===value.brokerId&&item.attendance_date===value.attendanceDate&&item.shift===value.shift&&!item.deleted_at);
+          if(existing){skippedCount++;continue;}
+          const saved={id:'10000000-0000-4000-8000-'+String(600+attendanceCounter++).padStart(12,'0'),broker_id:value.brokerId,attendance_date:value.attendanceDate,shift:value.shift,created_at:stamp,created_by:payload.p_actor_id,updated_at:stamp,updated_by:payload.p_actor_id};rows.crm_attendance_records.push(saved);
+          rows.crm_audit.push({user_id:payload.p_actor_id,email:payload.p_actor_email,actor_name:payload.p_actor_name,actor_role:payload.p_actor_role,action:'operations.attendance.create',entity_type:'operation_attendance',entity_id:saved.id,changed_fields:'brokerId,attendanceDate,shift,present',module:'operations',before_values:{},after_values:{brokerId:saved.broker_id,attendanceDate:saved.attendance_date,shift:saved.shift,present:true}});createdCount++;
+        }
+      }
+      return Response.json({ok:true,createdCount,updatedCount,skippedCount});
+    }
     if (url.pathname.startsWith('/rest/v1/')) {
       const table = url.pathname.split('/').pop();
       const list = rows[table] || [];
@@ -194,6 +231,8 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
         const leadFilter = url.searchParams.get('lead_id');
         const keyFilter = url.searchParams.get('key');
         const userFilter = url.searchParams.get('user_id');
+        const recipientFilter = url.searchParams.get('recipient_id');
+        const readFilter = url.searchParams.get('read_at');
         const deletedFilter = url.searchParams.get('deleted_at');
         const entityFilter = url.searchParams.get('entity_type');
         const brokerFilter = url.searchParams.get('broker_id');
@@ -209,14 +248,20 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
         const attendanceDateFilter = url.searchParams.get('attendance_date');
         const shiftFilter = url.searchParams.get('shift');
         const roleFilter = url.searchParams.get('role');
+        const archivedFilter = url.searchParams.get('archived_at');
+        const signatureFilter = url.searchParams.get('signature_status');
+        const paymentFilter = url.searchParams.get('payment_status');
         if (idFilter && idFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.id) === idFilter.slice(3));
         if (leadFilter && leadFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.lead_id) === leadFilter.slice(3));
         if (keyFilter && keyFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.key) === keyFilter.slice(3));
         if (userFilter && userFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.user_id) === userFilter.slice(3));
+        if (recipientFilter && recipientFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.recipient_id) === recipientFilter.slice(3));
+        if (readFilter === 'is.null') filtered = filtered.filter((row) => !row.read_at);
         if (entityFilter && entityFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.entity_type) === entityFilter.slice(3));
         if (brokerFilter && brokerFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.broker_id) === brokerFilter.slice(3));
         const sessionVersionFilter=url.searchParams.get('session_version');if(sessionVersionFilter&&sessionVersionFilter.startsWith('eq.'))filtered=filtered.filter((row)=>String(row.session_version||0)===sessionVersionFilter.slice(3));
         if (saleFilter && saleFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.sale_id) === saleFilter.slice(3));
+        if (saleFilter && saleFilter.startsWith('in.(')) { const saleIds = new Set(saleFilter.slice(4, -1).split(',').map((value) => value.replace(/^"|"$/g, ''))); filtered = filtered.filter((row) => saleIds.has(String(row.sale_id))); }
         if (contractFilter && contractFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.contract_id) === contractFilter.slice(3));
         if (documentTypeFilter && documentTypeFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.document_type) === documentTypeFilter.slice(3));
         if (cycleFilter && cycleFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.cycle) === cycleFilter.slice(3));
@@ -230,6 +275,10 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
         if (roleFilter && roleFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.role) === roleFilter.slice(3));
         if (deletedFilter === 'is.null') filtered = filtered.filter((row) => !row.deleted_at);
         if (deletedFilter === 'not.is.null') filtered = filtered.filter((row) => Boolean(row.deleted_at));
+        if (archivedFilter === 'is.null') filtered = filtered.filter((row) => !row.archived_at);
+        if (archivedFilter === 'not.is.null') filtered = filtered.filter((row) => Boolean(row.archived_at));
+        if (signatureFilter && signatureFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.signature_status) === signatureFilter.slice(3));
+        if (paymentFilter && paymentFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.payment_status) === paymentFilter.slice(3));
         const andFilter=url.searchParams.get('and')||'';
         for(const match of andFilter.matchAll(/([a-z_]+)\.(gte|lte)\.([^,)]+)/g)){
           const [,field,operator,value]=match;
@@ -248,10 +297,20 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
         const id = idFilter.slice(3);
         const userFilter = url.searchParams.get('user_id') || '';
         const userId = userFilter.slice(3);
-        const row = list.find((item) => idFilter.startsWith('eq.') ? String(item.id) === id : userFilter.startsWith('eq.') ? String(item.user_id) === userId : false);
+        const recipientFilter = url.searchParams.get('recipient_id') || '';
+        const recipientId = recipientFilter.slice(3);
+        const row = list.find((item) => idFilter.startsWith('eq.')
+          ? String(item.id) === id && (!recipientFilter.startsWith('eq.') || String(item.recipient_id) === recipientId)
+          : userFilter.startsWith('eq.') ? String(item.user_id) === userId
+            : recipientFilter.startsWith('eq.') ? String(item.recipient_id) === recipientId : false);
         const deletedFilter = url.searchParams.get('deleted_at');
         const versionFilter=url.searchParams.get('session_version');const activeFilter=url.searchParams.get('active');
+        const archivedFilter=url.searchParams.get('archived_at');const signatureFilter=url.searchParams.get('signature_status');const paymentFilter=url.searchParams.get('payment_status');const readFilter=url.searchParams.get('read_at');
+        if(readFilter==='is.null'&&row&&row.read_at)return Response.json([], {status:200});
         if (!row || (deletedFilter === 'is.null' && row.deleted_at) || (deletedFilter === 'not.is.null' && !row.deleted_at)
+          || (archivedFilter === 'is.null' && row.archived_at) || (archivedFilter === 'not.is.null' && !row.archived_at)
+          || (signatureFilter&&signatureFilter.startsWith('eq.')&&String(row.signature_status)!==signatureFilter.slice(3))
+          || (paymentFilter&&paymentFilter.startsWith('eq.')&&String(row.payment_status)!==paymentFilter.slice(3))
           || (versionFilter&&versionFilter.startsWith('eq.')&&String(row.session_version||0)!==versionFilter.slice(3))
           || (activeFilter==='eq.true'&&row.active!==true)) return Response.json([], { status: 200 });
         Object.assign(row, JSON.parse(options.body));
@@ -259,6 +318,17 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
       }
       if (method === 'POST') {
         const value = JSON.parse(options.body);
+        if (table === 'crm_appointments' && appointmentConstraintConflict) return Response.json({ code:'23P01', message:'exclusion constraint violation' }, { status:409 });
+        if (table === 'crm_in_app_notifications') {
+          const entries=(Array.isArray(value)?value:[value]).map((item)=>({...item,id:item.id||`10000000-0000-4000-8000-${String(950+list.length+1).padStart(12,'0')}`}));
+          for(const entry of entries)if(!list.some((item)=>item.dedupe_key===entry.dedupe_key))list.push(entry);
+          return Response.json(entries);
+        }
+        if (table === 'crm_commission_documents') {
+          const entries=(Array.isArray(value)?value:[value]).map((item)=>({...item,id:item.id||`10000000-0000-4000-8000-${String(900+mockCommissionDocumentCounter++).padStart(12,'0')}`}));
+          list.push(...entries);
+          return Response.json(entries);
+        }
         if (table === 'crm_leads') {
           const entries = (Array.isArray(value) ? value : [value]).map((item) => ({ ...item, id: item.id || `lead-new-${leadCounter++}` }));
           list.push(...entries);
@@ -288,6 +358,14 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
           const entries=(Array.isArray(value)?value:[value]).map((item)=>({...item,id:item.id||'10000000-0000-4000-8000-'+String(700+productionCounter++).padStart(12,'0')}));
           list.push(...entries);return Response.json(entries);
         }
+        if (table === 'crm_appointments' || table === 'crm_manager_locations' || table === 'crm_complaints') {
+          let counter;
+          if (table === 'crm_appointments') counter = 1000 + appointmentCounter++;
+          else if (table === 'crm_manager_locations') counter = 2000 + managerLocationCounter++;
+          else counter = 3000 + complaintCounter++;
+          const entries=(Array.isArray(value)?value:[value]).map((item)=>({...item,id:item.id||'10000000-0000-4000-8000-'+String(counter++).padStart(12,'0')}));
+          list.push(...entries);return Response.json(entries);
+        }
         if (Array.isArray(value)) list.push(...value); else list.push(value);
         return Response.json(Array.isArray(value) ? value : [value]);
       }
@@ -302,17 +380,26 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
     }
     return Response.json({ message: 'mock route not found' }, { status: 404 });
   };
+  mockFetchByToken.set(token, mockFetch);
+  global.fetch = mockFetch;
   t.after(() => { global.fetch = oldFetch; for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key]; Object.assign(process.env, savedEnv); });
-  return { token, calls, authMetadata, authAccounts, usersByToken };
+  return { token, calls, authMetadata, authAccounts, usersByToken, mockFetch };
 }
 
 async function invoke(method, args, token) {
+  const sessionToken = args && args[0];
+  if (mockFetchByToken.has(sessionToken)) global.fetch = mockFetchByToken.get(sessionToken);
   const request = new Request('https://mundoapto.test/.netlify/functions/crm', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ method, args: args || [] })
   });
   const response = await handler(request);
   return { response, body: await response.json() };
+}
+
+async function invokeAs(mock, method, args) {
+  global.fetch = mock.mockFetch;
+  return invoke(method, [mock.token, ...(args || [])], mock.token);
 }
 
 function operationToday() {
@@ -415,6 +502,12 @@ test('somente as contas allowlistadas corrigem a equipe e a frequência; SDR con
   const sdr=mockEnvironmentAndFetch(t,{role:'SDR',userId:userIdSdr,email:'sdr@example.test'});
   const teamAttendance=await invoke('apiListAttendance',[sdr.token,{dateFrom:day,dateTo:day}],sdr.token);
   assert.equal(teamAttendance.body.length,2);
+  const weekStart=operationShiftDate(operationToday(),-((new Date(`${operationToday()}T00:00:00Z`).getUTCDay()+6)%7));
+  const futureWeekEnd=operationShiftDate(weekStart,6);
+  const currentWeek=await invoke('apiListAttendance',[sdr.token,{dateFrom:weekStart,dateTo:futureWeekEnd}],sdr.token);
+  assert.equal(currentWeek.response.status,200,'A semana atual deve carregar mesmo que seu domingo ainda esteja no futuro.');
+  const futureOnly=await invoke('apiListAttendance',[sdr.token,{dateFrom:operationShiftDate(operationToday(),1),dateTo:operationShiftDate(operationToday(),1)}],sdr.token);
+  assert.equal(futureOnly.response.status,200);assert.deepEqual(futureOnly.body,[]);
 });
 
 test('Assistente designada acessa e lança frequências; papel administrativo sozinho não concede permissão', async (t) => {
@@ -434,6 +527,39 @@ test('Assistente designada acessa e lança frequências; papel administrativo so
   const unlisted=mockEnvironmentAndFetch(t,{role:'Coordenador',userId:userIdOtherAdmin,email:'admin2@example.test'});
   const noPermission=await invoke('apiSetAttendance',[unlisted.token,{brokerId:userIdBrokerA,attendanceDate:day,shift:'afternoon',present:true}],unlisted.token);
   assert.equal(noPermission.response.status,403);
+});
+
+test('importação de produção e plantões valida tudo antes e grava em lote com auditoria', async (t) => {
+  const originals={entries:structuredClone(rows.crm_production_entries),attendance:structuredClone(rows.crm_attendance_records),audit:structuredClone(rows.crm_audit)};
+  t.after(()=>{rows.crm_production_entries.splice(0,rows.crm_production_entries.length,...originals.entries);rows.crm_attendance_records.splice(0,rows.crm_attendance_records.length,...originals.attendance);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
+  const date='2026-11-10';const existingId='10000000-0000-4000-8000-000000000601';
+  rows.crm_production_entries.push({id:existingId,broker_id:userIdBrokerA,work_date:date,prospecting_count:1,interaction_count:1,appointment_count:0,visit_count:0,sale_count:0,folder_count:0,notes:'Anterior',created_at:date+'T12:00:00Z',created_by:userIdBrokerA,updated_at:date+'T12:00:00Z',updated_by:userIdBrokerA,deleted_at:null});
+  rows.crm_attendance_records.push({id:'10000000-0000-4000-8000-000000000602',broker_id:userIdBrokerA,attendance_date:date,shift:'morning',created_at:date+'T12:00:00Z',created_by:userIdManager,updated_at:date+'T12:00:00Z',updated_by:userIdManager,deleted_at:null});
+  const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test',operationsManagerIds:[userIdManager]});
+  const importedProduction=await invoke('apiImportOperations',[manager.token,'production',[
+    {id:existingId,brokerId:userIdBrokerA,workDate:date,prospections:8,interactions:7,appointments:2,visits:1,sales:1,folders:4,notes:'Correção importada'},
+    {brokerId:userIdBrokerB,workDate:date,prospections:3,interactions:2,appointments:1,visits:0,sales:0,folders:6,notes:'Novo lançamento'}
+  ]],manager.token);
+  assert.equal(importedProduction.body.ok,true,JSON.stringify(importedProduction.body));
+  assert.equal(importedProduction.body.createdCount,1);assert.equal(importedProduction.body.updatedCount,1);
+  assert.equal(rows.crm_production_entries.find((item)=>item.id===existingId).folder_count,4);
+  assert.equal(rows.crm_production_entries.find((item)=>item.broker_id===userIdBrokerB&&item.work_date===date).folder_count,6);
+  assert.equal(manager.calls.filter((call)=>call.path==='/rest/v1/rpc/crm_import_operations').length,1,'A importação deve ser um único lote transacional.');
+  assert.equal(manager.calls.filter((call)=>call.path==='/rest/v1/crm_production_entries'&&['POST','PATCH'].includes(call.method)).length,0);
+  assert.equal(rows.crm_audit.filter((item)=>item.module==='operations'&&item.entity_type==='operation_production').length,2);
+
+  const importedAttendance=await invoke('apiImportOperations',[manager.token,'attendance',[
+    {brokerId:userIdBrokerA,date,shift:'manha'},
+    {brokerId:userIdBrokerA,date,shift:'noite'}
+  ]],manager.token);
+  assert.equal(importedAttendance.body.ok,true,JSON.stringify(importedAttendance.body));
+  assert.equal(importedAttendance.body.createdCount,1);assert.equal(importedAttendance.body.skippedCount,1);
+  assert.ok(rows.crm_attendance_records.some((item)=>item.broker_id===userIdBrokerA&&item.attendance_date===date&&item.shift==='night'&&!item.deleted_at));
+  const rpcCount=manager.calls.filter((call)=>call.path==='/rest/v1/rpc/crm_import_operations').length;
+  const invalid=await invoke('apiImportOperations',[manager.token,'production',[{brokerId:userIdBrokerB,workDate:date,prospections:-1}]],manager.token);
+  assert.equal(invalid.body.ok,false);assert.equal(manager.calls.filter((call)=>call.path==='/rest/v1/rpc/crm_import_operations').length,rpcCount,'Uma pré-validação com erro não pode gravar nenhuma linha.');
+  const coordinator=mockEnvironmentAndFetch(t,{role:'Coordenador',userId:userIdOtherAdmin,email:'admin2@example.test'});
+  assert.equal((await invoke('apiImportOperations',[coordinator.token,'production',[]],coordinator.token)).response.status,403);
 });
 
 test('metas semanais e mensais preservam revisões e o painel diário calcula progresso do ciclo atual', async (t) => {
@@ -1030,11 +1156,11 @@ test('contrato usa o modelo Mundo Apto, divide a remuneração e só libera o as
   assert.equal(restrictedContract.response.status,403);
 });
 
-test('contrato pode partir de venda manual e controla contrato e confissão com assinaturas independentes', async (t) => {
+test('Termo Fifty pode partir de venda manual e confissão não é gerada novamente', async (t) => {
   const originals={sales:rows.crm_sales.slice(),receipts:rows.crm_sales_receipts.slice(),contracts:rows.crm_contracts.slice(),documents:rows.crm_contract_documents.slice(),profiles:rows.crm_broker_profiles.slice(),teamProfiles:structuredClone(rows.crm_user_contract_profiles),settings:rows.crm_settings.slice(),audit:rows.crm_audit.slice()};
   t.after(()=>{rows.crm_sales.splice(0,rows.crm_sales.length,...originals.sales);rows.crm_sales_receipts.splice(0,rows.crm_sales_receipts.length,...originals.receipts);rows.crm_contracts.splice(0,rows.crm_contracts.length,...originals.contracts);rows.crm_contract_documents.splice(0,rows.crm_contract_documents.length,...originals.documents);rows.crm_broker_profiles.splice(0,rows.crm_broker_profiles.length,...originals.profiles);rows.crm_user_contract_profiles.splice(0,rows.crm_user_contract_profiles.length,...originals.teamProfiles);rows.crm_settings.splice(0,rows.crm_settings.length,...originals.settings);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
   const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
-  const sale=await invoke('apiSaveSale',[manager.token,{processNumber:'PROC-EXT-77',buyerName:'Comprador fora do CRM',developmentId:'E001',brokerId:userIdBrokerA,soldAt:'2026-11-12',unit:'B-204',unitValue:245000,commissionRatePct:2.5,isSdrSale:true,saleStatus:'Pendência para contabilização',repassStatus:'FASE DO REGISTRO',hasPending:false,pendingDescription:'',accounted:false,notes:'Venda manual externa'}],manager.token);
+  const sale=await invoke('apiSaveSale',[manager.token,{processNumber:'PROC-EXT-77',buyerName:'Comprador fora do CRM',developmentId:'E001',brokerId:userIdBrokerA,sdrId:userIdSdr,soldAt:'2026-11-12',unit:'B-204',unitValue:245000,commissionRatePct:2.5,isSdrSale:true,saleStatus:'Pendência para contabilização',repassStatus:'FASE DO REGISTRO',hasPending:false,pendingDescription:'',accounted:false,notes:'Venda manual externa'}],manager.token);
   assert.equal(sale.body.ok,true,JSON.stringify(sale.body));
   assert.equal(rows.crm_sales.find((item)=>item.id===sale.body.saleId).is_sdr_sale,true);
   const profile={user_id:userIdBrokerA,cpf:'111.222.333-44',cnpj:'12.345.678/0001-90',creci:'12345',address:'Rua de Teste, 100'};rows.crm_user_contract_profiles.push(profile);
@@ -1048,34 +1174,20 @@ test('contrato pode partir de venda manual e controla contrato e confissão com 
   assert.equal(contract.buyer_name,'Comprador fora do CRM');
   assert.equal(Number(contract.unit_value),245000);
   assert.equal(contract.sdr_cnpj,'22.333.444/0001-90');
-  const templateHtml='<!doctype html><html><body><h1>CONFISSÃO {{numero_contrato}}</h1><p>Processo {{numero_processo}}</p><p>{{cliente_nome}}</p></body></html>';
-  const unsafeTemplate=await invoke('apiSaveContractTemplate',[manager.token,{kind:'debt_confession',html:'<html><body><img src="https://example.test/collect?cpf={{cliente_cpf}}"></body></html>'}],manager.token);
-  assert.equal(unsafeTemplate.response.status,400);
-  assert.match(unsafeTemplate.body.message,/referência externa/i);
-  const protocolRelativeTemplate=await invoke('apiSaveContractTemplate',[manager.token,{kind:'debt_confession',html:'<html><body><img src="//example.test/collect"></body></html>'}],manager.token);
-  assert.equal(protocolRelativeTemplate.response.status,400);
-  const savedTemplate=await invoke('apiSaveContractTemplate',[manager.token,{kind:'debt_confession',html:templateHtml}],manager.token);
-  assert.equal(savedTemplate.body.ok,true);
+  const confessionTemplate=await invoke('apiSaveContractTemplate',[manager.token,{kind:'debt_confession',html:'<html><body>Modelo antigo</body></html>'}],manager.token);
+  assert.equal(confessionTemplate.body.ok,false,'A plataforma não deve aceitar novos modelos de confissão.');
+  assert.match(confessionTemplate.body.message,/somente o modelo do Termo Fifty/i);
   const confession=await invoke('apiGenerateContract',[manager.token,contract.id,'debt_confession'],manager.token);
-  assert.equal(confession.body.ok,true,JSON.stringify(confession.body));
-  const generatedConfession=manager.calls.find((call)=>call.path.includes('/storage/v1/object/crm-contracts/generated/')&&call.path.includes('/debt_confession/'));
-  assert.ok(generatedConfession);
-  assert.match(generatedConfession.body,/PROC-EXT-77/);
-  const preparedConfession=await invoke('apiCreateContractUpload',[manager.token,contract.id,{documentKind:'debt_confession',name:'confissao-assinada.pdf',mimeType:'application/pdf',sizeBytes:1200}],manager.token);
-  assert.equal(preparedConfession.body.ok,true,JSON.stringify(preparedConfession.body));
-  const unconfirmed=await invoke('apiConfirmContractSigned',[manager.token,contract.id,preparedConfession.body.documentId,false],manager.token);
-  assert.equal(unconfirmed.body.ok,false);
-  const confessionConfirmed=await invoke('apiConfirmContractSigned',[manager.token,contract.id,preparedConfession.body.documentId,true],manager.token);
-  assert.equal(confessionConfirmed.body.ok,true,JSON.stringify(confessionConfirmed.body));
-  assert.notEqual(contract.status,'Assinado','A confissão não deve assinar automaticamente o contrato principal.');
-  const signedConfessionRegeneration=await invoke('apiGenerateContract',[manager.token,contract.id,'debt_confession'],manager.token);
-  assert.equal(signedConfessionRegeneration.body.ok,false);
-  assert.match(signedConfessionRegeneration.body.message,/assinatura deste documento já foi confirmada/i);
-  const brokerBeforeAgreement=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerA,email:'a@example.test'});
-  assert.equal((await invoke('apiListContracts',[brokerBeforeAgreement.token],brokerBeforeAgreement.token)).body.length,0,'A confissão isolada não libera o registro ao corretor.');
+  assert.equal(confession.body.ok,false,'Novas confissões não devem ser geradas.');
+  assert.match(confession.body.message,/somente o Termo Fifty/i);
   const managerAgain=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
   const agreement=await invoke('apiGenerateContract',[managerAgain.token,contract.id,'agreement'],managerAgain.token);
   assert.equal(agreement.body.ok,true,JSON.stringify(agreement.body));
+  const generatedAgreement=managerAgain.calls.find((call)=>call.path.includes('/storage/v1/object/crm-contracts/generated/')&&call.path.includes('/agreement/'));
+  assert.ok(generatedAgreement,'O Termo Fifty deve ser gerado no armazenamento privado.');
+  assert.match(generatedAgreement.body,/Corretor A/);
+  assert.match(generatedAgreement.body,/SDR de teste/);
+  assert.match(generatedAgreement.body,/Gestor de teste/);
   const preparedAgreement=await invoke('apiCreateContractUpload',[managerAgain.token,contract.id,{documentKind:'agreement',name:'contrato-assinado.pdf',mimeType:'application/pdf',sizeBytes:1400}],managerAgain.token);
   assert.equal(preparedAgreement.body.ok,true,JSON.stringify(preparedAgreement.body));
   const agreementConfirmed=await invoke('apiConfirmContractSigned',[managerAgain.token,contract.id,preparedAgreement.body.documentId,true],managerAgain.token);
@@ -1085,13 +1197,9 @@ test('contrato pode partir de venda manual e controla contrato e confissão com 
   assert.equal(duplicateAgreementUpload.body.ok,false);
   assert.match(duplicateAgreementUpload.body.message,/assinatura deste documento já foi confirmada/i);
   const broker=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerA,email:'a@example.test'});
-  const confessionOnlyVisible=await invoke('apiListContracts',[broker.token],broker.token);
-  assert.equal(confessionOnlyVisible.body.length,1,'O registro passa a ficar visível apenas depois da assinatura confirmada do contrato principal.');
   const visible=await invoke('apiListContracts',[broker.token],broker.token);
   assert.equal(visible.body.length,1);
-  assert.deepEqual(visible.body[0].documents.map((item)=>item.kind).sort(),['agreement','debt_confession']);
-  const confessionDocument=rows.crm_contract_documents.find((item)=>item.id===preparedConfession.body.documentId);
-  assert.equal((await invoke('apiGetContractDocument',[broker.token,confessionDocument.id],broker.token)).response.status,200);
+  assert.deepEqual(visible.body[0].documents.map((item)=>item.kind),['agreement']);
 });
 
 test('gestão registra venda manual sem lead e confirma recebimento integral único', async (t) => {
@@ -1103,7 +1211,7 @@ test('gestão registra venda manual sem lead e confirma recebimento integral ún
   });
   const manager = mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
   const saved = await invoke('apiSaveSale',[manager.token,{
-    buyerName:'Cliente externo ao CRM',processNumber:'PROC-2026-77',developmentId:'E001',brokerId:userIdBrokerA,
+    buyerName:'Cliente externo ao CRM',processNumber:'PROC-2026-77',developmentId:'E001',brokerId:userIdBrokerA,sdrId:userIdSdr,
     soldAt:'2026-11-11',unit:'B-201',unitValue:'250000.00',commissionRatePct:'2',isSdrSale:true,managerCommissionRatePct:'0.5',hasPrize:true,prizeRatePct:'2',saleStatus:'Pendência para contabilização',hasPending:true,
     pendingDescription:'Aguardando conferência documental',accounted:false,
     repassStatus:'FASE DO REGISTRO',notes:'Venda inserida manualmente pela gestão'
@@ -1156,7 +1264,7 @@ test('vendas retornam comissão bruta e divisões corretas, mantendo repasse do 
   const currentId='10000000-0000-4000-8000-000000000095';
   const legacyId='10000000-0000-4000-8000-000000000096';
   rows.crm_sales.push(
-    {id:currentId,internal_number:'MA-VENDA-COMISSAO',process_number:'PROC-COMISSAO',buyer_name:'Comissão atual',development_id:'E001',broker_id:userIdBrokerA,sold_at:'2026-11-12',unit:'C-301',unit_value:200000,sale_status:'Contabilizado',has_pending:false,accounted:true,gross_commission:5000,broker_commission:2500,sdr_commission:2500,expected_repass:2500,repass_status:'AGUARDANDO PJ',created_by:userIdManager,updated_by:userIdManager},
+    {id:currentId,internal_number:'MA-VENDA-COMISSAO',process_number:'PROC-COMISSAO',buyer_name:'Comissão atual',development_id:'E001',broker_id:userIdBrokerA,sdr_id:userIdSdr,is_sdr_sale:true,sold_at:'2026-11-12',unit:'C-301',unit_value:200000,sale_status:'Contabilizado',has_pending:false,accounted:true,gross_commission:5000,broker_commission:2500,sdr_commission:2500,expected_repass:2500,repass_status:'AGUARDANDO PJ',created_by:userIdManager,updated_by:userIdManager},
     {id:legacyId,internal_number:'MA-VENDA-LEGADA',process_number:'PROC-LEGADO',buyer_name:'Comissão legada',development_id:'E001',broker_id:userIdBrokerA,sold_at:'2026-11-11',unit:'C-302',unit_value:180000,sale_status:'Contabilizado',has_pending:false,accounted:true,gross_commission:0,broker_commission:1000,sdr_commission:1000,expected_repass:1000,repass_status:'AGUARDANDO PJ',created_by:userIdManager,updated_by:userIdManager}
   );
   rows.crm_sales_receipts.push({id:'receipt-commission-test',sale_id:currentId,amount:500,received_at:'2026-11-13',created_by:userIdManager});
@@ -1169,9 +1277,55 @@ test('vendas retornam comissão bruta e divisões corretas, mantendo repasse do 
   assert.equal(current.sdrCommission,2500);
   assert.equal(current.expectedRepass,2500);
   assert.equal(current.balanceRepass,2000);
-  assert.equal(current.isSdrSale,null,'Vendas antigas sem classificação permanecem explicitamente como não informadas.');
-  assert.equal(legacy.grossCommission,2000,'Vendas antigas derivam o bruto pela soma das duas partes quando o total não está gravado.');
-  assert.equal(legacy.expectedRepass,1000,'O recebimento continua vinculado somente à parte do corretor.');
+  assert.equal(current.isSdrSale,true,'A venda atual com SDR selecionado permanece classificada como originada pelo SDR.');
+  assert.equal(legacy.grossCommission,2000,'O total bruto legado é recuperado pela soma das partes antigas, sem atribuir uma delas ao SDR.');
+  assert.equal(legacy.brokerCommission,2000,'Sem SDR selecionado, a comissão bruta fica integralmente com o corretor.');
+  assert.equal(legacy.sdrCommission,0,'Valores antigos de SDR sem vínculo selecionado não contam como comissão do SDR.');
+  assert.equal(legacy.expectedRepass,2000);
+});
+
+test('corretor consulta somente as próprias vendas e recebe apenas os dados do seu repasse', async (t) => {
+  const originalSales = rows.crm_sales.slice(); const originalReceipts = rows.crm_sales_receipts.slice();
+  t.after(() => { rows.crm_sales.splice(0, rows.crm_sales.length, ...originalSales); rows.crm_sales_receipts.splice(0, rows.crm_sales_receipts.length, ...originalReceipts); });
+  const ownSaleId = '10000000-0000-4000-8000-000000000171';
+  const otherSaleId = '10000000-0000-4000-8000-000000000172';
+  const archivedSaleId = '10000000-0000-4000-8000-000000000173';
+  rows.crm_sales.push(
+    { id: ownSaleId, internal_number: 'MA-PRÓPRIA', process_number: 'PROC-PRÓPRIO', buyer_name: 'Comprador do corretor A', development_id: 'E001', broker_id: userIdBrokerA, sdr_id: userIdSdr, sold_at: '2026-11-14', unit: 'A-101', unit_value: 200000, sale_status: 'Contabilizado', repass_status: 'AGUARDANDO PJ', gross_commission: 5000, broker_commission: 2500, sdr_commission: 2500, manager_commission_rate_pct: 0.5, manager_commission_value: 1000, has_pending: false, notes: 'Nota interna confidencial', created_by: userIdManager, updated_by: userIdManager },
+    { id: otherSaleId, internal_number: 'MA-ALHEIA', process_number: 'PROC-ALHEIO', buyer_name: 'Comprador do corretor B', development_id: 'E001', broker_id: userIdBrokerB, sold_at: '2026-11-13', unit: 'B-202', unit_value: 180000, sale_status: 'Contabilizado', repass_status: 'AGUARDANDO PJ', broker_commission: 900, expected_repass: 900, has_pending: false },
+    { id: archivedSaleId, internal_number: 'MA-ARQUIVADA', process_number: 'PROC-ARQUIVADA', buyer_name: 'Venda excluída', development_id: 'E001', broker_id: userIdBrokerA, sold_at: '2026-11-12', unit: 'A-103', unit_value: 190000, sale_status: 'Contabilizado', repass_status: 'AGUARDANDO PJ', broker_commission: 950, expected_repass: 950, deleted_at: '2026-11-15T12:00:00Z' }
+  );
+  rows.crm_sales_receipts.push({ id: '10000000-0000-4000-8000-000000000174', sale_id: ownSaleId, amount: 1000, received_at: '2026-11-16', notes: 'Nota financeira interna', created_by: userIdManager });
+  rows.crm_sales_receipts.push({ id: '10000000-0000-4000-8000-000000000175', sale_id: otherSaleId, amount: 900, received_at: '2026-11-16', created_by: userIdManager });
+
+  const broker = mockEnvironmentAndFetch(t, { role: 'Corretor', userId: userIdBrokerA, email: 'a@example.test' });
+  const listed = await invoke('apiListSales', [broker.token, { includeArchived: true }], broker.token);
+  assert.equal(listed.response.status, 200, JSON.stringify(listed.body));
+  assert.equal(listed.body.length, 1, 'o corretor vê somente a venda própria ativa, mesmo pedindo arquivos excluídos');
+  const sale = listed.body[0];
+  assert.equal(sale.id, ownSaleId);
+  assert.equal(sale.buyerName, 'Comprador do corretor A');
+  assert.equal(sale.brokerCommission, 2500);
+  assert.equal(sale.receivedRepass, 1000);
+  assert.equal(sale.balanceRepass, 1500);
+  assert.equal(sale.receipts.length, 1);
+  assert.deepEqual(Object.keys(sale).sort(), ['balanceRepass','brokerCommission','buyerName','developmentName','expectedRepass','hasPending','id','internalNumber','isCancelledOrDistrato','isCommissionPaid','processNumber','receivedRepass','receipts','repassStatus','saleStatus','soldAt','unit','unitValue'].sort());
+  assert.deepEqual(Object.keys(sale.receipts[0]).sort(), ['amount','receivedAt','voidedAt']);
+  const salesQuery = broker.calls.find((call) => call.path === '/rest/v1/crm_sales');
+  assert.equal(salesQuery.query.broker_id, `eq.${userIdBrokerA}`, 'o filtro de carteira deve ser imposto no servidor');
+  assert.equal(salesQuery.query.deleted_at, 'is.null');
+  assert.ok(broker.calls.some((call) => call.path === '/rest/v1/crm_sales_receipts' && call.query.sale_id === `in.(${ownSaleId})`), 'os recebimentos também são limitados às vendas próprias');
+  assert.equal((await invoke('apiSaveSale', [broker.token, { buyerName: 'Não pode cadastrar' }], broker.token)).response.status, 403);
+  assert.equal((await invoke('apiAddSaleReceipt', [broker.token, ownSaleId, { receivedAt: '2026-11-18' }], broker.token)).response.status, 403);
+  assert.equal((await invoke('apiArchiveSale', [broker.token, ownSaleId], broker.token)).response.status, 403);
+
+  const manager = mockEnvironmentAndFetch(t, { role: 'Gerente', userId: userIdManager, email: 'gestao@example.test' });
+  const managerRows = await invoke('apiListSales', [manager.token, { includeArchived: true }], manager.token);
+  assert.equal(managerRows.body.length, 3, 'a gestão mantém o acesso completo, inclusive a arquivos excluídos');
+  const managerOwnSale = managerRows.body.find((item) => item.id === ownSaleId);
+  assert.equal(managerOwnSale.sdrCommission, 2500);
+  assert.equal(managerOwnSale.managerCommissionValue, 1000);
+  assert.equal(managerOwnSale.notes, 'Nota interna confidencial');
 });
 
 test('anulação de recebimento preserva auditoria e não infla lançamentos posteriores', async (t) => {
@@ -1240,7 +1394,7 @@ test('fase do repasse mantém a lista anterior e acrescenta as 16 opções envia
   const previous=['AGUARDANDO PJ','LIBERADO P/ REPASSE','IR FUTURO','PENDÊNCIA PARA LIBERAÇÃO DO REPASSE','REPASSE SFH','ANÁLISE DE CRÉDITO','EMISSÃO DE FORMULÁRIOS','FGTS EM DÉBITO','FGTS EM RESSARCIMENTO','FGTS COM ERRO','FORMULÁRIOS EM ASSINATURA','FORMULÁRIOS ASSINADOS','CRITICADO E ENVIADO P/ CONFORMIDADE','PENDÊNCIA DURANTE O REPASSE','INCONFORME','REANÁLISE DA CONFORMIDADE','CONFORME','AGUARDANDO DEMANDA MÍNIMA','CONFIRMAÇÃO DE VALORES COM CLIENTE','EMISSÃO CONFISSÃO DE DÍVIDA / SOLICITAÇÃO DE CONTRATO','CONTRATO EMITIDO','CONTRATO E CONFISSÃO DE DÍVIDA EM ASSINATURA','CONTRATO EM ASSINATURA E CONFISSÃO ASSINADA','CONTRATO ASSINADO E CONFISSÃO PENDENTE','PROBLEMA NA ASSINATURA DO FINANCIAMENTO','CONTRATO E CONFISSÃO ASSINADOS','CHECK-LIST DE REPASSE APTO PARA CONFERENCIA','AGUARDANDO REPACTUAÇÃO','CHECK-LIST DE REPASSE REPROVADO','CHECK-LIST DE REPASSE APROVADO'];
   const added=['FASE DO REGISTRO','CHECK-LIST DE REGISTRO REPROVADO','LIBERADO PARA REGISTRO','CHECK-LIST DE REGISTRO APROVADO','PRENOTADO','EXIGÊNCIA','ORÇAMENTO À PAGAR','EM REGISTRO','REGISTRADO / ENVIAR GARANTIA','GARANTIA ENVIADA','GARANTIA INCONFORME','RECURSO LIBERADO','SOLICITAÇÃO DE DISTRATO','DISTRATO FINALIZADO','REPASSE CONCLUIDO','COMISSÃO PAGA'];
   assert.equal(added.length,16);
-  const expected=[...previous,...added];
+  const expected=[...previous,...added,'COMISSÃO NA CABEÇA'];
   assert.deepEqual(crmConfig.repassStatuses,expected);
   const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
   const refs=await invoke('apiGetReferenceData',[manager.token],manager.token);
@@ -1256,6 +1410,360 @@ test('fase do repasse mantém a lista anterior e acrescenta as 16 opções envia
   const saved=await invoke('apiSaveSale',[manager.token,{buyerName:'Cliente',developmentId:'E001',brokerId:userIdBrokerA,soldAt:'2026-11-12',unit:'A-1',unitValue:100000,commissionRatePct:2.5,isSdrSale:false,saleStatus:'Pendência para contabilização'}],manager.token);
   assert.equal(saved.body.ok,true,JSON.stringify(saved.body));
   assert.equal(rows.crm_sales.at(-1).repass_status,'FASE DO REGISTRO');
+});
+
+test('recibos e comprovantes respeitam perfis, carteira, assinatura externa e pagamento integral', async (t) => {
+  const originals={sales:structuredClone(rows.crm_sales),documents:structuredClone(rows.crm_commission_documents),audit:structuredClone(rows.crm_audit),profiles:structuredClone(rows.crm_user_contract_profiles)};
+  t.after(()=>{rows.crm_sales.splice(0,rows.crm_sales.length,...originals.sales);rows.crm_commission_documents.splice(0,rows.crm_commission_documents.length,...originals.documents);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);rows.crm_user_contract_profiles.splice(0,rows.crm_user_contract_profiles.length,...originals.profiles);});
+  const saleId='10000000-0000-4000-8000-000000000051';
+  const nonSdrSaleId='10000000-0000-4000-8000-000000000052';
+  rows.crm_sales.push({id:saleId,broker_id:userIdBrokerA,sdr_id:userIdSdr,development_id:'E001',unit_value:314609.34,process_number:'PROC-51',buyer_name:'Compradora de teste',unit:'305',sold_at:'2026-10-29',sale_status:'Contabilizado',repass_status:'FASE DO REGISTRO',is_sdr_sale:true,deleted_at:null});
+  rows.crm_sales.push({id:nonSdrSaleId,broker_id:userIdBrokerA,development_id:'E001',unit_value:314609.34,process_number:'PROC-52',buyer_name:'Compradora sem SDR',unit:'306',sold_at:'2026-10-29',sale_status:'Contabilizado',repass_status:'FASE DO REGISTRO',is_sdr_sale:false,deleted_at:null});
+  rows.crm_user_contract_profiles.push({user_id:userIdBrokerA,cpf:'111.222.333-44',cnpj:'12.345.678/0001-90',creci:'CRECI-1234',address:'Rua do Corretor, 10'}, {user_id:userIdSdr,cpf:'222.333.444-55'}, {user_id:userIdManager,cnpj:'98.765.432/0001-10',address:'Avenida da Gestão, 20'});
+  const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
+  const assistant=mockEnvironmentAndFetch(t,{role:'Assistente',userId:userIdAssistant,email:'assistente@example.test'});
+  const coordinator=mockEnvironmentAndFetch(t,{role:'Coordenador',userId:userIdOtherAdmin,email:'admin2@example.test'});
+  const created=await invoke('apiCreateCommissionReceipt',[manager.token,{saleId,brokerId:userIdBrokerA,managerId:userIdManager,sdrId:userIdSdr,withholdingRatePct:10,paymentDate:'2026-12-05',notes:'Recibo de validação'}],manager.token);
+  assert.equal(created.body.ok,true,JSON.stringify(created.body));
+  assert.equal(created.body.document.commissionBase,314609.34);
+  assert.equal(created.body.document.grossCommission,7865.23);
+  assert.equal(created.body.document.withholdingAmount,786.52);
+  assert.equal(created.body.document.netCommission,7078.71);
+  assert.equal(created.body.document.brokerAmount+created.body.document.sdrAmount,7078.71);
+  assert.equal(created.body.document.signatureStatus,'pending');
+  const exactBrazilianPrice=await invoke('apiSaveSale',[manager.token,{buyerName:'Teste de valor brasileiro',developmentId:'E001',brokerId:userIdBrokerA,soldAt:'2026-11-12',unit:'305',unitValue:'R$ 314.609,34',commissionRatePct:2.5,isSdrSale:false,saleStatus:'Pendência para contabilização',repassStatus:'FASE DO REGISTRO'}],manager.token);
+  assert.equal(exactBrazilianPrice.body.ok,true,JSON.stringify(exactBrazilianPrice.body));
+  const parsedPrice=rows.crm_sales.find((sale)=>sale.id===exactBrazilianPrice.body.saleId);
+  assert.equal(Number(parsedPrice.unit_value),314609.34);
+  assert.equal(Number(parsedPrice.gross_commission),7865.23);
+  const generatedUpload=manager.calls.find((call)=>call.path.includes('/object/crm-finance-documents/generated/'));
+  assert.ok(generatedUpload,'O PDF deve ser gravado no bucket privado de documentos financeiros.');
+  assert.match(generatedUpload.body,/^%PDF-1\.4/);
+  const receiptText=generatedUpload.body.replace(/\\([()\\])/g,'$1');
+  assert.match(receiptText,/DECLARAÇÃO DE RECEBIMENTO DE COMISSÃO/);
+  assert.match(receiptText,/Valor bruto da comissão apurada \(2,5% do valor da venda\)/);
+  assert.match(receiptText,/SDR selecionado para esta venda: SDR de teste/);
+  assert.match(receiptText,/Corretor A \| Corretor responsável/);
+  assert.match(receiptText,/Gestor de teste \| Empresa intermediadora \/ gerente/);
+  assert.match(receiptText,/INTERMEDIAÇÃO DE PAGAMENTO E AUSÊNCIA DE VÍNCULO EMPREGATÍCIO/);
+  assert.doesNotMatch(receiptText,/Letícia da Silva Lima|Luís Fernando Lopes da Silva|Paulo Henrique de Morais Junior/,'Dados nominais do modelo de referência não podem vazar para novos recibos.');
+
+  const duplicate=await invoke('apiCreateCommissionReceipt',[manager.token,{saleId,brokerId:userIdBrokerA,managerId:userIdManager,sdrId:'',withholdingRatePct:0,paymentDate:'2026-12-05'}],manager.token);
+  assert.equal(duplicate.body.ok,false);
+  assert.equal(rows.crm_commission_documents.filter((doc)=>doc.sale_id===saleId&&!doc.archived_at).length,1);
+  const deniedCreate=await invoke('apiCreateCommissionReceipt',[coordinator.token,{saleId,brokerId:userIdBrokerA,managerId:userIdManager,sdrId:'',withholdingRatePct:0,paymentDate:'2026-12-05'}],coordinator.token);
+  assert.equal(deniedCreate.response.status,403);
+  assert.equal((await invoke('apiListCommissionDocuments',[coordinator.token],coordinator.token)).response.status,403);
+
+  const brokerA=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerA,email:'a@example.test'});
+  const brokerB=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerB,email:'b@example.test'});
+  const sdr=mockEnvironmentAndFetch(t,{role:'SDR',userId:userIdSdr,email:'sdr@example.test'});
+  const docId=created.body.document.id;
+  assert.equal((await invoke('apiListCommissionDocuments',[brokerA.token],brokerA.token)).body.length,1);
+  assert.equal((await invoke('apiListCommissionDocuments',[brokerB.token],brokerB.token)).body.length,0);
+  assert.equal((await invoke('apiListCommissionDocuments',[sdr.token],sdr.token)).body.length,1);
+  assert.equal((await invoke('apiGetCommissionDocument',[brokerB.token,docId,'generated'],brokerB.token)).response.status,404);
+  assert.equal((await invoke('apiPrepareCommissionDocumentUpload',[sdr.token,docId,{name:'recibo-assinado.pdf',mimeType:'application/pdf',sizeBytes:2048}],sdr.token)).response.status,403);
+  assert.equal((await invoke('apiPrepareCommissionDocumentUpload',[brokerB.token,docId,{name:'recibo-assinado.pdf',mimeType:'application/pdf',sizeBytes:2048}],brokerB.token)).response.status,404);
+  assert.equal((await invoke('apiUpdateCommissionPayment',[manager.token,docId,{paid:true}],manager.token)).body.ok,false,'Não permite registrar pagamento antes da assinatura.');
+
+  const upload=await invoke('apiPrepareCommissionDocumentUpload',[brokerA.token,docId,{name:'recibo-assinado.pdf',mimeType:'application/pdf',sizeBytes:2048}],brokerA.token);
+  assert.equal(upload.body.ok,true,JSON.stringify(upload.body));
+  assert.match(upload.body.uploadUrl,/crm-finance-documents/);
+  const uploaded=await invoke('apiConfirmCommissionReceiptUpload',[brokerA.token,docId],brokerA.token);
+  assert.equal(uploaded.body.ok,true,JSON.stringify(uploaded.body));
+  const sdrConfirm=await invoke('apiConfirmCommissionReceiptSigned',[sdr.token,docId,true],sdr.token);
+  assert.equal(sdrConfirm.response.status,403,'SDR consulta o recibo, mas não envia nem confirma o arquivo em nome do corretor.');
+  const brokerCannotConfirm=await invoke('apiConfirmCommissionReceiptSigned',[brokerA.token,docId,{broker:true,sdr:true,manager:true}],brokerA.token);
+  assert.equal(brokerCannotConfirm.response.status,403,'Somente gerente/assistente confirma após conferir os signatários externos.');
+  const legacySignerPayload=await invoke('apiConfirmCommissionReceiptSigned',[manager.token,docId,{broker:true,sdr:true,manager:true}],manager.token);
+  assert.equal(legacySignerPayload.body.ok,false,'O recibo não deve exigir nem aceitar confirmação de assinatura do SDR.');
+  assert.match(legacySignerPayload.body.message,/confirmações individuais/i);
+  const signed=await invoke('apiConfirmCommissionReceiptSigned',[manager.token,docId,{broker:true,manager:true}],manager.token);
+  assert.equal(signed.body.ok,true,JSON.stringify(signed.body));
+  assert.equal(rows.crm_commission_documents.find((doc)=>doc.id===docId).signature_status,'signed');
+  assert.equal(rows.crm_commission_documents.find((doc)=>doc.id===docId).sdr_signature_confirmed,false);
+  const paid=await invoke('apiUpdateCommissionPayment',[manager.token,docId,{paid:true}],manager.token);
+  assert.equal(paid.body.ok,true,JSON.stringify(paid.body));
+  assert.equal(rows.crm_commission_documents.find((doc)=>doc.id===docId).payment_status,'paid');
+  assert.equal((await invoke('apiUpdateCommissionPayment',[manager.token,docId,{paid:true}],manager.token)).body.ok,false,'Não permite duplicar pagamento integral.');
+  assert.match((await invoke('apiGetCommissionDocument',[brokerA.token,docId,'signed'],brokerA.token)).body.downloadUrl,/crm-finance-documents/);
+
+  const archivedReceipt=await invoke('apiArchiveCommissionDocument',[manager.token,docId],manager.token);
+  assert.equal(archivedReceipt.body.ok,true);
+  const replacementReceipt=await invoke('apiCreateCommissionReceipt',[assistant.token,{saleId:nonSdrSaleId,brokerId:userIdBrokerA,managerId:userIdManager,sdrId:'',withholdingRatePct:10,paymentDate:'2026-12-05'}],assistant.token);
+  assert.equal(replacementReceipt.body.ok,true,JSON.stringify(replacementReceipt.body));
+  assert.equal(replacementReceipt.body.document.sdrId,'');
+  assert.equal(replacementReceipt.body.document.brokerAmount,7078.71,'Sem SDR, o valor líquido permanece integralmente com o corretor.');
+  assert.equal(replacementReceipt.body.document.sdrAmount,0);
+  assert.equal((await invoke('apiRestoreCommissionDocument',[manager.token,docId],manager.token)).body.ok,true,'A venda original pode ser restaurada porque o recibo substituto pertence a outra venda.');
+  assert.equal((await invoke('apiArchiveCommissionDocument',[assistant.token,replacementReceipt.body.document.id],assistant.token)).body.ok,true);
+  assert.equal((await invoke('apiArchiveCommissionDocument',[manager.token,docId],manager.token)).body.ok,true);
+  assert.equal((await invoke('apiRestoreCommissionDocument',[manager.token,docId],manager.token)).body.ok,true);
+
+  const invoice=await invoke('apiCreateCommissionDocument',[manager.token,{type:'invoice',brokerId:userIdBrokerA,saleId,notes:'Nota fiscal teste'}],manager.token);
+  assert.equal(invoice.body.ok,true,JSON.stringify(invoice.body));
+  assert.equal((await invoke('apiCreateCommissionDocument',[coordinator.token,{type:'invoice',brokerId:userIdBrokerA,saleId}],coordinator.token)).response.status,403);
+  assert.equal((await invoke('apiPrepareCommissionDocumentUpload',[brokerA.token,invoice.body.documentId,{name:'nota.pdf',mimeType:'application/pdf',sizeBytes:1000}],brokerA.token)).response.status,403);
+  const attachment=await invoke('apiPrepareCommissionDocumentUpload',[manager.token,invoice.body.documentId,{name:'nota.pdf',mimeType:'application/pdf',sizeBytes:1000}],manager.token);
+  assert.equal(attachment.body.ok,true,JSON.stringify(attachment.body));
+  assert.equal((await invoke('apiConfirmCommissionDocumentUpload',[manager.token,invoice.body.documentId],manager.token)).body.ok,true);
+  assert.equal((await invoke('apiGetCommissionDocument',[brokerB.token,invoice.body.documentId,'stored'],brokerB.token)).response.status,404);
+  assert.equal((await invoke('apiArchiveCommissionDocument',[coordinator.token,invoice.body.documentId],coordinator.token)).response.status,403);
+  assert.equal((await invoke('apiArchiveCommissionDocument',[manager.token,invoice.body.documentId],manager.token)).body.ok,true);
+  assert.equal((await invoke('apiConfirmCommissionDocumentUpload',[manager.token,invoice.body.documentId],manager.token)).body.ok,false,'Documento arquivado não pode ser confirmado como recebido.');
+  assert.equal((await invoke('apiListCommissionDocuments',[brokerA.token],brokerA.token)).body.some((doc)=>doc.id===invoice.body.documentId),false);
+  assert.equal((await invoke('apiListCommissionDocuments',[manager.token,{includeArchived:true}],manager.token)).body.some((doc)=>doc.id===invoice.body.documentId),true);
+  assert.equal((await invoke('apiRestoreCommissionDocument',[manager.token,invoice.body.documentId],manager.token)).body.ok,true);
+  const paymentProof=await invoke('apiCreateCommissionDocument',[manager.token,{type:'payment_proof',brokerId:userIdBrokerA,saleId,notes:'Comprovante do pagamento da comissão'}],manager.token);
+  assert.equal(paymentProof.body.ok,true,JSON.stringify(paymentProof.body));
+  assert.equal(rows.crm_commission_documents.find((doc)=>doc.id===paymentProof.body.documentId).document_type,'payment_proof');
+  assert.equal((await invoke('apiListCommissionDocuments',[brokerA.token],brokerA.token)).body.some((doc)=>doc.id===paymentProof.body.documentId),true,'O comprovante vinculado fica visível na base do corretor responsável.');
+  assert.equal((await invoke('apiPrepareCommissionDocumentUpload',[brokerA.token,paymentProof.body.documentId,{name:'comprovante.pdf',mimeType:'application/pdf',sizeBytes:1024}],brokerA.token)).response.status,403,'O corretor consulta o comprovante, mas somente gerente/assistente o anexam.');
+  const paymentProofUpload=await invoke('apiPrepareCommissionDocumentUpload',[manager.token,paymentProof.body.documentId,{name:'comprovante.pdf',mimeType:'application/pdf',sizeBytes:1024}],manager.token);
+  assert.equal(paymentProofUpload.body.ok,true,JSON.stringify(paymentProofUpload.body));
+  assert.equal((await invoke('apiConfirmCommissionDocumentUpload',[manager.token,paymentProof.body.documentId],manager.token)).body.ok,true);
+  assert.ok(rows.crm_audit.some((item)=>item.action==='commission_receipt.generate'));
+  assert.ok(rows.crm_audit.some((item)=>item.action==='commission_receipt.signed'));
+  assert.ok(rows.crm_audit.some((item)=>item.action==='commission_receipt.payment_completed'));
+});
+
+test('falha ao gerar link de upload não grava caminho inválido no histórico financeiro', async (t) => {
+  const originals={documents:structuredClone(rows.crm_commission_documents),audit:structuredClone(rows.crm_audit)};
+  t.after(()=>{rows.crm_commission_documents.splice(0,rows.crm_commission_documents.length,...originals.documents);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
+  const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test',financeUploadSignUnavailable:true});
+  const created=await invoke('apiCreateCommissionDocument',[manager.token,{type:'invoice',brokerId:userIdBrokerA,notes:'Prévia para teste de falha'}],manager.token);
+  assert.equal(created.body.ok,true,JSON.stringify(created.body));
+  const response=await invoke('apiPrepareCommissionDocumentUpload',[manager.token,created.body.documentId,{name:'nota.pdf',mimeType:'application/pdf',sizeBytes:1024}],manager.token);
+  assert.equal(response.response.status,502);
+  assert.equal(rows.crm_commission_documents.find((item)=>item.id===created.body.documentId).storage_path,undefined);
+});
+
+test('agenda de atendimentos mostra dados completos ao dono e apenas ocupado para colegas', async (t) => {
+  const originals={appointments:structuredClone(rows.crm_appointments),locations:structuredClone(rows.crm_manager_locations)};
+  t.after(()=>{rows.crm_appointments.splice(0,rows.crm_appointments.length,...originals.appointments);rows.crm_manager_locations.splice(0,rows.crm_manager_locations.length,...originals.locations);});
+  const date=operationToday();
+  rows.crm_appointments.push(
+    {id:'10000000-0000-4000-8000-000000000101',broker_id:userIdBrokerA,development_id:'E001',client_name:'Cliente privado A',stand:'Stand Norte',starts_at:`${date}T10:00:00-03:00`,ends_at:`${date}T11:00:00-03:00`,status:'Agendado',notes:'Observação privada A',deleted_at:null},
+    {id:'10000000-0000-4000-8000-000000000102',broker_id:userIdBrokerB,development_id:'E001',client_name:'Cliente privado B',stand:'Stand Sul',starts_at:`${date}T12:00:00-03:00`,ends_at:`${date}T13:00:00-03:00`,status:'Agendado',notes:'Observação privada B',deleted_at:null},
+    {id:'10000000-0000-4000-8000-000000000103',broker_id:userIdBrokerB,development_id:'E001',client_name:'Cancelado de colega',stand:'',starts_at:`${date}T14:00:00-03:00`,ends_at:`${date}T15:00:00-03:00`,status:'Cancelado',notes:'',deleted_at:null}
+  );
+  rows.crm_manager_locations.push({id:'10000000-0000-4000-8000-000000000104',manager_id:userIdManager,location:'Unidade Centro',starts_at:`${date}T09:00:00-03:00`,ends_at:`${date}T10:00:00-03:00`,notes:'Observação interna',deleted_at:null});
+  const broker=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerA,email:'a@example.test'});
+  const ownView=await invoke('apiListAppointments',[broker.token,{dateFrom:date,dateTo:date}],broker.token);
+  assert.equal(ownView.response.status,200,JSON.stringify(ownView.body));
+  const own=ownView.body.appointments.find((item)=>item.clientName==='Cliente privado A');
+  const coworker=ownView.body.appointments.find((item)=>item.occupied);
+  assert.equal(own.notes,'Observação privada A');
+  assert.equal(coworker.clientName,'Ocupado');
+  assert.deepEqual(Object.keys(coworker).sort(),['clientName','endsAt','id','occupied','startsAt']);
+  assert.equal(JSON.stringify(ownView.body).includes('Cliente privado B'),false);
+  assert.equal(JSON.stringify(ownView.body).includes('Observação privada B'),false);
+  assert.equal(JSON.stringify(ownView.body).includes('Observação interna'),false);
+  assert.equal(ownView.body.appointments.some((item)=>item.id==='10000000-0000-4000-8000-000000000103'),false,'cancelamento de colega não aparece para o corretor');
+  const management=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
+  const managerView=await invoke('apiListAppointments',[management.token,{dateFrom:date,dateTo:date}],management.token);
+  assert.equal(managerView.body.appointments.find((item)=>item.clientName==='Cliente privado B').notes,'Observação privada B');
+  assert.equal(managerView.body.managerLocations[0].notes,'Observação interna');
+  const managerLocationsForBroker=await invoke('apiListManagerLocations',[broker.token,{dateFrom:date,dateTo:date}],broker.token);
+  assert.equal(managerLocationsForBroker.body[0].notes,'');
+  const sdr=mockEnvironmentAndFetch(t,{role:'SDR',userId:userIdSdr,email:'sdr@example.test'});
+  assert.equal((await invoke('apiListAppointments',[sdr.token,{dateFrom:date,dateTo:date}],sdr.token)).response.status,403);
+});
+
+test('agenda cria, vincula, atualiza e cancela com controle de carteira e bloqueio de conflito', async (t) => {
+  const originals={appointments:structuredClone(rows.crm_appointments),leads:structuredClone(rows.crm_leads),audit:structuredClone(rows.crm_audit)};
+  t.after(()=>{rows.crm_appointments.splice(0,rows.crm_appointments.length,...originals.appointments);rows.crm_leads.splice(0,rows.crm_leads.length,...originals.leads);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
+  const date=operationToday();
+  const linkedLeadId='10000000-0000-4000-8000-000000000140';
+  rows.crm_leads.push({id:linkedLeadId,name:'Lead UUID de teste',phone:'11999990140',development_id:'E001',notes:'',sdr_feedback:'',status:'Em contato',broker_id:userIdBrokerA,created_at:`${date}T10:00:00Z`,created_by:userIdBrokerA,updated_at:`${date}T10:00:00Z`,updated_by:userIdBrokerA,deleted_at:null});
+  rows.crm_appointments.push({id:'10000000-0000-4000-8000-000000000111',broker_id:userIdBrokerA,development_id:'E001',client_name:'Reserva existente',stand:'Stand Centro',starts_at:`${date}T10:00:00-03:00`,ends_at:`${date}T11:00:00-03:00`,status:'Agendado',notes:'',deleted_at:null});
+  const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
+  const conflict=await invoke('apiSaveAppointment',[manager.token,{clientName:'Conflito de horário',developmentId:'E001',brokerId:userIdBrokerA,stand:'Stand Centro',startsAt:`${date}T10:30:00-03:00`,endsAt:`${date}T11:30:00-03:00`,status:'Agendado'}],manager.token);
+  assert.equal(conflict.body.ok,false);
+  assert.match(conflict.body.message,/horário está ocupado/i);
+  const created=await invoke('apiSaveAppointment',[manager.token,{clientName:'Cliente vinculado',leadId:linkedLeadId,developmentId:'E001',brokerId:userIdBrokerA,stand:'Stand Centro',startsAt:`${date}T12:00:00-03:00`,endsAt:`${date}T13:00:00-03:00`,status:'Agendado',notes:'Visita confirmada'}],manager.token);
+  assert.equal(created.body.ok,true,JSON.stringify(created.body));
+  assert.match(created.body.message,/produção continuam sendo lançados manualmente/i);
+  const saved=rows.crm_appointments.find((item)=>item.id===created.body.appointmentId);
+  assert.equal(saved.lead_id,linkedLeadId);
+  assert.equal(rows.crm_leads.find((item)=>item.id===linkedLeadId).status,'Atendimento agendado');
+  assert.ok(rows.crm_audit.some((item)=>item.action==='appointment.create'&&item.entity_id===saved.id));
+  const brokerB=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerB,email:'b@example.test'});
+  assert.equal((await invoke('apiSaveAppointment',[brokerB.token,{id:saved.id,clientName:'Tentativa cruzada',developmentId:'E001',brokerId:userIdBrokerA,startsAt:saved.starts_at,endsAt:saved.ends_at,status:'Agendado'}],brokerB.token)).response.status,403);
+  const updated=await invoke('apiSaveAppointment',[manager.token,{id:saved.id,clientName:saved.client_name,leadId:saved.lead_id,developmentId:saved.development_id,brokerId:saved.broker_id,stand:saved.stand,startsAt:saved.starts_at,endsAt:saved.ends_at,status:'Realizado',notes:saved.notes}],manager.token);
+  assert.equal(updated.body.ok,true,JSON.stringify(updated.body));
+  assert.equal(rows.crm_leads.find((item)=>item.id===linkedLeadId).status,'Atendimento realizado');
+  assert.ok(rows.crm_audit.some((item)=>item.action==='appointment.update'&&item.entity_id===saved.id));
+  const cancelled=await invoke('apiArchiveAppointment',[manager.token,saved.id],manager.token);
+  assert.equal(cancelled.body.ok,true,JSON.stringify(cancelled.body));
+  assert.equal(saved.status,'Cancelado');
+  const unexpected=await invoke('apiSaveAppointment',[manager.token,{clientName:'Campos extras',developmentId:'E001',brokerId:userIdBrokerA,startsAt:`${date}T15:00:00-03:00`,endsAt:`${date}T16:00:00-03:00`,status:'Agendado',isAdmin:true}],manager.token);
+  assert.equal(unexpected.body.ok,false);
+});
+
+test('notificações da agenda ficam no CRM e chegam só à gestão e ao corretor criador', async (t) => {
+  const originals={notifications:structuredClone(rows.crm_in_app_notifications),appointments:structuredClone(rows.crm_appointments)};
+  t.after(()=>{rows.crm_in_app_notifications.splice(0,rows.crm_in_app_notifications.length,...originals.notifications);rows.crm_appointments.splice(0,rows.crm_appointments.length,...originals.appointments);});
+  const date=operationShiftDate(operationToday(),1);
+  const broker=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerA,email:'a@example.test'});
+  const created=await invoke('apiSaveAppointment',[broker.token,{clientName:'Atendimento para notificação',developmentId:'E001',startsAt:`${date}T12:00:00-03:00`,endsAt:`${date}T13:00:00-03:00`,status:'Agendado'}],broker.token);
+  assert.equal(created.body.ok,true,JSON.stringify(created.body));
+  const notices=rows.crm_in_app_notifications.filter((item)=>item.appointment_id===created.body.appointmentId);
+  assert.deepEqual(new Set(notices.map((item)=>item.recipient_id)),new Set([userIdBrokerA,userIdManager,userIdAssistant]));
+  const own=await invoke('apiListNotifications',[broker.token],broker.token);
+  const ownAppointmentNotices=own.body.items.filter((item)=>item.appointmentId===created.body.appointmentId);
+  assert.equal(ownAppointmentNotices.length,1);assert.equal(Boolean(ownAppointmentNotices[0].readAt),false);
+  const otherBroker=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerB,email:'b@example.test'});
+  assert.deepEqual((await invoke('apiListNotifications',[otherBroker.token],otherBroker.token)).body.items,[]);
+  assert.equal((await invoke('apiMarkNotificationRead',[otherBroker.token,notices[0].id],otherBroker.token)).body.ok,false);
+  assert.equal((await invoke('apiMarkNotificationRead',[broker.token,notices.find((item)=>item.recipient_id===userIdBrokerA).id],broker.token)).body.ok,true);
+});
+
+test('constraint do banco protege agendamentos simultâneos e devolve conflito amigável', async (t) => {
+  const date=operationToday();
+  const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test',appointmentConstraintConflict:true});
+  const response=await invoke('apiSaveAppointment',[manager.token,{clientName:'Reserva concorrente',developmentId:'E001',brokerId:userIdBrokerA,stand:'',startsAt:`${date}T16:00:00-03:00`,endsAt:`${date}T17:00:00-03:00`,status:'Agendado'}],manager.token);
+  assert.equal(response.response.status,409);
+  assert.match(response.body.message,/acabou de ser reservado/i);
+});
+
+test('localização do gerente é criada, removida com histórico e restrita a gerente/assistente', async (t) => {
+  const originals={locations:structuredClone(rows.crm_manager_locations),audit:structuredClone(rows.crm_audit)};
+  t.after(()=>{rows.crm_manager_locations.splice(0,rows.crm_manager_locations.length,...originals.locations);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
+  const date=operationToday();
+  const assistant=mockEnvironmentAndFetch(t,{role:'Assistente',userId:userIdAssistant,email:'assistente@example.test'});
+  const saved=await invoke('apiSaveManagerLocation',[assistant.token,{location:'Stand Central',startsAt:`${date}T09:00:00-03:00`,endsAt:`${date}T11:00:00-03:00`,notes:'Reunião de equipe'}],assistant.token);
+  assert.equal(saved.body.ok,true,JSON.stringify(saved.body));
+  const location=rows.crm_manager_locations.find((item)=>item.location==='Stand Central');
+  assert.equal(location.manager_id,userIdManager);
+  const overlap=await invoke('apiSaveManagerLocation',[assistant.token,{location:'Outro compromisso',startsAt:`${date}T10:00:00-03:00`,endsAt:`${date}T12:00:00-03:00`,notes:''}],assistant.token);
+  assert.equal(overlap.body.ok,false);
+  assert.match(overlap.body.message,/período já está ocupado/i);
+  assert.ok(rows.crm_audit.some((item)=>item.action==='manager_location.create'&&item.entity_id===location.id));
+  const broker=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerA,email:'a@example.test'});
+  assert.equal((await invoke('apiSaveManagerLocation',[broker.token,{location:'Privado',startsAt:`${date}T12:00:00-03:00`,endsAt:`${date}T13:00:00-03:00`}],broker.token)).response.status,403);
+  const archived=await invoke('apiArchiveManagerLocation',[assistant.token,location.id],assistant.token);
+  assert.equal(archived.body.ok,true,JSON.stringify(archived.body));
+  assert.ok(location.deleted_at);
+  assert.ok(rows.crm_audit.some((item)=>item.action==='manager_location.archive'&&item.entity_id===location.id));
+});
+
+test('ouvidoria protege anonimato, restringe a gestão e exige resposta para concluir', async (t) => {
+  const originals={complaints:structuredClone(rows.crm_complaints),audit:structuredClone(rows.crm_audit)};
+  t.after(()=>{rows.crm_complaints.splice(0,rows.crm_complaints.length,...originals.complaints);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
+  const brokerA=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerA,email:'a@example.test'});
+  const identified=await invoke('apiCreateComplaint',[brokerA.token,{category:'Sugestão',message:'Precisamos de um material de apoio para os plantões.',anonymous:false}],brokerA.token);
+  const anonymous=await invoke('apiCreateComplaint',[brokerA.token,{category:'Reclamação',message:'O horário do plantão precisa ser reorganizado.',anonymous:true}],brokerA.token);
+  assert.equal(identified.body.ok,true);assert.equal(anonymous.body.ok,true);
+  const anonymousRow=rows.crm_complaints.find((item)=>item.anonymous);
+  assert.equal(anonymousRow.author_id,null);
+  assert.equal(rows.crm_audit.some((item)=>item.entity_id===anonymousRow.id&&item.action==='complaint.create'),false);
+  assert.equal((await invoke('apiListComplaints',[brokerA.token],brokerA.token)).body.length,1);
+  const brokerB=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerB,email:'b@example.test'});
+  assert.equal((await invoke('apiListComplaints',[brokerB.token],brokerB.token)).body.length,0);
+  const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
+  const received=await invoke('apiListComplaints',[manager.token],manager.token);
+  assert.equal(received.body.length,2);
+  assert.equal(received.body.find((item)=>item.anonymous).authorName,'Manifestação anônima');
+  assert.equal((await invoke('apiUpdateComplaint',[manager.token,anonymousRow.id,{status:'Respondida',managementResponse:''}],manager.token)).body.ok,false);
+  const answered=await invoke('apiUpdateComplaint',[manager.token,anonymousRow.id,{status:'Respondida',managementResponse:'A gestão revisará o planejamento dos plantões.'}],manager.token);
+  assert.equal(answered.body.ok,true);
+  const brokerDenied=await invoke('apiUpdateComplaint',[brokerA.token,anonymousRow.id,{status:'Respondida',managementResponse:'Resposta indevida'}],brokerA.token);
+  assert.equal(brokerDenied.response.status,403);
+  assert.equal((await invoke('apiCreateComplaint',[brokerA.token,{category:'Sugestão',message:'Mensagem com campos extras válidos.',anonymous:false,managementResponse:'forjado'}],brokerA.token)).body.ok,false);
+  assert.ok(rows.crm_audit.some((item)=>item.entity_id===anonymousRow.id&&item.action==='complaint.update'));
+});
+
+test('ranking operacional mantém a equipe completa para gestão e não expõe colegas ao corretor', async (t) => {
+  const originals={entries:structuredClone(rows.crm_production_entries),attendance:structuredClone(rows.crm_attendance_records)};
+  t.after(()=>{rows.crm_production_entries.splice(0,rows.crm_production_entries.length,...originals.entries);rows.crm_attendance_records.splice(0,rows.crm_attendance_records.length,...originals.attendance);});
+  const date=operationToday();
+  rows.crm_production_entries.push(
+    {id:'10000000-0000-4000-8000-000000000121',broker_id:userIdBrokerA,work_date:date,prospecting_count:4,interaction_count:2,appointment_count:1,visit_count:1,sale_count:1,folder_count:1,created_at:`${date}T12:00:00Z`,updated_at:`${date}T12:00:00Z`},
+    {id:'10000000-0000-4000-8000-000000000122',broker_id:userIdBrokerB,work_date:date,prospecting_count:8,interaction_count:3,appointment_count:2,visit_count:2,sale_count:0,folder_count:0,created_at:`${date}T12:00:00Z`,updated_at:`${date}T12:00:00Z`}
+  );
+  rows.crm_attendance_records.push({id:'10000000-0000-4000-8000-000000000123',broker_id:userIdBrokerB,attendance_date:date,shift:'morning',created_at:`${date}T12:00:00Z`,updated_at:`${date}T12:00:00Z`});
+  const broker=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerA,email:'a@example.test'});
+  const privateView=await invoke('apiGetOperationsDashboard',[broker.token,{period:'week'}],broker.token);
+  assert.equal(privateView.response.status,200,JSON.stringify(privateView.body));
+  assert.deepEqual(privateView.body.byBroker.map((row)=>row.id),[userIdBrokerA]);
+  assert.deepEqual(privateView.body.ranking.map((row)=>row.id),[userIdBrokerA]);
+  assert.equal(Object.hasOwn(privateView.body.ranking[0],'weightedScore'),false);
+  assert.equal(JSON.stringify(privateView.body).includes(userIdBrokerB),false);
+  const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
+  const filteredTeam=await invoke('apiGetOperationsDashboard',[manager.token,{period:'week',brokerId:userIdBrokerA}],manager.token);
+  assert.deepEqual(filteredTeam.body.byBroker.map((row)=>row.id),[userIdBrokerA]);
+  assert.deepEqual(new Set(filteredTeam.body.ranking.map((row)=>row.id)),new Set([userIdBrokerA,userIdBrokerB]));
+  assert.equal(filteredTeam.body.ranking.length,2,'o filtro individual não deve recalcular o ranking da equipe');
+});
+
+test('agenda não alimenta a produção; agendamentos são lançados manualmente pelo corretor', async (t) => {
+  const originals={entries:structuredClone(rows.crm_production_entries),appointments:structuredClone(rows.crm_appointments)};
+  t.after(()=>{rows.crm_production_entries.splice(0,rows.crm_production_entries.length,...originals.entries);rows.crm_appointments.splice(0,rows.crm_appointments.length,...originals.appointments);});
+  const date=operationToday();
+  rows.crm_production_entries.push(
+    {id:'10000000-0000-4000-8000-000000000141',broker_id:userIdBrokerA,work_date:date,prospecting_count:0,interaction_count:0,appointment_count:1,visit_count:0,sale_count:0,folder_count:0,created_at:`${date}T12:00:00Z`,updated_at:`${date}T12:00:00Z`},
+    {id:'10000000-0000-4000-8000-000000000142',broker_id:userIdBrokerB,work_date:date,prospecting_count:0,interaction_count:0,appointment_count:4,visit_count:0,sale_count:0,folder_count:0,created_at:`${date}T12:00:00Z`,updated_at:`${date}T12:00:00Z`}
+  );
+  rows.crm_appointments.push(
+    {id:'10000000-0000-4000-8000-000000000143',broker_id:userIdBrokerA,starts_at:`${date}T10:00:00-03:00`,ends_at:`${date}T11:00:00-03:00`,status:'Agendado',deleted_at:null},
+    {id:'10000000-0000-4000-8000-000000000144',broker_id:userIdBrokerA,starts_at:`${date}T14:00:00-03:00`,ends_at:`${date}T15:00:00-03:00`,status:'Realizado',deleted_at:null},
+    {id:'10000000-0000-4000-8000-000000000145',broker_id:userIdBrokerA,starts_at:`${date}T16:00:00-03:00`,ends_at:`${date}T17:00:00-03:00`,status:'Cancelado',deleted_at:null},
+    {id:'10000000-0000-4000-8000-000000000146',broker_id:userIdBrokerB,starts_at:`${date}T10:00:00-03:00`,ends_at:`${date}T11:00:00-03:00`,status:'Agendado',deleted_at:null}
+  );
+  const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
+  const report=await invoke('apiGetOperationsDashboard',[manager.token,{period:'week'}],manager.token);
+  assert.equal(report.response.status,200,JSON.stringify(report.body));
+  assert.equal(report.body.byBroker.find((row)=>row.id===userIdBrokerA).appointments,1,'a produção preserva somente o lançamento manual; agendamentos ativos ou cancelados da agenda não alteram o indicador');
+  assert.equal(report.body.byBroker.find((row)=>row.id===userIdBrokerB).appointments,4,'a agenda não é somada aos lançamentos manuais');
+  assert.equal(report.body.totals.appointments,5);
+});
+
+test('VGV e farol excluem cancelamentos, usam dias corridos e são restritos à gestão financeira', async (t) => {
+  const originals={sales:structuredClone(rows.crm_sales),users:structuredClone(rows.crm_users)};
+  t.after(()=>{rows.crm_sales.splice(0,rows.crm_sales.length,...originals.sales);rows.crm_users.splice(0,rows.crm_users.length,...originals.users);});
+  const today=operationToday();const date=(daysAgo)=>operationShiftDate(today,-daysAgo);
+  for(const id of [userIdBrokerA,userIdBrokerB])rows.crm_users.find((item)=>item.id===id).created_at=`${date(100)}T12:00:00Z`;
+  rows.crm_sales.push(
+    {id:'10000000-0000-4000-8000-000000000131',broker_id:userIdBrokerA,development_id:'E001',sold_at:date(1),unit_value:200000,sale_status:'Contabilizado',repass_status:'FASE DO REGISTRO',deleted_at:null},
+    {id:'10000000-0000-4000-8000-000000000132',broker_id:userIdBrokerB,development_id:'E001',sold_at:date(65),unit_value:150000,sale_status:'Contabilizado',repass_status:'FASE DO REGISTRO',deleted_at:null},
+    {id:'10000000-0000-4000-8000-000000000133',broker_id:userIdBrokerB,development_id:'E001',sold_at:date(1),unit_value:500000,sale_status:'Cancelada',repass_status:'DISTRATO FINALIZADO',deleted_at:null}
+  );
+  const manager=mockEnvironmentAndFetch(t,{role:'Assistente',userId:userIdAssistant,email:'assistente@example.test'});
+  const report=await invoke('apiGetSalesHealthDashboard',[manager.token,{dateFrom:date(90),dateTo:today}],manager.token);
+  assert.equal(report.response.status,200,JSON.stringify(report.body));
+  assert.equal(report.body.totals.sales,2);
+  assert.equal(report.body.totals.vgv,350000);
+  assert.equal(report.body.byBroker.some((item)=>item.brokerId===userIdBrokerB&&item.vgv===500000),false);
+  const brokerB=report.body.health.rows.find((item)=>item.id===userIdBrokerB);
+  assert.equal(brokerB.lastSaleDate,date(65),'a venda cancelada não reinicia o farol');
+  assert.equal(brokerB.daysWithoutSale,65);
+  assert.equal(brokerB.band.id,'orange');
+  assert.equal(report.body.health.alerts.some((item)=>item.brokerId===userIdBrokerB),true);
+  assert.equal(typeof report.body.health.trendDirection,'string');
+  const broker=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerA,email:'a@example.test'});
+  assert.equal((await invoke('apiGetSalesHealthDashboard',[broker.token,{}],broker.token)).response.status,403);
+  const future=await invoke('apiGetSalesHealthDashboard',[manager.token,{dateFrom:today,dateTo:operationShiftDate(today,1)}],manager.token);
+  assert.equal(future.response.status,400);
+});
+
+test('exclusão de contrato é reversível, administrativa e preserva documentos vinculados', async (t) => {
+  const originalContracts=structuredClone(rows.crm_contracts);const originalDocs=structuredClone(rows.crm_contract_documents);const originalAudit=structuredClone(rows.crm_audit);
+  t.after(()=>{rows.crm_contracts.splice(0,rows.crm_contracts.length,...originalContracts);rows.crm_contract_documents.splice(0,rows.crm_contract_documents.length,...originalDocs);rows.crm_audit.splice(0,rows.crm_audit.length,...originalAudit);});
+  const id='10000000-0000-4000-8000-000000000052';const documentId='10000000-0000-4000-8000-000000000053';
+  rows.crm_contracts.push({id,contract_number:'MA-CONTRATO-TESTE',status:'Rascunho',broker_id:userIdBrokerA,sdr_id:userIdSdr,created_at:'2026-11-01T00:00:00Z',updated_at:'2026-11-01T00:00:00Z'});
+  rows.crm_contract_documents.push({id:documentId,contract_id:id,document_type:'generated',document_kind:'agreement',original_name:'termo.doc',storage_path:'generated/test/termo.doc',created_at:'2026-11-01T00:00:00Z'});
+  const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
+  const broker=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerA,email:'a@example.test'});
+  assert.equal((await invoke('apiArchiveContract',[broker.token,id],broker.token)).response.status,403);
+  assert.equal((await invoke('apiArchiveContract',[manager.token,id],manager.token)).body.ok,true);
+  assert.equal((await invoke('apiListContracts',[manager.token],manager.token)).body.some((item)=>item.id===id),false);
+  const archived=await invoke('apiListContracts',[manager.token,{includeArchived:true}],manager.token);
+  assert.equal(archived.body.some((item)=>item.id===id),true);
+  assert.equal(rows.crm_contract_documents.find((item)=>item.id===documentId).storage_path,'generated/test/termo.doc');
+  assert.equal((await invoke('apiRestoreContract',[manager.token,id],manager.token)).body.ok,true);
+  assert.equal((await invoke('apiListContracts',[manager.token],manager.token)).body.some((item)=>item.id===id),true);
 });
 
 test('migration is private by default, grants only scoped reads and contains no user roster', () => {
@@ -1322,7 +1830,8 @@ test('migration do modelo de contrato só acrescenta campos validados', () => {
 
 test('migração comercial aplica os novos status, pagamento integral e matriz de metas sem apagar dados', () => {
   const sql=fs.readFileSync(path.join(root,'supabase/migrations/20261112210000_crm_client_sales_feedback_and_goal_batch.sql'),'utf8');
-  const newCheck=sql.match(/add constraint crm_sales_repass_status_check check \(repass_status in \(([\s\S]*?)\)\);/i);
+  const statusSql=fs.readFileSync(path.join(root,'supabase/migrations/20261117141000_crm_client_feedback_sales_documents.sql'),'utf8');
+  const newCheck=statusSql.match(/add constraint crm_sales_repass_status_check check \(repass_status in \(([\s\S]*?)\)\);/i);
   assert.ok(newCheck,'constraint da fase deve existir');
   const checkValues=[...newCheck[1].matchAll(/'([^']+)'/g)].map((match)=>match[1]);
   assert.deepEqual(checkValues.slice(0,crmConfig.repassStatuses.length),crmConfig.repassStatuses);
@@ -1336,6 +1845,47 @@ test('migração comercial aplica os novos status, pagamento integral e matriz d
   assert.match(sql,/create or replace function public\.crm_save_operation_goals_batch/i);
   assert.match(sql,/jsonb_typeof\(p_goals\) is distinct from 'array'/i);
   assert.doesNotMatch(sql,/(^|\n)\s*(drop\s+table|truncate\s+|delete\s+from)\b/i);
+});
+
+test('migration do feedback reúne vendas, produção e documentos financeiros com privacidade e gravação atômica', () => {
+  const sql=fs.readFileSync(path.join(root,'supabase/migrations/20261117141000_crm_client_feedback_sales_documents.sql'),'utf8');
+  const executableSql=sql.replace(/--[^\n]*/g,'');
+  assert.match(executableSql,/add column if not exists folder_count integer/i);
+  assert.match(executableSql,/add column if not exists deleted_at timestamptz/i);
+  assert.match(executableSql,/crm_commission_documents_one_active_receipt_per_sale_idx/i);
+  assert.match(executableSql,/enable row level security[\s\S]*revoke all on public\.crm_commission_documents from anon, authenticated[\s\S]*grant all on public\.crm_commission_documents to service_role/i);
+  assert.match(executableSql,/values \('crm-finance-documents', 'crm-finance-documents', false/i);
+  assert.match(executableSql,/create or replace function public\.crm_import_operations/i);
+  assert.match(executableSql,/on conflict \(broker_id,attendance_date,shift\) where deleted_at is null do nothing/i);
+  assert.match(executableSql,/insert into public\.crm_audit[\s\S]*'operations'/i);
+  assert.match(executableSql,/grant execute on function public\.crm_import_operations\(text,jsonb,uuid,text,text,text\) to service_role/i);
+  assert.doesNotMatch(executableSql,/(^|\n)\s*(drop\s+table|truncate\s+|delete\s+from)\b/i);
+});
+
+test('migration de agenda e saúde comercial adiciona tabelas privadas e bloqueios contra horários sobrepostos', () => {
+  const sql=fs.readFileSync(path.join(root,'supabase/migrations/20261117152000_crm_appointments_feedback_sales_health.sql'),'utf8');
+  const executableSql=sql.replace(/--[^\n]*/g,'');
+  assert.match(executableSql,/create table if not exists public\.crm_appointments/i);
+  assert.match(executableSql,/create table if not exists public\.crm_manager_locations/i);
+  assert.match(executableSql,/create table if not exists public\.crm_complaints/i);
+  assert.match(executableSql,/crm_appointments_broker_slot_excl[\s\S]*exclude using gist[\s\S]*broker_id with =[\s\S]*tstzrange\(starts_at, ends_at, '\[\)'\) with &&/i);
+  assert.match(executableSql,/crm_appointments_stand_slot_excl[\s\S]*development_id with =[\s\S]*stand with =/i);
+  assert.match(executableSql,/crm_manager_locations_time_excl[\s\S]*manager_id with =[\s\S]*tstzrange\(starts_at, ends_at, '\[\)'\) with &&/i);
+  assert.match(executableSql,/enable row level security[\s\S]*revoke all on public\.crm_appointments, public\.crm_manager_locations, public\.crm_complaints from anon, authenticated[\s\S]*grant all on public\.crm_appointments, public\.crm_manager_locations, public\.crm_complaints to service_role/i);
+  assert.doesNotMatch(executableSql,/(^|\n)\s*(drop\s+table|truncate\s+|delete\s+from)\b/i);
+});
+
+test('migration de notificações agenda signatários e lembretes apenas internos ao CRM', () => {
+  const sql=fs.readFileSync(path.join(root,'supabase/migrations/20261117180000_crm_notifications_receipt_signatures.sql'),'utf8');
+  const executableSql=sql.replace(/--[^\n]*/g,'');
+  assert.match(executableSql,/create table if not exists public\.crm_in_app_notifications/i);
+  assert.match(executableSql,/u\.role in \('Gerente','Assistente'\)/i);
+  assert.match(executableSql,/creator\.id = upcoming\.created_by[\s\S]*creator\.role = 'Corretor'/i);
+  assert.match(executableSql,/d\.signed_uploaded_at is null/i);
+  assert.match(executableSql,/mundo-apto-appointment-reminders', '\*\/5 \* \* \* \*'/i);
+  assert.match(executableSql,/mundo-apto-receipt-signature-reminders', '0 9 \* \* \*'/i);
+  assert.match(executableSql,/enable row level security[\s\S]*revoke all on public\.crm_in_app_notifications from public, anon, authenticated/i);
+  assert.doesNotMatch(executableSql,/net\.http_post|send_email|whatsapp/i,'Os lembretes ficam apenas no CRM.');
 });
 
 test('migration de atualização em tempo real e anulação de recebimentos preserva dados e cálculos', () => {
@@ -1426,7 +1976,7 @@ test('build estático não deixa marcações Apps Script nem credenciais no HTML
   const html = fs.readFileSync(path.join(root, 'public/index.html'), 'utf8');
   assert.doesNotMatch(html, /google\.script|<\?!=|<\?=|__MUNDO_APTO_LOGO_DATA_URI__/);
   assert.match(html, /Ativar acesso administrador/);
-  assert.match(html, /Exportar contratos CSV/);
+  assert.match(html, /Exportar documentos CSV/);
   assert.match(html, /Valor da unidade \(R\$\)/);
   assert.match(html, /Percentual da comissão total/);
   assert.match(html, /Nº da proposta \/ pasta/);

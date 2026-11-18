@@ -53,6 +53,16 @@ test('ficha do cliente oferece histórico de contatos e encaixa a linha do tempo
   assert.match(styles, /\.sdr-history-list\{display:grid;gap:9px;max-height:330px;overflow:auto/);
 });
 
+test('lista de clientes mostra prévia da observação do SDR sem alterar o escopo de acesso', () => {
+  assert.match(client, /'Observação do SDR'/);
+  assert.match(client, /const feedback = String\(lead\.sdrFeedback \|\| ''\)\.trim\(\)/);
+  assert.match(client, /feedback\.slice\(0, 177\)\.trimEnd\(\) \+ '…'/);
+  assert.match(client, /feedbackText\.title = feedback/);
+  assert.match(client, /feedbackCell\.appendChild\(el\('span', 'muted', 'Sem observação'\)\)/);
+  assert.match(styles, /\.sdr-feedback-cell\{min-width:190px;max-width:320px;white-space:normal/);
+  assert.match(styles, /\.sdr-feedback-preview\{display:-webkit-box;.*-webkit-line-clamp:3/);
+});
+
 test('alertas do SDR aparecem no topo do dashboard com destaque e sem envio externo', () => {
   const alertPosition=client.indexOf('area.appendChild(buildSdrAlerts(sdrWorklist))');
   const kpiPosition=client.indexOf("const cards = el('section', 'kpi-grid')");
@@ -79,6 +89,16 @@ test('histórico de recebimentos permite anulação justificada sem apagar o lan
   assert.match(client,/apiVoidSaleReceipt/);
   assert.match(client,/O recebimento ficará marcado como anulado e será preservado no histórico e na auditoria/);
   assert.match(client,/voidReason/);
+});
+
+test('corretor tem área própria de vendas somente para consulta', () => {
+  assert.match(client, /byId\('sales-nav'\)\.classList\.toggle\('hidden', !\(isAdmin\(\) \|\| state\.user\.role === 'Corretor'\)\)/);
+  assert.match(client, /async function renderBrokerSales\(\)/);
+  assert.match(client, /Minhas vendas e repasses/);
+  assert.match(client, /Consulte somente as vendas vinculadas ao seu usuário/);
+  assert.match(client, /Ver pagamentos/);
+  assert.match(client, /if \(state\.user && state\.user\.role === 'Corretor'\) return renderBrokerSales\(\)/);
+  assert.match(styles, /\.sales-broker-kpis/);
 });
 
 test('módulo Sharks está integrado ao mesmo CRM, com filtros diário/semanal/mensal e visão semanal de frequência', () => {
@@ -113,11 +133,13 @@ test('módulos operacionais atualizam o cadastro de corretores e oferecem export
 
 test('vendas exibem comissão bruta e as duas partes de 50% com resumo responsivo', () => {
   assert.match(client,/Comissão bruta total/);
-  assert.match(client,/Corretor \(50%\)/);
-  assert.match(client,/SDR \(50%\)/);
+  assert.match(client,/Sem SDR selecionado, valor integral para o corretor/);
+  assert.match(client,/parte \(50%\)/);
   assert.match(client,/grossCommissionTotal=visibleRows\.reduce/);
   assert.match(client,/brokerCommissionTotal=visibleRows\.reduce/);
-  assert.match(client,/sdrCommissionTotal=visibleRows\.reduce/);
+  assert.match(client,/sdrCommissionTotal=visibleRows\.filter\(\(item\)=>Boolean\(item\.sdrId\)\)\.reduce/);
+  assert.match(client,/managerCommissionReceivable=visibleRows\.filter\(\(item\)=>!item\.isCommissionPaid&&!item\.isCancelledOrDistrato\)\.reduce/);
+  assert.match(client,/Comissão do gerente a receber/);
   assert.match(client,/brl\(sale\.grossCommission\)/);
   assert.match(client,/brl\(sale\.brokerCommission\)/);
   assert.match(client,/brl\(sale\.sdrCommission\)/);
@@ -152,4 +174,38 @@ test('cadastro da equipe centraliza dados contratuais de corretores e SDRs e o r
   assert.match(client,/SDR selecionado é registrado neste contrato/);
   assert.doesNotMatch(client,/CPF do SDR \(necessário para gerar\)/);
   assert.match(styles,/\.contract-party-preview\{grid-column:1\/-1/);
+});
+
+test('agenda, documentos e painéis novos têm filtros por período e histórico consultável', () => {
+  assert.match(client,/Data inicial da agenda/);
+  assert.match(client,/Data final da agenda/);
+  assert.match(client,/state\.appointmentsDateFrom/);
+  assert.match(client,/agendamentos da agenda não são somados automaticamente à produção/i);
+  assert.match(client,/apiArchiveManagerLocation/);
+  assert.match(client,/Cadastrado de/);
+  assert.match(client,/Cadastrado até/);
+  assert.match(client,/formatDate\(doc\.createdAt\)/);
+  assert.match(client,/createdFrom\.value&&createdDate<createdFrom\.value/);
+  assert.match(client,/createdTo\.value&&createdDate>createdTo\.value/);
+  assert.match(client,/Manifestações recebidas/);
+  assert.match(client,/trendDirection/);
+  assert.match(styles,/\.appointment-location-list/);
+  assert.match(styles,/\.complaint-card/);
+  assert.match(styles,/\.vgv-month-bars/);
+});
+
+test('ranking individual não lista colegas e preserva privacidade dos indicadores operacionais', () => {
+  assert.match(client,/Sua posição é exibida sem listar outros corretores/);
+  assert.match(client,/ranking\.map\(\(row\)=>\[String\(row\.rank\|\|'—'\)\+'º',row\.name\]\)/);
+  assert.match(client,/Sua posição é exibida sem listar outros corretores nem revelar os números de produção ou frequência da equipe/);
+});
+
+test('resumo semanal de plantões discrimina corretor, turno, dia e totais do escopo filtrado', () => {
+  assert.match(client,/Frequências semanais por corretor/);
+  assert.match(client,/Detalhamento diário por corretor/);
+  assert.match(client,/Totais diários de toda a equipe/);
+  assert.match(client,/TOTAL DA EQUIPE/);
+  assert.match(client,/\{\.\.\.filters,dateFrom:weekStart,dateTo:attendanceQueryEnd\}/);
+  assert.match(client,/filters\.brokerId/);
+  assert.match(client,/weekTotals\[shift\.id\]/);
 });
