@@ -63,16 +63,24 @@ test('lista de clientes mostra prévia da observação do SDR sem alterar o esco
   assert.match(styles, /\.sdr-feedback-preview\{display:-webkit-box;.*-webkit-line-clamp:3/);
 });
 
-test('alertas do SDR aparecem no topo do dashboard com destaque e sem envio externo', () => {
-  const alertPosition=client.indexOf('area.appendChild(buildSdrAlerts(sdrWorklist))');
-  const kpiPosition=client.indexOf("const cards = el('section', 'kpi-grid')");
-  assert.ok(alertPosition>=0&&kpiPosition>alertPosition,'a fila de alertas precisa anteceder os indicadores do dashboard');
+test('alertas do SDR ficam em uma área própria e sem envio externo', () => {
+  assert.match(index,/data-page="sdrAlerts" id="sdr-alerts-nav"/);
+  assert.match(client,/async function renderSdrAlertsPage\(\)/);
+  assert.match(client,/byId\('sdr-alerts-nav'\)\.classList\.toggle\('hidden', state\.user\.role !== 'SDR'\)/);
+  assert.match(client,/async function updateSdrNavigation\(\)/);
   assert.match(client,/sdr-alert-callout-urgent/);
-  assert.match(client,/A fila fica no topo do painel/);
+  assert.match(client,/As filas e os avisos ficam disponíveis nesta área do CRM/);
   assert.match(client,/não são enviados por e-mail ou WhatsApp/);
   assert.match(client,/A regra de 24 horas inclui fins de semana/);
   assert.match(styles,/\.sdr-alert-callout-urgent\{background:linear-gradient\(110deg,#FFF1F2,#FFF7ED\);border-color:#FCA5A5/);
   assert.match(styles,/\.sdr-worklist-panel\{margin:0 0 18px;border:2px solid #D6AD62/);
+});
+
+test('SDR não tem aba financeira própria e consulta apenas recibos vinculados a partir de Contratos', () => {
+  assert.match(client,/finance-documents-nav'\)\.classList\.toggle\('hidden', !canSeeFinanceDocuments\(\) \|\| isSdr\)/);
+  assert.match(client,/Meus recibos vinculados/);
+  assert.match(client,/Voltar a contratos/);
+  assert.match(client,/SDR_ALLOWED_PAGES = new Set\(\[[^\]]*'financeDocuments'[^\]]*\]\)/);
 });
 
 test('sincronização ao vivo mantém polling de segurança e informa o estado da conexão', () => {
@@ -137,7 +145,7 @@ test('vendas exibem comissão bruta e as duas partes de 50% com resumo responsiv
   assert.match(client,/parte \(50%\)/);
   assert.match(client,/grossCommissionTotal=visibleRows\.reduce/);
   assert.match(client,/brokerCommissionTotal=visibleRows\.reduce/);
-  assert.match(client,/sdrCommissionTotal=visibleRows\.filter\(\(item\)=>Boolean\(item\.sdrId\)\)\.reduce/);
+  assert.match(client,/sdrCommissionTotal=visibleRows\.filter\(\(item\)=>item\.isSdrSale!==false&&Boolean\(item\.sdrId\)\)\.reduce/);
   assert.match(client,/managerCommissionReceivable=visibleRows\.filter\(\(item\)=>!item\.isCommissionPaid&&!item\.isCancelledOrDistrato\)\.reduce/);
   assert.match(client,/Comissão do gerente a receber/);
   assert.match(client,/brl\(sale\.grossCommission\)/);
@@ -167,11 +175,17 @@ test('auditoria informa e-mail do autor e tela administrativa de senha respeita 
 });
 
 test('cadastro da equipe centraliza dados contratuais de corretores e SDRs e o rascunho seleciona o SDR', () => {
-  assert.match(client,/Dados para documentos · ficam no cadastro deste usuário/);
+  assert.match(client,/Os dados para documentos ficam vinculados ao cadastro e podem ser preenchidos para corretores e SDRs/);
   assert.match(client,/contractCpf:contractCpf\.value,contractCnpj:contractCnpj\.value,contractCreci:contractCreci\.value,contractAddress:contractAddress\.value/);
   assert.match(client,/callApi\('apiListUsers',state\.token\)\]\);/);
   assert.match(client,/item\.role==='SDR'&&item\.active/);
-  assert.match(client,/SDR selecionado é registrado neste contrato/);
+  assert.match(client,/O SDR escolhido será vinculado à venda/);
+  assert.match(client,/O CPF do comprador é opcional/);
+  assert.match(client,/CPF.*CNPJ, CRECI e endereço do corretor\/SDR são opcionais|CNPJ, CRECI e endereço do corretor\/SDR podem ficar vazios/);
+  assert.match(client,/contractCpf\.required=true/);
+  assert.match(client,/número da proposta é obrigatório somente ao gerar o Termo Fifty/i);
+  assert.match(client,/const updateContractProfileRequirements=[\s\S]*role\.value==='Gerente'/);
+  assert.match(client,/O gerente selecionado como signatário precisa ter CPF, CNPJ, CRECI e endereço completos/);
   assert.doesNotMatch(client,/CPF do SDR \(necessário para gerar\)/);
   assert.match(styles,/\.contract-party-preview\{grid-column:1\/-1/);
 });
@@ -200,12 +214,22 @@ test('ranking individual não lista colegas e preserva privacidade dos indicador
   assert.match(client,/Sua posição é exibida sem listar outros corretores nem revelar os números de produção ou frequência da equipe/);
 });
 
-test('resumo semanal de plantões discrimina corretor, turno, dia e totais do escopo filtrado', () => {
+test('resumo semanal de plantões mostra corretor, turno e totais sem detalhamento dia a dia', () => {
   assert.match(client,/Frequências semanais por corretor/);
-  assert.match(client,/Detalhamento diário por corretor/);
-  assert.match(client,/Totais diários de toda a equipe/);
+  assert.doesNotMatch(client,/Detalhamento diário por corretor/);
+  assert.doesNotMatch(client,/Totais diários de toda a equipe/);
+  assert.match(client,/TOTAL DO CORRETOR FILTRADO/);
   assert.match(client,/TOTAL DA EQUIPE/);
   assert.match(client,/\{\.\.\.filters,dateFrom:weekStart,dateTo:attendanceQueryEnd\}/);
   assert.match(client,/filters\.brokerId/);
   assert.match(client,/weekTotals\[shift\.id\]/);
+});
+
+test('agenda abre mês por padrão e monta formulários antes das consultas secundárias', () => {
+  assert.match(client,/appointmentsView: 'month'/);
+  assert.match(client,/Visão mensal/);
+  const appointment=client.slice(client.indexOf('function openAppointmentDialog('),client.indexOf('function dataCanManageAgenda('));
+  assert.ok(appointment.indexOf('showAdminDialog(dialog,content,box)')<appointment.indexOf("callApi('apiListLeads'"),'o modal deve abrir sem esperar a busca opcional de clientes');
+  const contract=client.slice(client.indexOf('async function openContractDialog('),client.indexOf('async function openContractTemplateDialog('));
+  assert.ok(contract.indexOf('showAdminDialog(dialog,content,loading)')<contract.indexOf("callApi('apiListSales'"),'o formulário do Termo Fifty deve indicar carregamento em vez de deixar o clique sem resposta');
 });

@@ -403,9 +403,11 @@ var CrmDomain = (function () {
 
   function paginate(list, page, pageSize) {
     var size = Math.max(1, Math.min(Number(pageSize) || 50, 100));
-    var pageNumber = Math.max(1, Number(page) || 1);
+    var rows = list || [];
+    var pageCount = Math.max(1, Math.ceil(rows.length / size));
+    var pageNumber = Math.min(pageCount, Math.max(1, Number(page) || 1));
     var start = (pageNumber - 1) * size;
-    return { items: (list || []).slice(start, start + size), page: pageNumber, pageSize: size, total: (list || []).length };
+    return { items: rows.slice(start, start + size), page: pageNumber, pageSize: size, total: rows.length };
   }
 
   return {

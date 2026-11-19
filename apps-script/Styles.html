@@ -227,6 +227,8 @@
   .ops-attendance-toggle{display:flex;align-items:center;justify-content:center;gap:6px;min-height:34px;width:100%;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--muted);font-size:10px;font-weight:700}
   .ops-attendance-toggle.is-present{border-color:#B9944D;background:#F3E9D3;color:#674612}
   .ops-attendance-toggle:disabled{cursor:default;opacity:1}
+  .ops-attendance-entry{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px;border:1px solid var(--line);border-radius:12px;background:#FAF8F3}
+  .ops-attendance-entry .checkbox-row{min-width:0;padding:10px 12px;border:1px solid #E4DFD4;border-radius:9px;background:#fff}
   .ops-revision{display:inline-flex;padding:3px 7px;border-radius:99px;background:#F3E9D3;color:#674612;font-size:9px;font-weight:800}
   .finance-reminder{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 16px;margin:0 0 16px;border:2px solid #D9A441;border-left:7px solid #B7791F;border-radius:12px;background:linear-gradient(110deg,#FFF7E6,#FFFBF1);color:#583B12;box-shadow:0 5px 16px rgba(115,74,14,.12)}.finance-reminder strong{display:block;font-size:13px}.finance-reminder p{margin:5px 0 0;font-size:11px;line-height:1.45}
   .ops-legend-folders{background:#6B4F2A!important}.ops-chart-bar.folders{background:#6B4F2A}
@@ -270,6 +272,7 @@
     .ops-kpi-grid .kpi-value{font-size:22px}
     .ops-shift-grid{gap:7px}
     .ops-shift-card{padding:11px}
+    .ops-attendance-entry{grid-template-columns:1fr;gap:7px;padding:10px}
     .ops-chart{gap:3px}
     .ops-chart-value,.ops-chart-date{font-size:8px}
     .ops-mini-grid{grid-template-columns:repeat(2,minmax(0,1fr))}

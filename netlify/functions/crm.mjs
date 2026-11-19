@@ -22,7 +22,7 @@ const ALLOWED_METHODS = new Set([
   'apiResetUserPassword', 'apiApplySharedTemporaryPassword', 'apiListDevelopments',
   'apiSaveDevelopment', 'apiPreviewLeadImport', 'apiImportLeads', 'apiExportLeads', 'apiExportReport', 'apiSaveFollowupDays',
   'apiGetOperationsDashboard', 'apiListOperationBrokers', 'apiListProduction', 'apiSaveProduction', 'apiArchiveProduction',
-  'apiListOperationGoals', 'apiSaveOperationGoal', 'apiSaveOperationGoalsBatch', 'apiListAttendance', 'apiSetAttendance',
+  'apiListOperationGoals', 'apiSaveOperationGoal', 'apiSaveOperationGoalsBatch', 'apiDeleteOperationGoal', 'apiListAttendance', 'apiSetAttendance',
   'apiExportOperationsReport', 'apiPreviewOperationsImport', 'apiImportOperations',
   'apiListAppointments', 'apiSaveAppointment', 'apiArchiveAppointment', 'apiListManagerLocations', 'apiSaveManagerLocation', 'apiArchiveManagerLocation',
   'apiListNotifications', 'apiMarkNotificationRead',
@@ -37,7 +37,7 @@ const MUTATING_METHODS = new Set([
   'apiPrepareCommissionDocumentUpload', 'apiConfirmCommissionDocumentUpload', 'apiConfirmCommissionReceiptUpload', 'apiConfirmCommissionReceiptSigned',
   'apiUpdateCommissionPayment', 'apiArchiveCommissionDocument', 'apiRestoreCommissionDocument',
   'apiSaveUser', 'apiArchiveUser', 'apiRestoreUser', 'apiResetUserPassword', 'apiApplySharedTemporaryPassword',
-  'apiSaveProduction', 'apiArchiveProduction', 'apiSaveOperationGoal', 'apiSaveOperationGoalsBatch', 'apiSetAttendance', 'apiArchiveSale', 'apiRestoreSale', 'apiImportOperations',
+  'apiSaveProduction', 'apiArchiveProduction', 'apiSaveOperationGoal', 'apiSaveOperationGoalsBatch', 'apiDeleteOperationGoal', 'apiSetAttendance', 'apiArchiveSale', 'apiRestoreSale', 'apiImportOperations',
   'apiSaveAppointment', 'apiArchiveAppointment', 'apiSaveManagerLocation', 'apiArchiveManagerLocation', 'apiCreateComplaint', 'apiUpdateComplaint',
   'apiMarkNotificationRead'
 ]);
@@ -261,6 +261,7 @@ function mapLead(row, users, developments) {
     status: row.status, brokerId: row.broker_id, brokerName: broker ? broker.name : 'Corretor inativo',
     createdAt: row.created_at, createdBy: row.created_by, updatedAt: row.updated_at,
     updatedBy: row.updated_by, sdrUpdatedAt: row.sdr_updated_at || '', sdrUpdatedBy: row.sdr_updated_by || '',
+    sdrStatusUpdatedAt: row.sdr_status_updated_at || '',
     deletedAt: row.deleted_at || '', deletedBy: row.deleted_by || '',
     phoneCorrectionRequired: row.phone_correction_required === true,
     phoneCorrectionRequestedAt: row.phone_correction_requested_at || '',
@@ -541,6 +542,7 @@ async function loadLeadContext(options = {}) {
 
 async function apiGetDashboard(token, filters) {
   const actor = await verifyActor(token);
+  if (actor.role === 'SDR') throw new HttpError(403, 'O perfil SDR não tem acesso à visão geral gerencial.');
   const [context, eventRows, historyRows, staleBusinessDays] = await Promise.all([
     loadLeadContext(), listAll('crm_lead_events', { select: '*' }), listAll('crm_sdr_history', { select: 'lead_id,at,status,feedback,source' }),
     getFollowupBusinessDays()
@@ -576,6 +578,7 @@ function operationsAccessOf(user) {
   return isAdmin(user) ? 'viewer' : 'none';
 }
 function requireOperationsAccess(user, allowed = ['broker','sdr','viewer','manager']) {
+  if (user && user.role === 'SDR') throw new HttpError(403, 'O perfil SDR não tem acesso às áreas de produção e frequência.');
   if (!allowed.includes(operationsAccessOf(user))) throw new HttpError(403, 'Seu perfil não tem acesso a este módulo operacional.');
 }
 function isOperationsManager(user) { return operationsAccessOf(user) === 'manager'; }
@@ -738,17 +741,23 @@ async function loadOperationsSnapshot(actor, filters = {}) {
   const goalActualRows = range.goalCycle && range.goalStart <= goalActualEnd
     ? await listAll('crm_production_entries', rangeQuery('work_date', range.goalStart, goalActualEnd))
     : [];
+  const uniqueEntryRows = [...new Map([...(entryRows || []), ...(previousEntryRows || []), ...(goalActualRows || [])].map((row) => [String(row.id), row])).values()];
+  const adjustedEntryRows = await applyCancelledSalesToProduction(uniqueEntryRows);
+  const adjustedByEntryId = new Map(adjustedEntryRows.map((row) => [String(row.id), row]));
+  const currentEntryRows = (entryRows || []).map((row) => adjustedByEntryId.get(String(row.id)) || row);
+  const previousAdjustedEntryRows = (previousEntryRows || []).map((row) => adjustedByEntryId.get(String(row.id)) || row);
+  const goalActualAdjustedRows = (goalActualRows || []).map((row) => adjustedByEntryId.get(String(row.id)) || row);
   const users = userRows.map(mapUser);
-  const scopeEntries = (entryRows || []).filter((row) => !brokerFilter || String(row.broker_id) === String(brokerFilter));
+  const scopeEntries = currentEntryRows.filter((row) => !brokerFilter || String(row.broker_id) === String(brokerFilter));
   const scopeAttendance = (attendanceRows || []).filter((row) => !attendanceBrokerFilter || String(row.broker_id) === String(attendanceBrokerFilter));
-  const previousEntries = (previousEntryRows || []).filter((row) => !brokerFilter || String(row.broker_id) === String(brokerFilter));
+  const previousEntries = previousAdjustedEntryRows.filter((row) => !brokerFilter || String(row.broker_id) === String(brokerFilter));
   const previousAttendance = (previousAttendanceRows || []).filter((row) => !attendanceBrokerFilter || String(row.broker_id) === String(attendanceBrokerFilter));
   const current = summarizeOperations(scopeEntries, scopeAttendance, users, range.start, range.end, brokerFilter);
   const previous = summarizeOperations(previousEntries, previousAttendance, users, range.previousStart, range.previousEnd, brokerFilter);
   const visibleGoals = (goalRows || []).filter((goal) => !brokerFilter || String(goal.broker_id) === String(brokerFilter));
   const exactGoalCycle=['week','month'].includes(range.period)&&!filters.dateFrom&&!filters.dateTo;
   const rankGoals=exactGoalCycle?(goalRows||[]):[];
-  const teamCurrent=summarizeOperations(entryRows,attendanceRows,users,range.start,range.end);
+  const teamCurrent=summarizeOperations(currentEntryRows,attendanceRows,users,range.start,range.end);
   applyWeightedRanking(teamCurrent,rankGoals);
   const teamRankById=new Map(teamCurrent.byBroker.map((row)=>[String(row.id),row]));
   current.byBroker=current.byBroker.map((row)=>{const rank=teamRankById.get(String(row.id));return rank?{...row,rank:rank.rank,weightedScore:rank.weightedScore}:row;});
@@ -756,7 +765,7 @@ async function loadOperationsSnapshot(actor, filters = {}) {
     ? {id:row.id,name:row.name,rank:row.rank}
     : {id:row.id,name:row.name,rank:row.rank,weightedScore:row.weightedScore});
   const goalActualByBroker = new Map();
-  (goalActualRows || []).forEach((row) => {
+  goalActualAdjustedRows.forEach((row) => {
     const id = String(row.broker_id);
     const totals = goalActualByBroker.get(id) || { prospections: 0, visits: 0, sales: 0 };
     totals.prospections += Number(row.prospecting_count || 0);
@@ -780,8 +789,10 @@ async function loadOperationsSnapshot(actor, filters = {}) {
   let recentOwnEntries = [];
   if (access === 'broker') {
     const recentRows = await dbRequest('crm_production_entries', { query: { select: '*', broker_id: `eq.${actor.id}`, deleted_at: 'is.null', order: 'work_date.desc,updated_at.desc', limit: 5 }, range: '0-4' });
-    recentOwnEntries = (Array.isArray(recentRows) ? recentRows : []).map((row) => ({
-      id: row.id, workDate: row.work_date, ...metricValuesFromRow(row), notes: row.notes || '', updatedAt: row.updated_at
+    const recentAdjustedRows = await applyCancelledSalesToProduction(Array.isArray(recentRows) ? recentRows : []);
+    recentOwnEntries = recentAdjustedRows.map((row) => ({
+      id: row.id, workDate: row.work_date, ...metricValuesFromRow(row), reportedSales: Number(row.reported_sale_count || 0),
+      linkedCancelledSales: Number(row.linked_cancelled_sales || 0), notes: row.notes || '', updatedAt: row.updated_at
     }));
   }
   return {
@@ -898,7 +909,7 @@ async function notifyCommissionReceiptParticipants(document, eventType) {
   const userRows = await listAll('crm_users', { select: 'id,name,role,active,deleted_at' });
   const active = (userRows || []).filter((user) => user.active === true && !user.deleted_at);
   const recipientIds = eventType === 'commission_receipt_signature_requested'
-    ? [document.broker_id].filter(Boolean)
+    ? [document.recipient_id || (document.recipient_role === 'SDR' ? document.sdr_id : document.broker_id)].filter(Boolean)
     : active.filter((user) => isFinanceManager(user)).map((user) => user.id);
   const recipients = [...new Map(recipientIds.map((id) => {
     const user = active.find((item) => String(item.id) === String(id));
@@ -924,6 +935,7 @@ async function notifyCommissionReceiptParticipants(document, eventType) {
 }
 async function apiListNotifications(token) {
   const actor = await verifyActor(token);
+  if (actor.role === 'SDR') throw new HttpError(403, 'Use a área Alertas SDR para consultar os alertas do seu perfil.');
   const rows = await dbRequest('crm_in_app_notifications', { query: {
     select: '*', recipient_id: `eq.${actor.id}`, order: 'created_at.desc', limit: 60
   } });
@@ -948,6 +960,7 @@ async function apiListNotifications(token) {
 }
 async function apiMarkNotificationRead(token, notificationId) {
   const actor = await verifyActor(token);
+  if (actor.role === 'SDR') throw new HttpError(403, 'Use a área Alertas SDR para consultar os alertas do seu perfil.');
   if (!isUuid(notificationId)) return { ok: false, message: 'Notificação inválida.' };
   const stamp = now();
   const rows = await dbRequest('crm_in_app_notifications', { method: 'PATCH', query: {
@@ -1119,13 +1132,108 @@ async function apiUpdateComplaint(token, complaintId, payload = {}) {
 }
 
 function vgvPeriodRange(filters={}) {
-  const today=operationDateString(now());const period=String(filters.period||'month');let start='',end=today;
+  const today=operationDateString(now());const selectedMonth=String(filters.month||'').trim();const period=String(filters.period||'month');let start='',end=today;
+  if(selectedMonth){
+    if(!/^\d{4}-\d{2}$/.test(selectedMonth))throw new HttpError(400,'Selecione um mês válido para consultar o VGV.');
+    const [year,month]=selectedMonth.split('-').map(Number);if(month<1||month>12)throw new HttpError(400,'Selecione um mês válido para consultar o VGV.');
+    start=`${selectedMonth}-01`;if(start>today)throw new HttpError(400,'Não é possível consultar meses futuros.');end=monthEndDateOnly(start);if(end>today)end=today;
+    return{period:'month',month:selectedMonth,start,end,yearStart:`${year}-01-01`,yearEnd:`${year}-12-31`};
+  }
   const customFrom=String(filters.dateFrom||'').trim();const customTo=String(filters.dateTo||'').trim();
   if(customFrom||customTo){start=customFrom||customTo;end=customTo||today;if(!isValidDateOnly(start)||!isValidDateOnly(end)||start>end||end>today||daysBetweenDateOnly(start,end)>366)throw new HttpError(400,'Informe um intervalo válido de até 366 dias, sem datas futuras.');}
   else {const [year,month]=today.split('-').map(Number);if(period==='quarter'){const firstMonth=Math.floor((month-1)/3)*3+1;start=`${year}-${String(firstMonth).padStart(2,'0')}-01`;}else if(period==='semester'){const firstMonth=month<=6?1:7;start=`${year}-${String(firstMonth).padStart(2,'0')}-01`;}else if(period==='year'){start=`${year}-01-01`;}else{start=`${today.slice(0,7)}-01`;}}
-  return{period,start,end};
+  const selectedYear=start.slice(0,4);return{period,start,end,month:start.slice(0,7),yearStart:`${selectedYear}-01-01`,yearEnd:`${selectedYear}-12-31`};
 }
-function salesIsCancelled(row) { const normalize=(value)=>String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();const phase=normalize(row.repass_status);const saleStatus=normalize(row.sale_status);return saleStatus.includes('CANCEL')||saleStatus.includes('DISTRATO')||phase==='CANCELADO'||phase.includes('DISTRATO'); }
+function salesIsCancelled(row) { if (row && (row.deleted_at || row.deletedAt)) return true; const normalize=(value)=>String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();const phase=normalize(row.repass_status);const saleStatus=normalize(row.sale_status);return saleStatus.includes('CANCEL')||saleStatus.includes('DISTRATO')||phase==='CANCELADO'||phase.includes('DISTRATO'); }
+async function applyCancelledSalesToProduction(entries) {
+  const rows = Array.isArray(entries) ? entries : [];
+  const entryIds = [...new Set(rows.map((row) => String(row && row.id || '')).filter(isUuid))];
+  if (!entryIds.length) return rows.map((row) => ({ ...row, reported_sale_count: Number(row.sale_count || 0), linked_cancelled_sales: 0 }));
+  const links = await listAll('crm_production_sale_links', {
+    select: 'production_entry_id,sale_id', unlinked_at: 'is.null', production_entry_id: `in.(${entryIds.join(',')})`
+  });
+  const activeLinks = Array.isArray(links) ? links : [];
+  const saleIds = [...new Set(activeLinks.map((link) => String(link.sale_id || '')).filter(isUuid))];
+  if (!saleIds.length) return rows.map((row) => ({ ...row, reported_sale_count: Number(row.sale_count || 0), linked_cancelled_sales: 0 }));
+  const sales = await listAll('crm_sales', { select: 'id,sale_status,repass_status,deleted_at', id: `in.(${saleIds.join(',')})` });
+  const cancelledSaleIds = new Set((sales || []).filter(salesIsCancelled).map((sale) => String(sale.id)));
+  const cancelledByEntry = new Map();
+  activeLinks.forEach((link) => {
+    if (!cancelledSaleIds.has(String(link.sale_id))) return;
+    const entryId = String(link.production_entry_id);
+    cancelledByEntry.set(entryId, (cancelledByEntry.get(entryId) || 0) + 1);
+  });
+  return rows.map((row) => {
+    const reported = Number(row.sale_count || 0);
+    const linkedCancelled = Math.min(reported, cancelledByEntry.get(String(row.id)) || 0);
+    return { ...row, reported_sale_count: reported, linked_cancelled_sales: linkedCancelled, sale_count: Math.max(0, reported - linkedCancelled) };
+  });
+}
+function normalizeProductionSaleDays(days) {
+  const unique = new Map();
+  (Array.isArray(days) ? days : []).forEach((item) => {
+    const brokerId = String(item && item.brokerId || '').trim();
+    const workDate = String(item && item.workDate || '').trim();
+    if (!isUuid(brokerId) || !isValidDateOnly(workDate)) return;
+    unique.set(`${brokerId}|${workDate}`, { brokerId, workDate });
+  });
+  return [...unique.values()];
+}
+async function syncProductionSales(days, actor) {
+  const normalizedDays = normalizeProductionSaleDays(days);
+  if (!normalizedDays.length) return [];
+  const response = await dbRequest('rpc/crm_sync_production_sales_batch', {
+    method: 'POST', body: { p_days: normalizedDays, p_actor_id: actor.id }
+  });
+  const result = Array.isArray(response) ? response[0] : response;
+  if (!result || result.ok !== true) throw new HttpError(502, 'Não foi possível relacionar as vendas aos lançamentos de produção.');
+  const links = Array.isArray(result.links) ? result.links : [];
+  for (const link of links) {
+    await audit(actor, 'sale.production.link', 'sale', link.saleId, ['productionEntryId'],
+      { productionEntryId: null }, { productionEntryId: link.productionEntryId, linkedAt: link.createdAt || now() }, 'operations');
+  }
+  return links;
+}
+async function getActiveProductionSaleLink(saleId) {
+  const rows = await dbRequest('crm_production_sale_links', { query: {
+    select: 'id,sale_id,production_entry_id,created_at', sale_id: `eq.${saleId}`, unlinked_at: 'is.null', limit: 1
+  } });
+  return Array.isArray(rows) ? rows[0] || null : null;
+}
+async function unlinkProductionSale(saleId, actor) {
+  const existing = await getActiveProductionSaleLink(saleId);
+  if (!existing) return null;
+  const stamp = now();
+  const updated = await dbRequest('crm_production_sale_links', { method: 'PATCH',
+    query: { id: `eq.${existing.id}`, unlinked_at: 'is.null' }, prefer: 'return=representation',
+    body: { unlinked_at: stamp, unlinked_by: actor.id }
+  });
+  const saved = Array.isArray(updated) ? updated[0] || null : null;
+  if (!saved) return null;
+  await audit(actor, 'sale.production.unlink', 'sale', saleId, ['productionEntryId','unlinkedAt'],
+    { productionEntryId: existing.production_entry_id, unlinkedAt: null },
+    { productionEntryId: existing.production_entry_id, unlinkedAt: stamp }, 'operations');
+  return existing;
+}
+async function reconcileSaleProduction(sale, previous, actor) {
+  const moved = previous && (String(previous.broker_id) !== String(sale.broker_id) || String(previous.sold_at) !== String(sale.sold_at));
+  let oldLink = null;
+  if (moved) oldLink = await unlinkProductionSale(sale.id, actor);
+  const days = [];
+  if (moved && oldLink) days.push({ brokerId: previous.broker_id, workDate: previous.sold_at });
+  days.push({ brokerId: sale.broker_id, workDate: sale.sold_at });
+  await syncProductionSales(days, actor);
+  return getActiveProductionSaleLink(sale.id);
+}
+function saleProductionAdjustmentNotice(sale, previous, link, syncFailed = false) {
+  const isCancelled = salesIsCancelled(sale);
+  const wasCancelled = previous ? salesIsCancelled(previous) : false;
+  if (syncFailed) return ' A venda foi salva, mas o vínculo com a produção não pôde ser atualizado; revise a produção antes de concluir.';
+  if (isCancelled && !link) return ' Não encontrei lançamento manual de produção correspondente para este corretor e esta data; confira a contagem para garantir o abatimento.';
+  if (isCancelled && !wasCancelled && link) return ' O cancelamento, distrato ou arquivamento foi vinculado e já será descontado das vendas válidas, metas e ranking; o valor manual original permanece preservado.';
+  if (!isCancelled && wasCancelled && link) return ' A venda voltou a ser válida e retornará aos totais, metas e ranking do lançamento vinculado.';
+  return '';
+}
 function healthBand(days) { return days<=30?{id:'green',label:'Verde · saudável'}:days<=50?{id:'yellow',label:'Amarela · atenção'}:days<=70?{id:'orange',label:'Laranja · perigo'}:{id:'red',label:'Vermelha · crítico'}; }
 function calculateSalesHealth(asOf, brokers, validSales) {
   const rows=brokers.filter((user)=>String(user.created_at||'').slice(0,10)<=asOf).map((user)=>{
@@ -1141,10 +1249,11 @@ async function apiGetSalesHealthDashboard(token, filters = {}) {
   const range=vgvPeriodRange(filters);const brokerId=String(filters.brokerId||'').trim();const developmentId=String(filters.developmentId||'').trim();
   if(brokerId&&!isUuid(brokerId))throw new HttpError(400,'Corretor inválido.');
   const [sales,users,developments]=await Promise.all([listAll('crm_sales',{select:'*',deleted_at:'is.null'}),listAll('crm_users',{select:'id,name,role,active,deleted_at,created_at'}),listAll('crm_developments',{select:'id,name'})]);
-  const validSales=(sales||[]).filter((sale)=>!salesIsCancelled(sale));const filtered=validSales.filter((sale)=>sale.sold_at>=range.start&&sale.sold_at<=range.end&&(!brokerId||String(sale.broker_id)===brokerId)&&(!developmentId||String(sale.development_id)===developmentId));
+  const validSales=(sales||[]).filter((sale)=>!salesIsCancelled(sale));const matchingFilters=validSales.filter((sale)=>(!brokerId||String(sale.broker_id)===brokerId)&&(!developmentId||String(sale.development_id)===developmentId));const filtered=matchingFilters.filter((sale)=>sale.sold_at>=range.start&&sale.sold_at<=range.end);const yearSales=matchingFilters.filter((sale)=>sale.sold_at>=range.yearStart&&sale.sold_at<=range.yearEnd);
   const userById=new Map((users||[]).map((user)=>[String(user.id),user]));const developmentById=new Map((developments||[]).map((item)=>[String(item.id),item.name]));
-  const byBroker=new Map();const byDevelopment=new Map();const byMonth=new Map();let vgv=0;
-  for(const sale of filtered){const value=Number(sale.unit_value||0);vgv+=value;const user=userById.get(String(sale.broker_id));const broker=byBroker.get(String(sale.broker_id))||{brokerId:sale.broker_id,name:user?user.name:'Corretor inativo',sales:0,vgv:0};broker.sales++;broker.vgv+=value;byBroker.set(String(sale.broker_id),broker);const name=developmentById.get(String(sale.development_id))||'Empreendimento não informado';const dev=byDevelopment.get(name)||{name,sales:0,vgv:0};dev.sales++;dev.vgv+=value;byDevelopment.set(name,dev);const month=String(sale.sold_at).slice(0,7);byMonth.set(month,(byMonth.get(month)||0)+value);}
+  const byBroker=new Map();const byDevelopment=new Map();const byMonth=new Map();let vgv=0;let annualVgv=0;
+  for(const sale of filtered){const value=Number(sale.unit_value||0);vgv+=value;const user=userById.get(String(sale.broker_id));const broker=byBroker.get(String(sale.broker_id))||{brokerId:sale.broker_id,name:user?user.name:'Corretor inativo',sales:0,vgv:0};broker.sales++;broker.vgv+=value;byBroker.set(String(sale.broker_id),broker);const name=developmentById.get(String(sale.development_id))||'Empreendimento não informado';const dev=byDevelopment.get(name)||{name,sales:0,vgv:0};dev.sales++;dev.vgv+=value;byDevelopment.set(name,dev);}
+  for(const sale of yearSales){const value=Number(sale.unit_value||0);annualVgv+=value;const month=String(sale.sold_at).slice(0,7);byMonth.set(month,(byMonth.get(month)||0)+value);}
   const currentDate=operationDateString(now());const activeBrokers=(users||[]).filter((user)=>user.role==='Corretor'&&user.active===true&&!user.deleted_at);const health=calculateSalesHealth(currentDate,activeBrokers,validSales);const previousHealth=calculateSalesHealth(addDateOnly(currentDate,-7),activeBrokers,validSales);
   const trend=[];let weekStart=addDateOnly(currentDate,-77);const dayOfWeek=new Date(`${weekStart}T00:00:00Z`).getUTCDay();weekStart=addDateOnly(weekStart,-((dayOfWeek+6)%7));
   for(let week=0;week<12;week++){const monday=addDateOnly(weekStart,week*7);const sunday=addDateOnly(monday,6);const asOf=sunday>currentDate?currentDate:sunday;const snapshot=calculateSalesHealth(asOf,activeBrokers,validSales);trend.push({weekStart:monday,asOf,average:snapshot.average,band:snapshot.band.id});}
@@ -1152,7 +1261,7 @@ async function apiGetSalesHealthDashboard(token, filters = {}) {
   const healthRows=health.rows.map((row)=>({...row,alert:row.daysWithoutSale>=31}));
   const messages=healthRows.filter((row)=>row.alert).map((row)=>({brokerId:row.id,name:row.name,daysWithoutSale:row.daysWithoutSale,band:row.band,message:`${row.name}: ${row.daysWithoutSale} dia(s) corrido(s) sem venda · ${row.band.label}.`}));
   const trendDirection=health.average<previousHealth.average?'melhorando':health.average>previousHealth.average?'piorando':'estável';
-  return{period:range,totals:{vgv:Math.round(vgv*100)/100,sales:filtered.length},byBroker:sorted.map((item)=>({...item,vgv:Math.round(item.vgv*100)/100})),byDevelopment:[...byDevelopment.values()].map((item)=>({...item,vgv:Math.round(item.vgv*100)/100})).sort((a,b)=>b.vgv-a.vgv),monthly:[...byMonth.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([month,value])=>({month,vgv:Math.round(value*100)/100})),health:{...health,rows:healthRows,previousAverage:previousHealth.average,improved:trendDirection==='melhorando',trendDirection,trend,alerts:messages}};
+  return{period:range,totals:{vgv:Math.round(vgv*100)/100,annualVgv:Math.round(annualVgv*100)/100,sales:filtered.length},byBroker:sorted.map((item)=>({...item,vgv:Math.round(item.vgv*100)/100})),byDevelopment:[...byDevelopment.values()].map((item)=>({...item,vgv:Math.round(item.vgv*100)/100})).sort((a,b)=>b.vgv-a.vgv),monthly:[...byMonth.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([month,value])=>({month,vgv:Math.round(value*100)/100})),health:{...health,rows:healthRows,previousAverage:previousHealth.average,improved:trendDirection==='melhorando',trendDirection,trend,alerts:messages}};
 }
 
 async function apiListOperationBrokers(token) {
@@ -1173,9 +1282,11 @@ async function apiListProduction(token, filters = {}) {
   if (brokerId) query.broker_id = `eq.${brokerId}`;
   const [rows, users] = await Promise.all([listAll('crm_production_entries', query), listAll('crm_users', { select: '*' })]);
   const mappedUsers = users.map(mapUser);
-  return (rows || []).map((row) => ({
+  const adjustedRows = await applyCancelledSalesToProduction(rows || []);
+  return adjustedRows.map((row) => ({
     id: row.id, brokerId: row.broker_id, brokerName: operationsUserSummary(row.broker_id, mappedUsers).name,
-    workDate: row.work_date, ...metricValuesFromRow(row), notes: row.notes || '', createdAt: row.created_at,
+    workDate: row.work_date, ...metricValuesFromRow(row), reportedSales: Number(row.reported_sale_count || 0),
+    linkedCancelledSales: Number(row.linked_cancelled_sales || 0), notes: row.notes || '', createdAt: row.created_at,
     createdBy: row.created_by, updatedAt: row.updated_at, updatedBy: row.updated_by,
     deletedAt: row.deleted_at || ''
   })).sort((a,b) => String(b.workDate).localeCompare(String(a.workDate)) || String(b.updatedAt).localeCompare(String(a.updatedAt)));
@@ -1215,7 +1326,9 @@ async function apiSaveProduction(token, payload = {}) {
   const brokerId = access === 'broker' ? actor.id : String(payload.brokerId || '').trim();
   const broker = await getActiveBroker(brokerId);
   const workDate = String(payload.workDate || '').trim();
-  if (!isValidDateOnly(workDate) || workDate > operationDateString(now())) return { ok: false, message: 'Informe uma data válida, até o dia de hoje.' };
+  const today = operationDateString(now());
+  if (!isValidDateOnly(workDate) || workDate > today) return { ok: false, message: 'Informe uma data válida, até o dia de hoje.' };
+  if (access === 'broker' && workDate !== today) return { ok: false, message: 'Corretores podem inserir ou corrigir os números somente na data de hoje. Para ajustar uma data passada, solicite à gestão.' };
   const values = productionValues(payload);
   const stamp = now();
   let beforeRow = null; let saved;
@@ -1237,7 +1350,20 @@ async function apiSaveProduction(token, payload = {}) {
   }
   const beforeValues = productionAuditValues(beforeRow); const afterValues = productionAuditValues(saved);
   await audit(actor, id ? 'operations.production.update' : 'operations.production.create', 'operation_production', saved && saved.id || id || 'unknown', auditChangedFields(beforeValues, afterValues), beforeValues, afterValues, 'operations');
-  return { ok: true, id: saved && saved.id, message: id ? 'Lançamento atualizado; a alteração ficou registrada no histórico.' : 'Lançamento de produção registrado.' };
+  let syncWarning = '';
+  try {
+    const syncDays = [{ brokerId: saved.broker_id, workDate: saved.work_date }];
+    if (beforeRow && String(beforeRow.work_date) !== String(saved.work_date)) {
+      const existingLinks = await listAll('crm_production_sale_links', {
+        select: 'sale_id', production_entry_id: `eq.${saved.id}`, unlinked_at: 'is.null'
+      });
+      for (const link of existingLinks || []) await unlinkProductionSale(String(link.sale_id), actor);
+      syncDays.push({ brokerId: beforeRow.broker_id, workDate: beforeRow.work_date });
+    }
+    await syncProductionSales(syncDays, actor);
+  }
+  catch (_) { syncWarning = ' A venda informada foi salva, mas os vínculos de vendas para cancelamentos ainda não puderam ser atualizados.'; }
+  return { ok: true, id: saved && saved.id, message: (id ? 'Lançamento atualizado; a alteração ficou registrada no histórico.' : 'Lançamento de produção registrado.') + syncWarning };
 }
 
 async function apiArchiveProduction(token, entryId) {
@@ -1252,7 +1378,13 @@ async function apiArchiveProduction(token, entryId) {
   if (!Array.isArray(updated) || !updated.length) return { ok: false, message: 'O lançamento já foi alterado. Atualize a lista e tente novamente.' };
   const beforeValues = productionAuditValues(row); const afterValues = { ...beforeValues, deletedAt: stamp };
   await audit(actor, 'operations.production.cancel', 'operation_production', entryId, ['deletedAt'], beforeValues, afterValues, 'operations');
-  return { ok: true, message: 'Lançamento cancelado e preservado no histórico.' };
+  let syncWarning = '';
+  try {
+    const links = await listAll('crm_production_sale_links', { select: 'sale_id', production_entry_id: `eq.${entryId}`, unlinked_at: 'is.null' });
+    for (const link of links || []) await unlinkProductionSale(String(link.sale_id), actor);
+    await syncProductionSales([{ brokerId: row.broker_id, workDate: row.work_date }], actor);
+  } catch (_) { syncWarning = ' Os vínculos de vendas também devem ser conferidos ao revisar a produção.'; }
+  return { ok: true, message: 'Lançamento cancelado e preservado no histórico.' + syncWarning };
 }
 
 async function apiListOperationGoals(token, filters = {}) {
@@ -1331,6 +1463,20 @@ async function apiSaveOperationGoalsBatch(token, payload = {}) {
   const after = goals.map((item) => ({ brokerId: item.broker_id, metric: item.metric, target: Number(item.target_count), cycle, startsOn, endsOn }));
   await audit(actor, 'operations.goal.batch_revise', 'operation_goal_batch', `${cycle}:${startsOn}`, ['targets'], { targets: previous }, { targets: after, revisions: result.results });
   return { ok: true, count: goals.length, message: `Metas de ${brokers.length} corretor(es) atualizadas em uma única operação. As versões anteriores foram preservadas.` };
+}
+
+async function apiDeleteOperationGoal(token, goalId) {
+  const actor = await verifyActor(token); requireOperationsAccess(actor, ['manager']);
+  if (!isUuid(goalId)) return { ok: false, message: 'Meta inválida.' };
+  const rows = await dbRequest('crm_production_goals', { query: { select: 'id,broker_id,metric,cycle,starts_on,ends_on', id: `eq.${goalId}`, limit: 1 } });
+  const goal = Array.isArray(rows) ? rows[0] || null : null;
+  if (!goal) return { ok: false, message: 'Meta não encontrada.' };
+  const result = await dbRequest('rpc/crm_delete_operation_goal', { method: 'POST', body: {
+    p_broker_id: goal.broker_id, p_metric: goal.metric, p_cycle: goal.cycle, p_starts_on: goal.starts_on, p_ends_on: goal.ends_on
+  } });
+  const deleted = Array.isArray(result) ? result[0] : result;
+  if (!deleted || deleted.ok !== true) return { ok: false, message: 'Não foi possível excluir esta meta. Atualize a tela e tente novamente.' };
+  return { ok: true, message: 'Meta e suas revisões excluídas, conforme solicitado.' };
 }
 
 async function apiListAttendance(token, filters = {}) {
@@ -1443,6 +1589,7 @@ async function validateOperationsImport(actor, section, inputRows) {
       seenIds.add(key);
       const existing = entriesById.get(key);
       if (!existing || String(existing.broker_id) !== String(item.value.brokerId)) { item.valid = false; item.errors.push('O ID não corresponde a um lançamento ativo deste corretor.'); return; }
+      item.previousWorkDate = String(existing.work_date || '');
       item.action = 'update';
     } else if (section === 'production') item.action = 'create';
     if (section === 'attendance') {
@@ -1451,7 +1598,7 @@ async function validateOperationsImport(actor, section, inputRows) {
       else { item.action = 'create'; seenAttendanceKeys.add(key); }
     }
   });
-  return { ok: true, rows: normalizedRows.map(({ value, ...safe }) => safe), normalizedRows, validCount: normalizedRows.filter((item) => item.valid).length, errorCount: normalizedRows.filter((item) => !item.valid).length, skipCount: normalizedRows.filter((item) => item.valid && item.skip).length };
+  return { ok: true, rows: normalizedRows.map(({ value, previousWorkDate, ...safe }) => safe), normalizedRows, validCount: normalizedRows.filter((item) => item.valid).length, errorCount: normalizedRows.filter((item) => !item.valid).length, skipCount: normalizedRows.filter((item) => item.valid && item.skip).length };
 }
 
 async function apiPreviewOperationsImport(token, section, rows) {
@@ -1477,7 +1624,24 @@ async function apiImportOperations(token, section, rows) {
     const createdCount = Number(result.createdCount || 0);
     const updatedCount = Number(result.updatedCount || 0);
     const skippedCount = preview.skipCount + Number(result.skippedCount || 0);
-    return { ok: true, createdCount, updatedCount, skippedCount, message: `${createdCount} linha(s) adicionada(s), ${updatedCount} corrigida(s) e ${skippedCount} frequência(s) já existente(s) ignorada(s).` };
+    let syncWarning = '';
+    if (String(section) === 'production') {
+      try {
+        const movedEntries = preview.normalizedRows.filter((item) => item.valid && !item.skip && item.action === 'update'
+          && item.previousWorkDate && String(item.previousWorkDate) !== String(item.value.workDate));
+        const syncDays = values.map((item) => ({ brokerId: item.brokerId, workDate: item.workDate }));
+        for (const item of movedEntries) {
+          const links = await listAll('crm_production_sale_links', {
+            select: 'sale_id', production_entry_id: `eq.${item.value.id}`, unlinked_at: 'is.null'
+          });
+          for (const link of links || []) await unlinkProductionSale(String(link.sale_id), actor);
+          syncDays.push({ brokerId: item.value.brokerId, workDate: item.previousWorkDate });
+        }
+        await syncProductionSales(syncDays, actor);
+      }
+      catch (_) { syncWarning = ' Os lançamentos foram importados, mas os vínculos automáticos com vendas ainda precisam ser conferidos.'; }
+    }
+    return { ok: true, createdCount, updatedCount, skippedCount, message: `${createdCount} linha(s) adicionada(s), ${updatedCount} corrigida(s) e ${skippedCount} frequência(s) já existente(s) ignorada(s).${syncWarning}` };
   } catch (error) {
     if (error instanceof HttpError && error.status < 500) throw error;
     return { ok: false, createdCount: 0, updatedCount: 0, skippedCount: preview.skipCount, message: 'A importação foi cancelada integralmente; nenhuma linha deste arquivo foi gravada. Confira se os dados continuam válidos e tente novamente.' };
@@ -1495,18 +1659,34 @@ async function apiExportOperationsReport(token, filters = {}) {
   const [productionRows, attendanceRows, userRows] = await Promise.all([
     listAll('crm_production_entries', productionQuery), listAll('crm_attendance_records', attendanceQuery), listAll('crm_users', { select: '*' })
   ]);
+  const adjustedProductionRows = await applyCancelledSalesToProduction(productionRows || []);
   const users = userRows.map(mapUser);
   const userById = new Map(users.map((user) => [String(user.id), user]));
+  const salesByBroker = new Map();
+  for (const row of adjustedProductionRows) {
+    const brokerId = String(row.broker_id);
+    const total = salesByBroker.get(brokerId) || { reported: 0, valid: 0, cancelled: 0 };
+    total.reported += Number(row.reported_sale_count || 0);
+    total.valid += Number(row.sale_count || 0);
+    total.cancelled += Number(row.linked_cancelled_sales || 0);
+    salesByBroker.set(brokerId, total);
+  }
   const rows = snapshot.byBroker.map((broker) => ({
     corretor: broker.name, prospeccoes: broker.prospections, interacoes: broker.interactions,
-    agendamentos: broker.appointments, visitas: broker.visits, vendas: broker.sales, pastas: broker.folders,
+    agendamentos: broker.appointments, visitas: broker.visits,
+    vendas: (salesByBroker.get(String(broker.id)) || {}).reported || 0,
+    vendasValidas: (salesByBroker.get(String(broker.id)) || {}).valid || 0,
+    vendasCanceladasVinculadas: (salesByBroker.get(String(broker.id)) || {}).cancelled || 0,
+    pastas: broker.folders,
     frequencia_total: broker.attendance, frequencia_manha: broker.morning,
     frequencia_tarde: broker.afternoon, frequencia_noite: broker.night
   }));
-  const production = (productionRows || []).map((row) => ({
+  const production = adjustedProductionRows.map((row) => ({
     id: row.id, date: row.work_date, broker: operationsUserSummary(row.broker_id, users).name, brokerId: row.broker_id, brokerEmail: userById.get(String(row.broker_id))?.email || '',
       prospeccoes: Number(row.prospecting_count || 0), interacoes: Number(row.interaction_count || 0),
-      agendamentos: Number(row.appointment_count || 0), visitas: Number(row.visit_count || 0), vendas: Number(row.sale_count || 0), pastas: Number(row.folder_count || 0),
+      agendamentos: Number(row.appointment_count || 0), visitas: Number(row.visit_count || 0),
+      vendas: Number(row.reported_sale_count || 0), vendasValidas: Number(row.sale_count || 0),
+      vendasCanceladasVinculadas: Number(row.linked_cancelled_sales || 0), pastas: Number(row.folder_count || 0),
     observacoes: row.notes || '', updatedAt: row.updated_at
   }));
   const attendance = (attendanceRows || []).map((row) => ({
@@ -1518,7 +1698,9 @@ async function apiExportOperationsReport(token, filters = {}) {
 
 async function apiListLeads(token, filters, page, pageSize, segment = 'all') {
   const actor = await verifyActor(token);
-  const [context, staleBusinessDays] = await Promise.all([loadLeadContext(), getFollowupBusinessDays()]);
+  const [context, staleBusinessDays, attemptRows] = await Promise.all([loadLeadContext(), getFollowupBusinessDays(), listAll('crm_lead_attempts', { select: 'lead_id,attempt_number' })]);
+  const attemptCounts = new Map();
+  (attemptRows || []).forEach((row) => attemptCounts.set(String(row.lead_id), (attemptCounts.get(String(row.lead_id)) || 0) + 1));
   const options = { today: now(), staleBusinessDays };
   let found = CrmDomain.filterLeads(context.leads, actor, filters, options);
   const closedLeadStatuses = new Set(['Desistência','Já comprou']);
@@ -1527,12 +1709,13 @@ async function apiListLeads(token, filters, page, pageSize, segment = 'all') {
     : !closedLeadStatuses.has(String(lead.status || '')));
   if (segment === 'new' || segment === 'followed') {
     if (!(actor.role === 'SDR' || isAdmin(actor))) throw new HttpError(403, 'Acesso restrito ao SDR e à gestão.');
-    found = found.filter((lead) => segment === 'new' ? !lead.sdrUpdatedAt : Boolean(lead.sdrUpdatedAt));
+    found = found.filter((lead) => segment === 'new' ? !lead.sdrStatusUpdatedAt : (attemptCounts.get(String(lead.id)) || 0) > 0);
   }
   found.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
   const enriched = found.map((lead) => {
     const info = CrmDomain.staleInfo(lead, options.today, options.staleBusinessDays);
-    return Object.assign({}, lead, { staleBusinessDays: info.businessDays, isStale: info.stale, isNewForSdr: !lead.sdrUpdatedAt });
+    const contactAttempts = attemptCounts.get(String(lead.id)) || 0;
+    return Object.assign({}, lead, { contactAttempts, staleBusinessDays: info.businessDays, isStale: info.stale, isNewForSdr: !lead.sdrStatusUpdatedAt });
   });
   return { ...CrmDomain.paginate(enriched, page, pageSize), staleBusinessDays };
 }
@@ -1598,6 +1781,8 @@ async function apiSaveLead(token, leadId, payload) {
   const stamp = now();
   const changedFields = Object.keys(values).filter((key) => String(existing && existing[key] !== undefined ? existing[key] : '') !== String(values[key] === undefined || values[key] === null ? '' : values[key]));
   const isSdrContact = !isCreate && actor.role === 'SDR';
+  const firstSdrStatusReview = isSdrContact && Object.prototype.hasOwnProperty.call(values, 'status') && !existing.sdrStatusUpdatedAt;
+  if (firstSdrStatusReview) changedFields.push('sdrStatusUpdatedAt');
   if (!isCreate && !changedFields.length && !isSdrContact) return { ok: true, leadId: existing.id, message: 'Nenhuma alteração detectada.' };
   let saved;
   const dbValues = leadToDb(values);
@@ -1606,7 +1791,11 @@ async function apiSaveLead(token, leadId, payload) {
     saved = Array.isArray(saved) ? saved[0] : saved;
   } else {
     const update = { ...dbValues, broker_id: targetBroker.id, updated_by: actor.id, updated_at: stamp };
-    if (isSdrContact) { update.sdr_updated_at = stamp; update.sdr_updated_by = actor.id; }
+    if (isSdrContact) {
+      update.sdr_updated_at = stamp;
+      update.sdr_updated_by = actor.id;
+      if (Object.prototype.hasOwnProperty.call(values, 'status')) update.sdr_status_updated_at = existing.sdrStatusUpdatedAt || stamp;
+    }
     if (Object.prototype.hasOwnProperty.call(values, 'phone') && String(values.phone) !== String(existing.phone)) {
       update.phone_correction_required = false;
       update.phone_correction_requested_at = null;
@@ -1619,8 +1808,8 @@ async function apiSaveLead(token, leadId, payload) {
   }
   if (!saved) throw new HttpError(404, 'Cliente não encontrado ou sem permissão.');
   if (isSdrContact) await dbRequest('crm_sdr_history', { method: 'POST', prefer: 'return=minimal', body: { lead_id: saved.id, user_id: actor.id, user_name: actor.name, status: saved.status, feedback: saved.sdr_feedback || '', source: 'Atualização registrada pelo SDR', at: stamp } });
-  const before = existing ? { name: existing.name, phone: existing.phone, developmentId: existing.developmentId, notes: existing.notes, sdrFeedback: existing.sdrFeedback, status: existing.status, brokerId: existing.brokerId, phoneCorrectionRequired: existing.phoneCorrectionRequired } : {};
-  const after = { name: saved.name, phone: saved.phone, developmentId: saved.development_id, notes: saved.notes, sdrFeedback: saved.sdr_feedback, status: saved.status, brokerId: saved.broker_id, phoneCorrectionRequired: saved.phone_correction_required === true };
+  const before = existing ? { name: existing.name, phone: existing.phone, developmentId: existing.developmentId, notes: existing.notes, sdrFeedback: existing.sdrFeedback, status: existing.status, brokerId: existing.brokerId, phoneCorrectionRequired: existing.phoneCorrectionRequired, sdrStatusUpdatedAt: existing.sdrStatusUpdatedAt || null } : {};
+  const after = { name: saved.name, phone: saved.phone, developmentId: saved.development_id, notes: saved.notes, sdrFeedback: saved.sdr_feedback, status: saved.status, brokerId: saved.broker_id, phoneCorrectionRequired: saved.phone_correction_required === true, sdrStatusUpdatedAt: saved.sdr_status_updated_at || null };
   await audit(actor, isCreate ? (actor.role === 'SDR' ? 'lead.create_by_sdr' : 'lead.create') : isSdrContact ? 'lead.sdr_contact' : 'lead.update', 'lead', saved.id, changedFields, before, after);
   return { ok: true, leadId: saved.id, message: isCreate ? (actor.role === 'SDR' ? 'Cliente cadastrado e atribuído ao corretor selecionado.' : 'Cliente cadastrado.') : isSdrContact ? 'Contato registrado no histórico.' : 'Cliente atualizado.' };
 }
@@ -1637,11 +1826,12 @@ async function apiListLeadAttempts(token, leadId) {
 
 async function apiAddLeadAttempt(token, leadId, notes = '') {
   const actor = await verifyActor(token);
-  if (actor.role !== 'SDR') throw new HttpError(403, 'Somente o SDR pode registrar tentativas de contato.');
+  if (actor.role !== 'SDR' && !isAdmin(actor)) throw new HttpError(403, 'Somente o SDR e os perfis administrativos podem registrar tentativas de contato.');
   if (!isUuid(leadId)) return { ok: false, message: 'Cliente inválido.' };
   const rows = await dbRequest('crm_leads', { query: { select: 'id,broker_id,status,deleted_at', id: `eq.${leadId}`, limit: 1 } });
   const lead = Array.isArray(rows) ? rows[0] : null;
-  if (!lead || lead.deleted_at) return { ok: false, message: 'Cliente não encontrado.' };
+  if (!lead || lead.deleted_at || !CrmDomain.canReadLead(actor, { id: lead.id, brokerId: lead.broker_id })) return { ok: false, message: 'Cliente não encontrado ou sem permissão.' };
+  if (['Desistência','Já comprou'].includes(String(lead.status || ''))) return { ok: false, message: 'Clientes encerrados não recebem novas tentativas de follow-up.' };
   const current = await dbRequest('crm_lead_attempts', { query: { select: 'attempt_number', lead_id: `eq.${leadId}`, order: 'attempt_number.desc', limit: 1 } });
   if (Array.isArray(current) && current.length && Number(current[0].attempt_number) >= 7) return { ok: false, message: 'As sete tentativas já foram registradas. Revise o atendimento e avalie o status do lead.' };
   const result = await dbRequest('rpc/crm_add_contact_attempt', { method: 'POST', body: { p_lead_id: leadId, p_actor_id: actor.id, p_actor_name: actor.name, p_notes: String(notes || '').slice(0, 1000) } });
@@ -1684,12 +1874,16 @@ async function apiGetSdrWorklist(token) {
   const rows = context.leads.filter((lead) => !terminal.has(lead.status)).map((lead) => {
     const history = byLead.get(String(lead.id)) || [];
     const latest = history.slice().sort((a, b) => Number(b.attempt_number) - Number(a.attempt_number))[0];
-    const lastContactAt = lead.sdrUpdatedAt || lead.createdAt;
+    const attemptAt = latest && latest.at ? latest.at : '';
+    const lastContactAt = attemptAt && lead.sdrUpdatedAt
+      ? (Date.parse(attemptAt) > Date.parse(lead.sdrUpdatedAt) ? attemptAt : lead.sdrUpdatedAt)
+      : attemptAt || lead.sdrUpdatedAt || lead.createdAt;
     const hoursSinceContact = lastContactAt ? Math.max(0, (timestamp - new Date(lastContactAt).getTime()) / 3600000) : 0;
-    return { ...lead, attempts: history.length, lastContactAt, hoursSinceContact, needs24hFollowup: hoursSinceContact >= 24, needsDesistanceReview: Boolean(latest && Number(latest.attempt_number) >= 7 && latest.status_at_attempt === lead.status), needsPhoneCorrection: lead.phoneCorrectionRequired };
+    const hasContactAttempt = history.length > 0;
+    return { ...lead, attempts: history.length, lastContactAt, hoursSinceContact, needs24hFollowup: hasContactAttempt && hoursSinceContact >= 24, needsDesistanceReview: Boolean(latest && Number(latest.attempt_number) >= 7 && latest.status_at_attempt === lead.status), needsPhoneCorrection: lead.phoneCorrectionRequired };
   });
   return {
-    newLeads: rows.filter((lead) => !lead.sdrUpdatedAt).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))),
+    newLeads: rows.filter((lead) => !lead.sdrStatusUpdatedAt).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))),
     followupAlerts: rows.filter((lead) => lead.needs24hFollowup).sort((a, b) => b.hoursSinceContact - a.hoursSinceContact),
     sevenAttemptAlerts: rows.filter((lead) => lead.needsDesistanceReview),
     phoneCorrections: rows.filter((lead) => lead.needsPhoneCorrection)
@@ -1850,11 +2044,16 @@ async function apiListSales(token, filters = {}) {
     const received = Math.round(payments.filter((item) => !item.voidedAt).reduce((sum, item) => sum + item.amount, 0) * 100) / 100;
     let brokerCommission = Number(row.broker_commission === null || row.broker_commission === undefined ? row.expected_repass || 0 : row.broker_commission);
     const storedSdrCommission = Number(row.sdr_commission || 0);
-    let sdrCommission = row.sdr_id ? storedSdrCommission : 0;
+    // Um vínculo antigo de SDR não gera rateio se a venda foi explicitamente
+    // marcada como sem participação. Registros sem a marca antiga continuam
+    // reconhecendo o vínculo explícito do SDR já selecionado.
+    const hasSdrParticipation = Boolean(row.sdr_id) && row.is_sdr_sale !== false;
+    let sdrCommission = hasSdrParticipation ? storedSdrCommission : 0;
     const storedGrossCommission = Number(row.gross_commission || 0);
     // Para vendas antigas sem vínculo novo, use a soma histórica apenas para
     // recuperar o valor bruto; nunca exponha essa parte como comissão do SDR.
-    const grossCommission = storedGrossCommission > 0 ? storedGrossCommission : Math.round((brokerCommission + storedSdrCommission) * 100) / 100;
+    const legacySdrPart = row.is_sdr_sale === false ? 0 : storedSdrCommission;
+    const grossCommission = storedGrossCommission > 0 ? storedGrossCommission : Math.round((brokerCommission + legacySdrPart) * 100) / 100;
     const repassStatus = String(row.repass_status || '');
     const normalizedPhase = repassStatus.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
     const isCommissionPaid = repassStatus === 'COMISSÃO PAGA' || payments.some((item) => !item.voidedAt);
@@ -1862,7 +2061,7 @@ async function apiListSales(token, filters = {}) {
     // A participação do SDR só existe quando há um SDR selecionado na venda.
     // Registros antigos em aberto sem responsável ficam integralmente com o corretor;
     // registros já recebidos preservam o valor histórico do corretor.
-    if (!row.sdr_id && !isCommissionPaid && grossCommission > 0) {
+    if (!hasSdrParticipation && grossCommission > 0) {
       brokerCommission = grossCommission;
       sdrCommission = 0;
     }
@@ -2003,7 +2202,12 @@ async function apiSaveSale(token, payload = {}) {
     commissionRatePct: values.commission_rate_pct, grossCommission: values.gross_commission, brokerCommission: values.broker_commission, sdrCommission: values.sdr_commission,
     managerCommissionRatePct: values.manager_commission_rate_pct, managerCommissionValue: values.manager_commission_value, hasPrize: values.has_prize, prizeRatePct: values.prize_rate_pct, grossPrize: values.gross_prize, repassStatus, notes };
   const changedFields = auditChangedFields(before, after);
-  if (existing && !changedFields.length) return { ok: true, saleId: existing.id, internalNumber: existing.internal_number, message: 'Nenhuma alteração detectada.' };
+  if (existing && !changedFields.length) {
+    let link = null; let syncFailed = false;
+    try { link = await reconcileSaleProduction(existing, existing, actor); } catch (_) { syncFailed = true; }
+    return { ok: true, saleId: existing.id, internalNumber: existing.internal_number,
+      message: 'Nenhuma alteração detectada.' + saleProductionAdjustmentNotice(existing, existing, link, syncFailed) };
+  }
   let saved;
   if (existing) {
     const response = await dbRequest('crm_sales', { method: 'PATCH', query: { id: `eq.${id}` }, prefer: 'return=representation', body: values });
@@ -2017,7 +2221,11 @@ async function apiSaveSale(token, payload = {}) {
   if (!saved) throw new HttpError(502, 'Não foi possível salvar a venda.');
   after.internalNumber = saved.internal_number;
   await audit(actor, existing ? 'sale.update' : 'sale.create', 'sale', saved.id, auditChangedFields(before, after), before, after);
-  return { ok: true, saleId: saved.id, internalNumber: saved.internal_number, message: existing ? 'Venda atualizada.' : `Venda cadastrada com o número ${saved.internal_number}.` };
+  let productionLink = null; let productionSyncFailed = false;
+  try { productionLink = await reconcileSaleProduction(saved, existing, actor); } catch (_) { productionSyncFailed = true; }
+  const baseMessage = existing ? 'Venda atualizada.' : `Venda cadastrada com o número ${saved.internal_number}.`;
+  return { ok: true, saleId: saved.id, internalNumber: saved.internal_number,
+    message: baseMessage + saleProductionAdjustmentNotice(saved, existing, productionLink, productionSyncFailed) };
 }
 
 async function apiArchiveSale(token, saleId) {
@@ -2030,7 +2238,9 @@ async function apiArchiveSale(token, saleId) {
   const updated = await dbRequest('crm_sales', { method: 'PATCH', query: { id: `eq.${saleId}`, deleted_at: 'is.null' }, prefer: 'return=representation', body: { deleted_at: stamp, deleted_by: actor.id, updated_at: stamp, updated_by: actor.id } });
   if (!Array.isArray(updated) || !updated.length) return { ok: false, message: 'A venda foi alterada por outro usuário. Atualize a tela.' };
   await audit(actor, 'sale.archive', 'sale', saleId, ['deletedAt'], { deletedAt: null, processNumber: row.process_number, buyerName: row.buyer_name }, { deletedAt: stamp, processNumber: row.process_number, buyerName: row.buyer_name, receiptsPreserved: true });
-  return { ok: true, message: 'Venda excluída da visão ativa e preservada com contratos, recebimentos e histórico. Ela pode ser restaurada pela gestão.' };
+  let link = null; let syncFailed = false;
+  try { link = await reconcileSaleProduction(updated[0], row, actor); } catch (_) { syncFailed = true; }
+  return { ok: true, message: 'Venda excluída da visão ativa e preservada com contratos, recebimentos e histórico. Ela pode ser restaurada pela gestão.' + saleProductionAdjustmentNotice(updated[0], row, link, syncFailed) };
 }
 
 async function apiRestoreSale(token, saleId) {
@@ -2043,7 +2253,13 @@ async function apiRestoreSale(token, saleId) {
   const updated = await dbRequest('crm_sales', { method: 'PATCH', query: { id: `eq.${saleId}`, deleted_at: 'not.is.null' }, prefer: 'return=representation', body: { deleted_at: null, deleted_by: null, updated_at: stamp, updated_by: actor.id } });
   if (!Array.isArray(updated) || !updated.length) return { ok: false, message: 'A venda foi alterada por outro usuário. Atualize a tela.' };
   await audit(actor, 'sale.restore', 'sale', saleId, ['deletedAt'], { deletedAt: row.deleted_at, processNumber: row.process_number, buyerName: row.buyer_name }, { deletedAt: null, processNumber: row.process_number, buyerName: row.buyer_name, receiptsPreserved: true });
-  return { ok: true, message: 'Venda restaurada para a visão ativa. O histórico e os documentos vinculados foram preservados.' };
+  let syncNotice = '';
+  try {
+    const link = await reconcileSaleProduction(updated[0], row, actor);
+    syncNotice = saleProductionAdjustmentNotice(updated[0], row, link);
+  }
+  catch (_) { syncNotice = ' Não foi possível confirmar o vínculo desta venda com a produção; confira os indicadores.'; }
+  return { ok: true, message: 'Venda restaurada para a visão ativa. O histórico e os documentos vinculados foram preservados.' + syncNotice };
 }
 
 async function apiAddSaleReceipt(token, saleId, payload = {}) {
@@ -2231,8 +2447,10 @@ async function apiSaveContract(token, payload = {}) {
   if (saleId) {
     const saleRows = await dbRequest('crm_sales', { query: { select: '*', id: `eq.${saleId}`, deleted_at: 'is.null', limit: 1 } });
     sale = Array.isArray(saleRows) ? saleRows[0] || null : null;
-    if (!sale || sale.sale_status === 'Cancelada') return { ok: false, message: 'A venda vinculada não está disponível para gerar documentos.' };
+    if (!sale || salesIsCancelled(sale)) return { ok: false, message: 'A venda vinculada não está disponível para gerar documentos.' };
   }
+  if (!sale) return { ok: false, message: 'O Termo Fifty precisa estar vinculado a uma venda registrada.' };
+  if (sale.is_sdr_sale !== true) return { ok: false, message: 'O Termo Fifty só pode ser gerado quando a venda estiver marcada com participação do SDR.' };
   let lead = null;
   let leadId = sale ? String(sale.lead_id || '').trim() : String(payload.leadId || '').trim();
   if (sale && payload.leadId && String(payload.leadId) !== leadId) return { ok: false, message: 'O cliente vinculado precisa corresponder à venda selecionada.' };
@@ -2246,13 +2464,14 @@ async function apiSaveContract(token, payload = {}) {
   const brokerId = String(sale ? sale.broker_id : payload.brokerId || lead && lead.broker_id || '').trim();
   if (sale && payload.brokerId && String(payload.brokerId) !== brokerId) return { ok: false, message: 'O corretor do contrato precisa corresponder ao corretor responsável pela venda.' };
   const requestedSdrId = String(payload.sdrId || '').trim();
-  if (sale && String(sale.sdr_id || '') !== requestedSdrId) return { ok: false, message: 'O SDR do Termo Fifty precisa corresponder ao SDR selecionado na venda. Corrija a venda antes de criar o documento.' };
+  const savedSdrId = String(sale.sdr_id || '').trim();
   const broker = users.find((item) => item.id === brokerId && item.role === 'Corretor' && !item.deleted_at && (item.active || sale && String(sale.broker_id) === brokerId));
   const sdr = users.find((item) => item.id === requestedSdrId && item.role === 'SDR' && item.active && !item.deleted_at);
   const manager = users.find((item) => item.id === String(payload.managerId || actor.id) && ['Gerente','Administrador'].includes(item.role) && item.active && !item.deleted_at);
   if (!broker || lead && broker.id !== lead.broker_id) return { ok: false, message: 'Selecione o corretor responsável pela venda ou pela carteira do cliente.' };
   if (!sdr) return { ok: false, message: 'Selecione o SDR que assinará o documento.' };
   if (!manager) return { ok: false, message: 'Selecione um gerente ou administrador como signatário.' };
+  const needsSdrAssignment = Boolean(sale && savedSdrId !== sdr.id);
   let existingDraft = null;
   if (id) {
     if (!isUuid(id)) return { ok: false, message: 'Contrato inválido.' };
@@ -2283,8 +2502,18 @@ async function apiSaveContract(token, payload = {}) {
   const prizeRate = sale && sale.prize_rate_pct !== null && sale.prize_rate_pct !== undefined ? Number(sale.prize_rate_pct) : inputPrizeRate;
   const grossPrize = payload.hasPrize === true ? (sale && Number(sale.gross_prize || 0) > 0 ? Number(sale.gross_prize) : prizeRate !== null ? Math.round(contractUnitValue * prizeRate) / 100 : parseMoney(payload.grossPrize, 'Prêmio bruto')) : 0;
   const inputManagerRate = parseOptionalPercent(payload.managerCommissionRatePct, 'Percentual da comissão do gerente');
-  const managerRate = sale && sale.manager_commission_rate_pct !== null && sale.manager_commission_rate_pct !== undefined ? Number(sale.manager_commission_rate_pct) : inputManagerRate;
-  const managerValue = sale && Number(sale.manager_commission_value || 0) > 0 ? Number(sale.manager_commission_value) : managerRate !== null ? Math.round(contractUnitValue * managerRate) / 100 : parseMoney(payload.managerCommissionValue, 'Comissão do gerente');
+  const hasManagerRateInput = Object.prototype.hasOwnProperty.call(payload, 'managerCommissionRatePct');
+  const draftManagerRate = existingDraft && existingDraft.manager_commission_rate_pct !== null && existingDraft.manager_commission_rate_pct !== undefined
+    ? Number(existingDraft.manager_commission_rate_pct) : null;
+  const managerRate = sale && sale.manager_commission_rate_pct !== null && sale.manager_commission_rate_pct !== undefined
+    ? Number(sale.manager_commission_rate_pct)
+    : hasManagerRateInput ? inputManagerRate : draftManagerRate;
+  const hasManagerValueInput = Object.prototype.hasOwnProperty.call(payload, 'managerCommissionValue');
+  const managerValue = sale && Number(sale.manager_commission_value || 0) > 0
+    ? Number(sale.manager_commission_value)
+    : managerRate !== null ? Math.round(contractUnitValue * managerRate) / 100
+      : hasManagerValueInput ? parseMoney(payload.managerCommissionValue, 'Comissão do gerente')
+        : Number(existingDraft && existingDraft.manager_commission_value || 0);
   const values = { sale_id: saleId || null, lead_id: leadId || null, process_number: String(sale ? sale.process_number || '' : payload.processNumber || '').trim().slice(0, 100),
     broker_id: broker.id, sdr_id: sdr.id, manager_id: manager.id,
     broker_cpf: brokerProfile.cpf || existingDraft && existingDraft.broker_cpf || '', broker_cnpj: brokerProfile.cnpj || existingDraft && existingDraft.broker_cnpj || '',
@@ -2304,6 +2533,20 @@ async function apiSaveContract(token, payload = {}) {
   if (values.unit_value <= 0) return { ok: false, message: 'O valor da venda precisa ser maior que zero.' };
   if (values.gross_commission <= 0) return { ok: false, message: 'Informe a comissão bruta total da operação.' };
   if (values.has_prize && values.gross_prize <= 0) return { ok: false, message: 'Informe o percentual do prêmio ou desmarque a opção de prêmio.' };
+  if (needsSdrAssignment) {
+    const [existingReceipts, existingContracts] = await Promise.all([
+      dbRequest('crm_commission_documents', { query: { select: 'id', sale_id: `eq.${sale.id}`, document_type: 'eq.commission_receipt', limit: 1 } }),
+      dbRequest('crm_contracts', { query: { select: 'id,sdr_id,status', sale_id: `eq.${sale.id}`, deleted_at: 'is.null' } })
+    ]);
+    if (Array.isArray(existingReceipts) && existingReceipts.length) return { ok: false, message: 'Esta venda já tem recibos vinculados. Para preservar os documentos financeiros, corrija o SDR na venda antes de gerar o Termo Fifty.' };
+    const conflictingContract = (existingContracts || []).find((item) => String(item.id) !== id && item.status !== 'Cancelado' && String(item.sdr_id || '') !== sdr.id);
+    if (conflictingContract) return { ok: false, message: 'Já existe outro Termo Fifty ativo para esta venda com um SDR diferente. Edite ou exclua o rascunho existente antes de trocar o participante.' };
+    const saleQuery = { id: 'eq.' + sale.id, is_sdr_sale: 'eq.true', deleted_at: 'is.null', sdr_id: savedSdrId ? `eq.${savedSdrId}` : 'is.null' };
+    const updatedSale = await dbRequest('crm_sales', { method: 'PATCH', query: saleQuery, prefer: 'return=representation', body: { sdr_id: sdr.id, updated_at: now(), updated_by: actor.id } });
+    if (!Array.isArray(updatedSale) || !updatedSale.length) return { ok: false, message: 'Não foi possível registrar o SDR selecionado na venda. Atualize a tela e tente novamente.' };
+    sale.sdr_id = sdr.id;
+    await audit(actor, 'sale.sdr.assign_for_fifty_term', 'sale', sale.id, ['sdrId'], { sdrId: savedSdrId }, { sdrId: sdr.id, isSdrSale: true });
+  }
   let existing = null;
   let beforeValues = {};
   if (id) {
@@ -2418,6 +2661,11 @@ async function apiGenerateContract(token, contractId, documentKind = 'agreement'
   const contractRows = await dbRequest('crm_contracts', { query: { select: '*', id: `eq.${contractId}`, limit: 1 } });
   const contract = Array.isArray(contractRows) ? contractRows[0] : null;
   if (!contract || contract.status === 'Cancelado' || (kind === 'agreement' && contract.status === 'Assinado')) return { ok: false, message: 'Este documento não pode ser gerado neste estado.' };
+  if (!contract.sale_id || !contract.sdr_id) return { ok: false, message: 'O Termo Fifty exige uma venda vinculada e um SDR participante selecionado.' };
+  const linkedSaleRows = await dbRequest('crm_sales', { query: { select: 'id,is_sdr_sale,sdr_id,sale_status,repass_status,deleted_at', id: `eq.${contract.sale_id}`, limit: 1 } });
+  const linkedSale = Array.isArray(linkedSaleRows) ? linkedSaleRows[0] : null;
+  if (!linkedSale || linkedSale.deleted_at || linkedSale.is_sdr_sale !== true || String(linkedSale.sdr_id || '') !== String(contract.sdr_id)) return { ok: false, message: 'O Termo Fifty só pode ser gerado quando a venda ativa estiver marcada com participação do SDR correto.' };
+  if (!String(contract.proposal_number || '').trim()) return { ok: false, message: 'Informe o número da proposta antes de gerar o Termo Fifty.' };
   const priorDocuments = await listAll('crm_contract_documents', { select: 'document_kind,document_type,signature_confirmed_at', contract_id: `eq.${contract.id}` });
   if ((priorDocuments || []).some((doc) => (doc.document_kind || 'agreement') === kind && doc.document_type === 'signed' && doc.signature_confirmed_at)) return { ok: false, message: 'A assinatura deste documento já foi confirmada. Não é possível gerar outra versão pelo fluxo atual.' };
   const templateInfo = await apiGetContractTemplate(token, { kind });
@@ -2429,6 +2677,9 @@ async function apiGenerateContract(token, contractId, documentKind = 'agreement'
   const development = developments.find((item) => item.id === contract.development_id) || {};
   const brokerProfile = (profiles || []).find((item) => item.user_id === contract.broker_id) || {};
   const sdrProfile = (profiles || []).find((item) => item.user_id === contract.sdr_id) || {};
+  const managerProfile = (profiles || []).find((item) => item.user_id === contract.manager_id) || {};
+  const managerMissing = [['CPF',managerProfile.cpf],['CNPJ',managerProfile.cnpj],['CRECI',managerProfile.creci],['endereço',managerProfile.address]].filter(([,value]) => !String(value || '').trim()).map(([label]) => label);
+  if (managerMissing.length) return { ok: false, message: `Complete os dados cadastrais do gerente ${manager.name || ''} antes de gerar o Termo Fifty: ${managerMissing.join(', ')}.` };
   const participantSnapshotLocked = Boolean(contract.generated_at || contract.status !== 'Rascunho'
     || (priorDocuments || []).some((doc) => doc.document_type === 'generated'));
   const party = {
@@ -2443,8 +2694,8 @@ async function apiGenerateContract(token, contractId, documentKind = 'agreement'
   };
   if (!manager.id || !manager.active || manager.deleted_at || !['Gerente','Administrador'].includes(manager.role)) return { ok: false, message: 'Selecione um gerente ou administrador ativo como terceiro signatário e salve o rascunho novamente.' };
   const values = {
-    numero_contrato: contract.contract_number, numero_processo: contract.process_number || 'Não informado', numero_proposta: contract.proposal_number || 'Não informado', cliente_nome: contract.buyer_name, cliente_cpf: contract.buyer_cpf,
-    cliente_endereco: contract.buyer_address, empreendimento: development.name || '', unidade: contract.unit,
+    numero_contrato: contract.contract_number, numero_processo: contract.process_number || '', numero_proposta: contract.proposal_number || '', cliente_nome: contract.buyer_name || '', cliente_cpf: contract.buyer_cpf || '',
+    cliente_endereco: contract.buyer_address || '', empreendimento: development.name || '', unidade: contract.unit || '',
     valor_unidade: formatCurrency(contract.unit_value), corretor_nome: broker.name || '', corretor_cpf: party.brokerCpf,
     corretor_cnpj: party.brokerCnpj, corretor_creci: party.brokerCreci, corretor_endereco: party.brokerAddress,
     sdr_nome: sdr.name || '', sdr_cpf: party.sdrCpf, sdr_cnpj: party.sdrCnpj, sdr_creci: party.sdrCreci, sdr_endereco: party.sdrAddress, gerente_nome: manager.name || '',
@@ -2459,13 +2710,9 @@ async function apiGenerateContract(token, contractId, documentKind = 'agreement'
     premio_sdr: contract.has_prize ? formatCurrency(contract.sdr_prize) : 'Não se aplica',
     data_geracao: new Intl.DateTimeFormat('pt-BR', { dateStyle: 'long', timeZone: 'America/Sao_Paulo' }).format(new Date())
   };
-  const labels = { cliente_nome:'nome do comprador', cliente_cpf:'CPF do comprador', cliente_endereco:'endereço do comprador', empreendimento:'empreendimento', unidade:'unidade', valor_unidade:'valor da unidade', corretor_nome:'corretor responsável', corretor_cpf:'CPF do corretor', corretor_cnpj:'CNPJ do corretor', corretor_creci:'CRECI do corretor', corretor_endereco:'endereço do corretor', sdr_nome:'SDR signatário', sdr_cpf:'CPF do SDR', sdr_cnpj:'CNPJ do SDR', sdr_creci:'CRECI do SDR', sdr_endereco:'endereço do SDR', gerente_nome:'terceiro signatário', comissao_bruta:'comissão total' };
-  const requiredKeys = [...new Set([...String(templateInfo.template).matchAll(/{{\s*([a-z_]+)\s*}}/g)].map((match) => match[1]))];
-  const missing = requiredKeys.filter((key) => !Object.prototype.hasOwnProperty.call(values, key) || !String(values[key] || '').trim() || String(values[key]).trim() === 'Não informado');
-  if (missing.length) {
-    const names = missing.map((key) => labels[key] || ('campo {{' + key + '}}')).join(', ');
-    return { ok: false, message: 'Não foi possível gerar ainda. Preencha estes dados usados pelo modelo (' + (kind === 'agreement' ? 'contrato/termo' : 'confissão de dívida') + '): ' + names + '. Confira também os dados cadastrais do corretor e os CPFs dos signatários.' };
-  }
+  const usedKeys = [...new Set([...String(templateInfo.template).matchAll(/{{\s*([a-z_]+)\s*}}/g)].map((match) => match[1]))];
+  const unknownKeys = usedKeys.filter((key) => !Object.prototype.hasOwnProperty.call(values, key));
+  if (unknownKeys.length) return { ok: false, message: 'O modelo contém campos não reconhecidos: ' + unknownKeys.map((key) => '{{' + key + '}}').join(', ') + '. Revise o modelo antes de gerar.' };
   let html = templateInfo.template.replace(/{{\s*([a-z_]+)\s*}}/g, (match, key) => Object.prototype.hasOwnProperty.call(values, key) ? htmlEscape(values[key]) : match);
   if (/{{\s*[^{}]+\s*}}/.test(html)) return { ok: false, message: 'O modelo contém campos sem correspondência. Revise os marcadores antes de gerar o documento.' };
   if (!/<!doctype\s+html/i.test(html) && !/<html[\s>]/i.test(html)) html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${htmlEscape(contract.contract_number)}</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body>${html}</body></html>`;
@@ -2562,19 +2809,23 @@ async function apiGetContractDocument(token, documentId) {
 
 function canReadCommissionDocument(actor, doc) {
   if (isFinanceManager(actor)) return true;
-  if (actor.role === 'Corretor') return String(doc.broker_id) === String(actor.id);
-  return actor.role === 'SDR' && doc.document_type === 'commission_receipt' && String(doc.sdr_id || '') === String(actor.id);
+  const recipientId = String(doc.recipient_id || doc.broker_id || '');
+  if (actor.role === 'Corretor' || actor.role === 'SDR') return recipientId === String(actor.id);
+  return false;
 }
 
 function mapCommissionDocument(row, users, sales) {
   const broker = users.find((user) => String(user.id) === String(row.broker_id));
   const sdr = users.find((user) => String(user.id) === String(row.sdr_id));
   const manager = users.find((user) => String(user.id) === String(row.manager_id));
+  const recipientId = row.recipient_id || row.broker_id;
+  const recipient = users.find((user) => String(user.id) === String(recipientId));
   const sale = sales.find((item) => String(item.id) === String(row.sale_id));
   return {
     id: row.id, saleId: row.sale_id || '', processNumber: sale && sale.process_number || '', buyerName: sale && sale.buyer_name || '',
     developmentName: sale && sale.development_name || '', unit: sale && sale.unit || '', brokerId: row.broker_id,
     brokerName: broker && broker.name || 'Corretor inativo', sdrId: row.sdr_id || '', sdrName: sdr && sdr.name || '',
+    recipientId, recipientRole: row.recipient_role || 'Corretor', recipientName: recipient && recipient.name || (row.recipient_role === 'SDR' ? 'SDR inativo' : 'Corretor inativo'),
     managerId: row.manager_id || '', managerName: manager && manager.name || '',
     type: row.document_type, signatureStatus: row.signature_status, paymentStatus: row.payment_status,
     commissionBase: Number(row.commission_base || 0), commissionRatePct: Number(row.commission_rate_pct || 0), grossCommission: Number(row.gross_commission || 0),
@@ -2663,75 +2914,80 @@ function htmlToPdfLines(html) {
     .split(/\r?\n/).map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean);
 }
 
-function makeCommissionReceiptPdf(document, sale, broker, sdr, manager, profiles) {
-  const brokerProfile = profiles.find((item) => String(item.user_id) === String(broker.id)) || {};
+function makeCommissionReceiptPdf(document, sale, recipient, manager, profiles) {
+  const recipientProfile = profiles.find((item) => String(item.user_id) === String(recipient.id)) || {};
   const managerProfile = profiles.find((item) => String(item.user_id) === String(manager.id)) || {};
-  const sdrProfile = sdr ? profiles.find((item) => String(item.user_id) === String(sdr.id)) || {} : {};
-  const paymentDate = document.payment_date ? new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeZone: 'UTC' }).format(new Date(`${document.payment_date}T12:00:00Z`)) : 'A definir pela gestão';
+  const recipientRole = document.recipient_role === 'SDR' ? 'SDR participante' : 'Corretor responsável';
+  const paymentDate = document.payment_date ? new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeZone: 'UTC' }).format(new Date(document.payment_date + 'T12:00:00Z')) : 'A definir pela gestão';
+  const issueDate = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'long', timeZone: 'America/Sao_Paulo' }).format(new Date());
+  const totalGross = Math.round(Math.round(Number(document.commission_base || 0) * 100) * 250 / 10000) / 100;
   const lines = [
     'SHARKS FÊNIX · MUNDO APTO',
     'DECLARAÇÃO DE RECEBIMENTO DE COMISSÃO',
     'INTERMEDIAÇÃO DE PAGAMENTO E AUSÊNCIA DE VÍNCULO EMPREGATÍCIO',
-    `Recibo ${document.document_number || document.id}`,
+    'Recibo ' + (document.document_number || document.id),
     '',
-    '1. IDENTIFICAÇÃO DO CORRETOR',
-    `Nome: ${broker.name}`,
-    `CNPJ: ${brokerProfile.cnpj || '________________'} | CPF: ${brokerProfile.cpf || '________________'} | CRECI: ${brokerProfile.creci || '________________'}`,
-    `Endereço: ${brokerProfile.address || '________________________________________________'}`,
+    '1. IDENTIFICAÇÃO DO BENEFICIÁRIO DA COMISSÃO',
+    'Nome: ' + (recipient.name || '________________'),
+    'Qualificação na venda: ' + recipientRole,
+    'CNPJ: ' + (recipientProfile.cnpj || '________________') + ' | CPF: ' + (recipientProfile.cpf || '________________') + ' | CRECI: ' + (recipientProfile.creci || '________________'),
+    'Endereço: ' + (recipientProfile.address || '________________________________________________'),
     '',
     '2. EMPRESA INTERMEDIADORA DO PAGAMENTO',
-    `Responsável: ${manager.name}`,
-    `CNPJ: ${managerProfile.cnpj || '________________'}`,
-    `Endereço: ${managerProfile.address || '________________________________________________'}`,
+    'Empresa / responsável pelo pagamento: ' + (manager.name || '________________'),
+    'CNPJ: ' + (managerProfile.cnpj || '________________') + ' | CPF: ' + (managerProfile.cpf || '________________'),
+    'CRECI: ' + (managerProfile.creci || '________________'),
+    'Endereço: ' + (managerProfile.address || '________________________________________________'),
     '',
     '3. DADOS DA VENDA',
-    `Empreendimento / produto: ${sale.development_name || 'Não informado'}`,
-    `Unidade: ${sale.unit || 'Não informada'} | Cliente comprador: ${sale.buyer_name || 'Não informado'}`,
-    `Processo: ${sale.process_number || sale.internal_number || 'Não informado'}`,
-    `Valor da venda (VGV): ${formatCurrency(document.commission_base)}`,
-    `Comissão bruta destinada ao corretor: ${formatCurrency(document.gross_commission)}`,
-    ...(sdr ? [`SDR selecionado para esta venda: ${sdr.name}${sdrProfile.cpf ? ` | CPF: ${sdrProfile.cpf}` : ''}`] : []),
+    'Cliente / comprador: ' + (sale.buyer_name || 'Não informado'),
+    'Empreendimento / produto: ' + (sale.development_name || 'Não informado'),
+    'Unidade: ' + (sale.unit || 'Não informada'),
+    'Processo / proposta: ' + (sale.process_number || sale.internal_number || 'Não informado'),
+    'Valor da venda (VGV): ' + formatCurrency(document.commission_base),
+    'Comissão bruta total da venda (2,5%): ' + formatCurrency(totalGross),
+    'Comissão bruta deste recibo: ' + formatCurrency(document.gross_commission),
     '',
     '3.1. DO OBJETO',
-    'O presente instrumento tem por objeto a declaração de recebimento de comissão pelo CORRETOR acima identificado, referente à intermediação e participação na venda do produto imobiliário descrito no item 3.',
+    'O presente instrumento tem por objeto a declaração de recebimento de comissão pelo BENEFICIÁRIO acima identificado, referente à intermediação e participação na venda do produto imobiliário descrito no item 3.',
     '',
     '4. DOS VALORES E DESCONTOS',
-    'O CORRETOR declara ciência e concordância com os seguintes valores:',
-    `Valor bruto da comissão apurada (2,5% do valor da venda): ${formatCurrency(document.gross_commission)}`,
-    `Desconto de alíquota da empresa intermediadora: ${formatPercent(document.withholding_rate_pct)}`,
-    `Valor descontado: ${formatCurrency(document.withholding_amount)}`,
-    `Valor líquido destinado ao corretor: ${formatCurrency(document.broker_amount)}`,
-    ...(sdr ? [`Valor líquido destinado ao SDR ${sdr.name}: ${formatCurrency(document.sdr_amount)}`] : []),
-    `Valor líquido total após desconto: ${formatCurrency(document.net_commission)}`,
-    `Data prevista para pagamento: ${paymentDate}`,
-    ...(document.notes ? [`Observações: ${document.notes}`] : []),
-    sdr
-      ? 'Os valores acima refletem o montante acordado, com a comissão líquida dividida igualmente entre o CORRETOR PARCEIRO e o SDR participante identificado neste recibo.'
-      : 'Os valores acima refletem fielmente o montante acordado entre as partes, considerando apenas a comissão destinada ao CORRETOR PARCEIRO.',
+    'O BENEFICIÁRIO declara ciência e concordância com os seguintes valores:',
+    'Valor bruto deste recibo: ' + formatCurrency(document.gross_commission),
+    'Alíquota de desconto preenchida pela gestão: ' + formatPercent(document.withholding_rate_pct),
+    'Valor correspondente ao desconto: ' + formatCurrency(document.withholding_amount),
+    'Valor líquido destinado ao BENEFICIÁRIO: ' + formatCurrency(document.net_commission),
+    'Data prevista para pagamento: ' + paymentDate,
+    ...(document.notes ? ['Observações: ' + document.notes] : []),
+    'Os valores acima refletem a comissão destinada individualmente ao BENEFICIÁRIO. A alíquota de desconto é aplicada sobre a comissão bruta total; quando houver participação de corretor e SDR, o valor líquido é dividido igualmente e cada um recebe um recibo individual.',
     '',
     '5. DA FORMA DE PAGAMENTO',
-    'O pagamento será realizado por transferência bancária. O comprovante correspondente será anexado e mantido para consulta no CRM.',
-    '5.1. O CORRETOR declara estar ciente de que será emitida Nota Fiscal pelo corretor (Pessoa Jurídica - PJ), quando aplicável, e o pagamento correspondente será realizado exclusivamente em conta PJ de titularidade do corretor. Eventuais valores complementares, ajustes ou diferenças poderão ser pagos via Pessoa Física (PF), conforme acordo entre as partes e dentro da legalidade vigente.',
+    'O pagamento será realizado via transferência bancária. O comprovante poderá ser anexado e armazenado no CRM.',
+    '5.1. O BENEFICIÁRIO declara estar ciente de que será emitida Nota Fiscal pelo beneficiário como Pessoa Jurídica (PJ), quando aplicável, e o pagamento correspondente será realizado em conta PJ de sua titularidade.',
+    'Eventuais valores complementares, ajustes ou diferenças poderão ser pagos via Pessoa Física (PF), conforme acordo entre as partes e dentro da legalidade vigente.',
     '5.2. Os pagamentos ocorrerão após o cumprimento integral das condições comerciais e administrativas da venda.',
     '',
     '6. INTERMEDIAÇÃO E AUSÊNCIA DE VÍNCULO',
-    '6.1. O CORRETOR declara expressamente que possui contrato ativo e vigente com a empresa MUNDO APTO, responsável direta pela relação comercial com o corretor. A empresa identificada acima atua exclusivamente como intermediadora do pagamento da comissão, não sendo parte do contrato principal de corretagem.',
-    '6.2. Fica expressamente declarado que não existe e nunca existiu vínculo empregatício, trabalhista, previdenciário ou societário entre o CORRETOR e a empresa intermediadora do pagamento, não se aplicando a CLT, nos termos do artigo 3º da Consolidação das Leis do Trabalho.',
-    '6.3. O CORRETOR atua de forma autônoma, sem exclusividade, subordinação ou controle de jornada, assumindo responsabilidade por seus encargos fiscais, previdenciários, tributários e profissionais, inclusive junto ao CRECI.',
+    '6.1. O BENEFICIÁRIO declara expressamente que possui relação comercial ativa e vigente com a empresa MUNDO APTO, responsável direta por essa relação comercial.',
+    'A empresa intermediadora identificada no item 2 atua exclusivamente como intermediadora do pagamento da comissão, não sendo parte do contrato principal de corretagem.',
+    '6.2. Fica declarado que não existe vínculo empregatício, trabalhista, previdenciário ou societário entre o BENEFICIÁRIO e a empresa intermediadora, não se aplicando a CLT, nos termos do artigo 3º da Consolidação das Leis do Trabalho.',
+    '6.3. O BENEFICIÁRIO atua de forma autônoma, sem exclusividade, subordinação ou controle de jornada, assumindo responsabilidade por seus encargos fiscais, previdenciários, tributários e profissionais, inclusive perante o CRECI, quando aplicável.',
     '',
     '7. DISPOSIÇÕES GERAIS',
     '7.1. O presente documento possui caráter declaratório e comprobatório, servindo como recibo e ciência das condições aqui descritas.',
-    '7.2. As partes elegem o foro da comarca de São Paulo para dirimir quaisquer dúvidas oriundas deste instrumento, renunciando a qualquer outro, por mais privilegiado que seja.',
-    'E, por estarem de pleno acordo, firmam o presente instrumento em vias de igual teor.',
-    `Local e data: São Paulo, ${paymentDate}`,
+    '7.2. As partes elegem o foro da Comarca de São Paulo para dirimir quaisquer dúvidas oriundas deste instrumento, renunciando a qualquer outro, por mais privilegiado que seja.',
+    'E, por estarem de pleno acordo, firmam o presente instrumento em duas vias de igual teor.',
+    'Local e data: São Paulo, ' + issueDate + '.',
     '',
     'ASSINATURAS (realizadas fora do CRM)',
     '________________________________________',
-    `${broker.name} | Corretor responsável`,
+    'Assinatura do beneficiário',
+    (recipient.name || '________________') + ' | ' + recipientRole,
     '________________________________________',
-    `${manager.name} | Empresa intermediadora / gerente`,
+    'Assinatura da empresa intermediadora',
+    (manager.name || '________________') + ' | Gerente',
     '',
-    'A confirmação no CRM registra a conferência administrativa do arquivo enviado. O CRM não valida assinatura digital nem substitui revisão jurídica ou contábil.'
+    'O arquivo assinado será anexado ao CRM. A conferência administrativa não substitui a assinatura feita pelas partes nem a revisão jurídica e contábil da empresa.'
   ];
   return makePdfDocument(lines);
 }
@@ -2764,69 +3020,96 @@ async function apiCreateCommissionReceipt(token, payload = {}) {
   if (!isValidDateOnly(payload.paymentDate)) return { ok: false, message: 'Informe uma data prevista para o pagamento.' };
   const withholdingRatePct = parseOptionalPercent(payload.withholdingRatePct, 'Alíquota de desconto');
   if (withholdingRatePct === null) return { ok: false, message: 'Informe a alíquota de desconto, mesmo que seja 0%.' };
-  const saleRows = await dbRequest('crm_sales', { query: { select: '*', id: `eq.${saleId}`, deleted_at: 'is.null', limit: 1 } });
+  const saleRows = await dbRequest('crm_sales', { query: { select: '*', id: 'eq.' + saleId, deleted_at: 'is.null', limit: 1 } });
   const sale = Array.isArray(saleRows) ? saleRows[0] : null;
   if (!sale) return { ok: false, message: 'A venda selecionada não está disponível.' };
-  const activeReceipts = await dbRequest('crm_commission_documents', { query: {
-    select: 'id', sale_id: `eq.${saleId}`, document_type: 'eq.commission_receipt', archived_at: 'is.null', limit: 1
-  } });
-  if (Array.isArray(activeReceipts) && activeReceipts.length) return { ok: false, message: 'Esta venda já possui um recibo de comissão ativo. Consulte os documentos financeiros antes de gerar outro.' };
   const repass = String(sale.repass_status || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
   if (sale.sale_status === 'Cancelada' || repass.includes('DISTRATO') || repass === 'CANCELADO') return { ok: false, message: 'Não é possível gerar recibo para uma venda cancelada ou em distrato.' };
   const userRows = await listAll('crm_users', { select: 'id,name,role,active,deleted_at' });
-  const broker = userRows.find((user) => String(user.id) === String(sale.broker_id) && user.role === 'Corretor');
+  const broker = userRows.find((user) => String(user.id) === String(sale.broker_id) && user.role === 'Corretor' && !user.deleted_at);
   if (!broker || String(broker.id) !== requestedBrokerId) return { ok: false, message: 'O corretor selecionado precisa ser o mesmo responsável registrado na venda.' };
-  const manager = userRows.find((user) => String(user.id) === managerId && user.role === 'Gerente' && user.active && !user.deleted_at);
+  const manager = userRows.find((user) => String(user.id) === managerId && ['Gerente','Administrador'].includes(user.role) && user.active && !user.deleted_at);
   if (!manager) return { ok: false, message: 'Selecione um gerente ativo para assinar o recibo.' };
   const requestedSdrId = String(payload.sdrId || '').trim();
   const saleSdrId = String(sale.sdr_id || '').trim();
-  if (requestedSdrId && requestedSdrId !== saleSdrId) return { ok: false, message: 'O SDR do recibo precisa ser o mesmo selecionado na venda.' };
-  if (sale.is_sdr_sale === true && !saleSdrId) return { ok: false, message: 'Selecione o SDR participante na venda antes de gerar o recibo.' };
-  if (sale.is_sdr_sale !== true && saleSdrId) return { ok: false, message: 'A venda possui um SDR selecionado, mas sua origem está marcada como não SDR. Corrija a venda antes de gerar o recibo.' };
-  const sdr = saleSdrId ? userRows.find((user) => String(user.id) === saleSdrId && user.role === 'SDR' && !user.deleted_at) : null;
-  if (saleSdrId && !sdr) return { ok: false, message: 'O SDR vinculado à venda não está disponível. Corrija o cadastro antes de gerar o recibo.' };
+  if (sale.is_sdr_sale === true && !requestedSdrId && !saleSdrId) return { ok: false, message: 'Selecione o SDR participante para gerar o recibo separado dele.' };
+  if (requestedSdrId && sale.is_sdr_sale !== true) return { ok: false, message: 'Não é possível selecionar um SDR em uma venda sem participação do SDR.' };
+  if (requestedSdrId && saleSdrId && requestedSdrId !== saleSdrId) return { ok: false, message: 'O SDR selecionado precisa corresponder ao vínculo registrado na venda.' };
+  const selectedSdrId = requestedSdrId || saleSdrId;
+  const sdr = selectedSdrId ? userRows.find((user) => String(user.id) === selectedSdrId && user.role === 'SDR' && user.active && !user.deleted_at) : null;
+  if (selectedSdrId && !sdr) return { ok: false, message: 'Selecione um SDR ativo.' };
+  if (sale.is_sdr_sale === true && !sdr) return { ok: false, message: 'Venda com participação SDR precisa ter um SDR ativo selecionado.' };
+  if (sale.is_sdr_sale !== true && saleSdrId) return { ok: false, message: 'A venda tem um SDR vinculado, mas está marcada como sem participação. Corrija o cadastro antes de gerar recibos.' };
   const profiles = await listAll('crm_user_contract_profiles', { select: '*' });
-  const brokerProfile = (profiles || []).find((item) => String(item.user_id) === String(broker.id)) || {};
   const managerProfile = (profiles || []).find((item) => String(item.user_id) === String(manager.id)) || {};
-  const brokerMissing = [['CPF',brokerProfile.cpf],['CNPJ',brokerProfile.cnpj],['CRECI',brokerProfile.creci],['endereço',brokerProfile.address]].filter(([,value]) => !String(value || '').trim()).map(([label]) => label);
-  if (brokerMissing.length) return { ok: false, message: `Complete o cadastro contratual do corretor ${broker.name} antes de gerar o recibo: ${brokerMissing.join(', ')}.` };
-  const managerMissing = [['CNPJ',managerProfile.cnpj],['endereço',managerProfile.address]].filter(([,value]) => !String(value || '').trim()).map(([label]) => label);
-  if (managerMissing.length) return { ok: false, message: `Complete o cadastro contratual do gerente ${manager.name} antes de gerar o recibo: ${managerMissing.join(', ')}.` };
+  const managerMissing = [['CPF',managerProfile.cpf],['CNPJ',managerProfile.cnpj],['CRECI',managerProfile.creci],['endereço',managerProfile.address]].filter(([,value]) => !String(value || '').trim()).map(([label]) => label);
+  if (managerMissing.length) return { ok: false, message: 'Complete os dados cadastrais do gerente ' + manager.name + ' antes de gerar recibos: ' + managerMissing.join(', ') + '.' };
   const commissionBase = parseMoney(sale.unit_value, 'Valor da venda');
-  const grossCents = Math.round(Math.round(commissionBase * 100) * 250 / 10000);
-  const grossCommission = grossCents / 100;
-  const withholdingCents = Math.round(grossCents * withholdingRatePct / 100);
-  const withholdingAmount = withholdingCents / 100;
-  const netCommission = (grossCents - withholdingCents) / 100;
-  const split = sdr ? splitMoneyHalf(netCommission) : { first: netCommission, second: 0 };
-  if (grossCommission <= 0) return { ok: false, message: 'O valor da venda não permite calcular uma comissão positiva.' };
+  const totalGrossCents = Math.round(Math.round(commissionBase * 100) * 250 / 10000);
+  const totalWithholdingCents = Math.round(totalGrossCents * withholdingRatePct / 100);
+  const totalNetCents = totalGrossCents - totalWithholdingCents;
+  if (totalGrossCents <= 0) return { ok: false, message: 'O valor da venda não permite calcular uma comissão positiva.' };
+  const grossSplit = sdr ? splitMoneyHalf(totalGrossCents / 100) : { first: totalGrossCents / 100, second: 0 };
+  const netSplit = sdr ? splitMoneyHalf(totalNetCents / 100) : { first: totalNetCents / 100, second: 0 };
+  const plannedRecipients = [{ user: broker, role: 'Corretor', grossCents: Math.round(grossSplit.first * 100), netCents: Math.round(netSplit.first * 100) }];
+  if (sdr) plannedRecipients.push({ user: sdr, role: 'SDR', grossCents: Math.round(grossSplit.second * 100), netCents: Math.round(netSplit.second * 100) });
+  const activeRows = await listAll('crm_commission_documents', { select: 'id,recipient_id', sale_id: 'eq.' + saleId, document_type: 'eq.commission_receipt', archived_at: 'is.null' });
+  const existingRecipients = new Set((activeRows || []).map((row) => String(row.recipient_id || row.broker_id || '')));
+  const recipients = plannedRecipients.filter((item) => !existingRecipients.has(String(item.user.id)));
+  if (!recipients.length) return { ok: false, message: 'Os recibos previstos para esta venda já existem. Consulte a área de recibos e comprovantes.' };
+  if (sdr && !saleSdrId) {
+    const updatedSale = await dbRequest('crm_sales', { method: 'PATCH', query: { id: 'eq.' + saleId, is_sdr_sale: 'eq.true', deleted_at: 'is.null' }, prefer: 'return=representation', body: { sdr_id: sdr.id, updated_at: now(), updated_by: actor.id } });
+    if (!Array.isArray(updatedSale) || !updatedSale.length) return { ok: false, message: 'Não foi possível gravar o SDR selecionado na venda. Atualize a tela e tente novamente.' };
+    await audit(actor, 'sale.sdr.assign_for_receipt', 'sale', saleId, ['sdrId'], { sdrId: '' }, { sdrId: sdr.id, isSdrSale: true });
+  }
   const notes = String(payload.notes || '').trim().slice(0, 3000);
   const stamp = now();
-  const createdRows = await dbRequest('crm_commission_documents', { method: 'POST', prefer: 'return=representation', body: {
-    sale_id: sale.id, broker_id: broker.id, sdr_id: sdr ? sdr.id : null, manager_id: manager.id, document_type: 'commission_receipt',
-    signature_status: 'pending', payment_status: 'pending', commission_base: commissionBase, commission_rate_pct: 2.5,
-    gross_commission: grossCommission, withholding_rate_pct: withholdingRatePct, withholding_amount: withholdingAmount,
-    net_commission: netCommission, broker_amount: split.first, sdr_amount: split.second, payment_date: payload.paymentDate,
-    notes, created_by: actor.id, updated_by: actor.id, created_at: stamp, updated_at: stamp
-  } });
-  const document = Array.isArray(createdRows) ? createdRows[0] : createdRows;
-  if (!document) throw new HttpError(502, 'Não foi possível criar o registro do recibo.');
   const developmentRows = await dbRequest('crm_developments', { query: { select: 'id,name', id: `eq.${sale.development_id}`, limit: 1 } });
-  const saleContext = { ...sale, development_name: (Array.isArray(developmentRows) && developmentRows[0] && developmentRows[0].name) || '' };
-  const bytes = makeCommissionReceiptPdf(document, saleContext, broker, sdr, manager, profiles || []);
-  const fileName = `${safeFileName(sale.process_number || sale.internal_number || 'venda')}-recibo-comissao-${String(document.id).slice(0, 8)}.pdf`;
-  const path = `generated/${document.id}/${randomBytes(6).toString('hex')}-${fileName}`;
+  const saleContext = { ...sale, sdr_id: sdr ? sdr.id : null, development_name: (Array.isArray(developmentRows) && developmentRows[0] && developmentRows[0].name) || '' };
+  const created = [];
+  let notificationDelayed = false;
   try {
-    await storageRequest(`object/crm-finance-documents/${storageObjectPath(path)}`, { method: 'POST', body: bytes, contentType: 'application/pdf', headers: { 'x-upsert': 'false' } });
+    for (const item of recipients) {
+      const grossCents = item.grossCents;
+      const netCents = item.netCents;
+      const withholdingCents = grossCents - netCents;
+      const documentRows = await dbRequest('crm_commission_documents', { method: 'POST', prefer: 'return=representation', body: {
+        sale_id: sale.id, broker_id: broker.id, sdr_id: sdr ? sdr.id : null, recipient_id: item.user.id, recipient_role: item.role,
+        manager_id: manager.id, document_type: 'commission_receipt', signature_status: 'pending', payment_status: 'pending',
+        commission_base: commissionBase, commission_rate_pct: sdr ? 1.25 : 2.5, gross_commission: grossCents / 100,
+        withholding_rate_pct: withholdingRatePct, withholding_amount: withholdingCents / 100, net_commission: netCents / 100,
+        broker_amount: item.role === 'Corretor' ? netCents / 100 : 0, sdr_amount: item.role === 'SDR' ? netCents / 100 : 0,
+        payment_date: payload.paymentDate, notes, created_by: actor.id, updated_by: actor.id, created_at: stamp, updated_at: stamp
+      } });
+      const document = Array.isArray(documentRows) ? documentRows[0] : documentRows;
+      if (!document) throw new HttpError(502, 'Não foi possível criar o registro do recibo.');
+      created.push({ document, path: '' });
+      const bytes = makeCommissionReceiptPdf(document, saleContext, item.user, manager, profiles || []);
+      const fileName = safeFileName((sale.process_number || sale.internal_number || 'venda') + '-recibo-' + item.role.toLocaleLowerCase('pt-BR') + '-' + String(document.id).slice(0, 8) + '.pdf');
+      const path = 'generated/' + document.id + '/' + randomBytes(6).toString('hex') + '-' + fileName;
+      created[created.length - 1].path = path;
+      await storageRequest('object/crm-finance-documents/' + storageObjectPath(path), { method: 'POST', body: bytes, contentType: 'application/pdf', headers: { 'x-upsert': 'false' } });
+      const savedRows = await dbRequest('crm_commission_documents', { method: 'PATCH', query: { id: 'eq.' + document.id }, prefer: 'return=representation', body: { generated_storage_path: path, original_name: fileName, mime_type: 'application/pdf', size_bytes: bytes.byteLength, updated_at: now(), updated_by: actor.id } });
+      const saved = Array.isArray(savedRows) ? savedRows[0] || document : document;
+      const notified = await notifyCommissionReceiptParticipants(saved, 'commission_receipt_signature_requested');
+      if (!notified) notificationDelayed = true;
+      item.saved = saved;
+      await audit(actor, 'commission_receipt.generate', 'commission_document', document.id, ['recipientId','recipientRole','grossCommission','withholdingRatePct','withholdingAmount','netCommission','paymentDate'], {}, {
+        saleId: sale.id, recipientId: item.user.id, recipientRole: item.role, grossCommission: grossCents / 100,
+        withholdingRatePct, withholdingAmount: withholdingCents / 100, netCommission: netCents / 100, paymentDate: payload.paymentDate, fileName
+      });
+    }
   } catch (error) {
-    await dbRequest('crm_commission_documents', { method: 'DELETE', query: { id: `eq.${document.id}` } }).catch(() => null);
+    for (const item of created) {
+      if (item.path) await storageRequest('object/crm-finance-documents/' + storageObjectPath(item.path), { method: 'DELETE' }).catch(() => null);
+      await dbRequest('crm_commission_documents', { method: 'DELETE', query: { id: 'eq.' + item.document.id } }).catch(() => null);
+    }
     throw error;
   }
-  const savedRows = await dbRequest('crm_commission_documents', { method: 'PATCH', query: { id: `eq.${document.id}` }, prefer: 'return=representation', body: { generated_storage_path: path, original_name: fileName, mime_type: 'application/pdf', size_bytes: bytes.byteLength, updated_at: now(), updated_by: actor.id } });
-  const saved = Array.isArray(savedRows) ? savedRows[0] : savedRows;
-  const notificationSaved = await notifyCommissionReceiptParticipants(saved || document, 'commission_receipt_signature_requested');
-  await audit(actor, 'commission_receipt.generate', 'commission_document', document.id, ['recibo','commissionBase','grossCommission','withholdingRatePct','netCommission','brokerAmount','sdrAmount','paymentDate'], {}, { saleId: sale.id, brokerId: broker.id, sdrId: sdr ? sdr.id : '', commissionBase, grossCommission, withholdingRatePct, withholdingAmount, netCommission, brokerAmount: split.first, sdrAmount: split.second, paymentDate: payload.paymentDate, fileName });
-  return { ok: true, document: mapCommissionDocument(saved || { ...document, generated_storage_path: path, original_name: fileName, mime_type: 'application/pdf', size_bytes: bytes.byteLength }, userRows, [{ ...saleContext }]), message: 'Recibo gerado conforme o modelo recebido. O corretor foi avisado no CRM para assinar externamente e enviar o PDF. As assinaturas exigidas são as do corretor e do gerente.' + (notificationSaved ? '' : ' A notificação aparecerá após a próxima sincronização.') };
+  const documents = created.map((item) => mapCommissionDocument(item.saved || item.document, userRows, [{ ...saleContext }]));
+  return { ok: true, documents, document: documents[0] || null,
+    message: sdr ? 'Foram gerados recibos separados para corretor e SDR. Cada um contém somente os dados do próprio beneficiário e precisa da assinatura dele e do gerente.' : 'Recibo do corretor gerado. Ele contém os dados do beneficiário e precisa da assinatura do corretor e do gerente.'
+      + (notificationDelayed ? ' Uma notificação aparecerá após a próxima sincronização.' : '') };
 }
 
 async function apiCreateCommissionDocument(token, payload = {}) {
@@ -2849,7 +3132,7 @@ async function apiCreateCommissionDocument(token, payload = {}) {
   }
   const stamp = now();
   const rows = await dbRequest('crm_commission_documents', { method: 'POST', prefer: 'return=representation', body: {
-    sale_id: saleId || null, broker_id: brokerId, sdr_id: null, document_type: type,
+    sale_id: saleId || null, broker_id: brokerId, sdr_id: null, recipient_id: brokerId, recipient_role: 'Corretor', document_type: type,
     signature_status: 'not_required', payment_status: type === 'payment_proof' ? 'not_applicable' : 'pending',
     commission_base: 0, commission_rate_pct: 0, gross_commission: 0, withholding_rate_pct: 0, withholding_amount: 0,
     net_commission: 0, broker_amount: 0, sdr_amount: 0, notes: String(payload.notes || '').trim().slice(0, 3000),
@@ -2868,8 +3151,8 @@ async function apiPrepareCommissionDocumentUpload(token, documentId, fileInfo = 
   const doc = Array.isArray(rows) ? rows[0] : null;
   if (!doc || !canReadCommissionDocument(actor, doc)) throw new HttpError(404, 'Documento não encontrado ou sem permissão.');
   const isReceipt = doc.document_type === 'commission_receipt';
-  if (isReceipt && !isFinanceManager(actor) && !(actor.role === 'Corretor' && String(doc.broker_id) === String(actor.id))) {
-    throw new HttpError(403, 'Somente a gestão financeira ou o corretor responsável pode enviar o recibo assinado.');
+  if (isReceipt && !isFinanceManager(actor) && !(['Corretor','SDR'].includes(actor.role) && String(doc.recipient_id || doc.broker_id) === String(actor.id))) {
+    throw new HttpError(403, 'Somente a gestão financeira ou o beneficiário do recibo pode enviar o arquivo assinado.');
   }
   if (!isReceipt && !isFinanceManager(actor)) throw new HttpError(403, 'Somente gerente e assistente podem anexar notas fiscais, comprovantes e documentos históricos.');
   if (isReceipt && !isFinanceManager(actor) && doc.signature_status !== 'pending') throw new HttpError(403, 'Este recibo não está pendente de assinatura.');
@@ -2922,7 +3205,7 @@ async function apiConfirmCommissionReceiptUpload(token, documentId) {
   if (!isUuid(documentId)) return { ok: false, message: 'Documento inválido.' };
   const doc = await getCommissionDocumentForActor(actor, documentId);
   if (doc.document_type !== 'commission_receipt' || !doc.signed_storage_path || doc.signature_status !== 'pending' || doc.archived_at) return { ok: false, message: 'Este recibo não está aguardando o arquivo assinado.' };
-  if (!isFinanceManager(actor) && !(actor.role === 'Corretor' && String(doc.broker_id) === String(actor.id))) throw new HttpError(403, 'Somente gerente, assistente ou corretor responsável podem concluir o envio do recibo.');
+  if (!isFinanceManager(actor) && !(['Corretor','SDR'].includes(actor.role) && String(doc.recipient_id || doc.broker_id) === String(actor.id))) throw new HttpError(403, 'Somente gerente, assistente ou beneficiário do recibo podem concluir o envio.');
   const info = await storageRequest(`object/info/crm-finance-documents/${storageObjectPath(doc.signed_storage_path)}`);
   if (!info) return { ok: false, message: 'O arquivo ainda não chegou ao armazenamento. Tente novamente.' };
   const stamp = now();
@@ -2939,20 +3222,23 @@ async function apiConfirmCommissionReceiptSigned(token, documentId, signersConfi
   const doc = await getCommissionDocumentForActor(actor, documentId);
   if (doc.document_type !== 'commission_receipt' || !doc.signed_storage_path || !doc.signed_uploaded_at || doc.signature_status !== 'pending') return { ok: false, message: 'O PDF precisa ser enviado e conferido antes da confirmação.' };
   if (!signersConfirmed || typeof signersConfirmed !== 'object' || Array.isArray(signersConfirmed)
-    || Object.keys(signersConfirmed).some((key) => !['broker','manager'].includes(key))) return { ok: false, message: 'Informe as confirmações individuais dos signatários do recibo.' };
-  if (signersConfirmed.broker !== true || signersConfirmed.manager !== true) return { ok: false, message: 'Confirme as assinaturas externas do corretor e do gerente.' };
+    || Object.keys(signersConfirmed).some((key) => !['recipient','broker','manager'].includes(key))) return { ok: false, message: 'Informe as confirmações individuais dos signatários do recibo.' };
+  const recipientConfirmed = signersConfirmed.recipient === true || (doc.recipient_role !== 'SDR' && signersConfirmed.broker === true);
+  if (!recipientConfirmed || signersConfirmed.manager !== true) return { ok: false, message: 'Confirme as assinaturas externas do beneficiário indicado no recibo e do gerente.' };
   const info = await storageRequest(`object/info/crm-finance-documents/${storageObjectPath(doc.signed_storage_path)}`);
   if (!info) return { ok: false, message: 'O arquivo ainda não chegou ao armazenamento. Tente novamente.' };
   const stamp = now();
+  const recipientIsSdr = (doc.recipient_role || 'Corretor') === 'SDR';
   const updated = await dbRequest('crm_commission_documents', { method: 'PATCH', query: { id: `eq.${doc.id}`, signature_status: 'eq.pending', archived_at: 'is.null' }, prefer: 'return=representation', body: {
-    signature_status: 'signed', broker_signature_confirmed: true, broker_signature_confirmed_at: stamp, broker_signature_confirmed_by: actor.id,
-    sdr_signature_confirmed: false, sdr_signature_confirmed_at: null, sdr_signature_confirmed_by: null,
+    signature_status: 'signed',
+    broker_signature_confirmed: !recipientIsSdr, broker_signature_confirmed_at: recipientIsSdr ? null : stamp, broker_signature_confirmed_by: recipientIsSdr ? null : actor.id,
+    sdr_signature_confirmed: recipientIsSdr, sdr_signature_confirmed_at: recipientIsSdr ? stamp : null, sdr_signature_confirmed_by: recipientIsSdr ? actor.id : null,
     manager_signature_confirmed: true, manager_signature_confirmed_at: stamp, manager_signature_confirmed_by: actor.id,
     updated_at: stamp, updated_by: actor.id
   } });
   if (!Array.isArray(updated) || !updated.length) return { ok: false, message: 'O recibo foi alterado por outra pessoa. Atualize a tela.' };
-  await audit(actor, 'commission_receipt.signed', 'commission_document', doc.id, ['signature_status','broker_signature_confirmed','sdr_signature_confirmed','manager_signature_confirmed'], { signatureStatus: 'pending' }, { signatureStatus: 'signed', brokerSigned: true, sdrSigned: false, managerSigned: true, fileName: doc.original_name });
-  return { ok: true, message: 'Assinaturas conferidas e registradas. O recibo está pronto para acompanhamento do pagamento.' };
+  await audit(actor, 'commission_receipt.signed', 'commission_document', doc.id, ['signature_status','broker_signature_confirmed','sdr_signature_confirmed','manager_signature_confirmed'], { signatureStatus: 'pending' }, { signatureStatus: 'signed', recipientRole: doc.recipient_role || 'Corretor', recipientSigned: true, managerSigned: true, fileName: doc.original_name });
+  return { ok: true, message: 'Assinaturas do beneficiário e do gerente conferidas. O recibo está pronto para acompanhamento do pagamento.' };
 }
 
 async function apiUpdateCommissionPayment(token, documentId, payload = {}) {
@@ -2992,7 +3278,7 @@ async function apiRestoreCommissionDocument(token, documentId) {
   if (!doc) return { ok: false, message: 'Documento arquivado não encontrado.' };
   if (doc.document_type === 'commission_receipt') {
     const active = await dbRequest('crm_commission_documents', { query: {
-      select: 'id', sale_id: `eq.${doc.sale_id}`, document_type: 'eq.commission_receipt', archived_at: 'is.null', limit: 1
+      select: 'id', sale_id: `eq.${doc.sale_id}`, recipient_id: `eq.${doc.recipient_id || doc.broker_id}`, document_type: 'eq.commission_receipt', archived_at: 'is.null', limit: 1
     } });
     if (Array.isArray(active) && active.length) return { ok: false, message: 'Já existe um recibo ativo para esta venda. Arquive-o antes de restaurar este recibo.' };
   }
@@ -3236,8 +3522,28 @@ async function apiSaveUser(token, payload) {
   if (existing && existing.deleted_at) return { ok: false, message: 'Restaure o usuário antes de editar seus dados.' };
   if (rows.some((item) => item.id !== userId && normalizeEmail(item.email) === email)) return { ok: false, message: 'Este e-mail já está cadastrado.' };
   if (existing && existing.id === actor.id && (!active || role !== actor.role)) return { ok: false, message: 'Você não pode desativar ou rebaixar sua própria conta.' };
+  const existingContractProfileRows = existing
+    ? await dbRequest('crm_user_contract_profiles', { query: { select: '*', user_id: `eq.${existing.id}`, limit: 1 } })
+    : [];
+  const existingContractProfile = Array.isArray(existingContractProfileRows) ? existingContractProfileRows[0] || {} : {};
+  const submittedProfile = normalizeTeamContractProfile(payload);
+  const profile = {
+    cpf: Object.prototype.hasOwnProperty.call(payload, 'contractCpf') ? submittedProfile.cpf : String(existingContractProfile.cpf || ''),
+    cnpj: Object.prototype.hasOwnProperty.call(payload, 'contractCnpj') ? submittedProfile.cnpj : String(existingContractProfile.cnpj || ''),
+    creci: Object.prototype.hasOwnProperty.call(payload, 'contractCreci') ? submittedProfile.creci : String(existingContractProfile.creci || ''),
+    address: Object.prototype.hasOwnProperty.call(payload, 'contractAddress') ? submittedProfile.address : String(existingContractProfile.address || '')
+  };
+  if (!profile.cpf) return { ok: false, message: 'Informe o CPF do usuário. Nome e CPF são obrigatórios no cadastro da equipe.' };
+  if (role === 'Gerente') {
+    const missingManagerFields = [['CNPJ',profile.cnpj],['CRECI',profile.creci],['endereço',profile.address]].filter(([,value]) => !String(value || '').trim()).map(([label]) => label);
+    if (missingManagerFields.length) return { ok: false, message: 'Complete os dados do gerente: CPF, CNPJ, CRECI e endereço. Faltam: ' + missingManagerFields.join(', ') + '.' };
+  }
   const defaultOperationsAccess = role === 'Corretor' ? 'broker' : role === 'SDR' ? 'sdr' : CrmDomain.isAdmin({ role, active }) ? 'viewer' : 'none';
-  const priorAccess = existing && ['none','broker','sdr','viewer','manager'].includes(existing.operations_access) ? existing.operations_access : '';
+  // A configuração segura do ambiente é a fonte de verdade para "manager". Em
+  // registros antigos, uma permissão gravada como manager pode não estar mais
+  // autorizada; ao editar dados de equipe, use o acesso efetivo já normalizado
+  // (viewer nesse caso), sem bloquear a atualização do perfil contratual.
+  const priorAccess = existing ? mapUser(existing).operationsAccess : '';
   let operationsAccess = String(Object.prototype.hasOwnProperty.call(payload, 'operationsAccess') ? payload.operationsAccess : priorAccess || defaultOperationsAccess);
   if (role === 'Corretor') operationsAccess = 'broker';
   else if (role === 'SDR') operationsAccess = 'sdr';
@@ -3245,12 +3551,14 @@ async function apiSaveUser(token, payload) {
     if (['broker','sdr'].includes(operationsAccess)) operationsAccess = 'viewer';
     if (!['none','viewer','manager'].includes(operationsAccess)) return { ok: false, message: 'Acesso operacional inválido para este perfil.' };
   }
-  if (isConfiguredOperationsManager({ id: userId, role, active })) operationsAccess = 'manager';
-  if (operationsAccess === 'manager' && !isConfiguredOperationsManager({ id: userId, role, active })) {
+  const isConfiguredManager = isConfiguredOperationsManager({ id: userId, role, active });
+  if (isConfiguredManager) operationsAccess = 'manager';
+  const explicitlyGrantingOperationsManager = operationsAccess === 'manager' && !isConfiguredManager
+    && (!existing || priorAccess !== 'manager' || Object.prototype.hasOwnProperty.call(payload, 'operationsAccess'));
+  if (explicitlyGrantingOperationsManager) {
     return { ok: false, message: 'A gestão operacional está reservada às contas designadas pela empresa e configuradas no ambiente seguro do CRM.' };
   }
-  if (actor.role !== 'Administrador' && existing && Object.prototype.hasOwnProperty.call(payload, 'operationsAccess') && operationsAccess !== priorAccess) return { ok: false, message: 'Somente o perfil Administrador pode alterar o acesso operacional.' };
-  if (operationsAccess === 'manager' && actor.role !== 'Administrador' && (!existing || priorAccess !== 'manager')) return { ok: false, message: 'Somente o perfil Administrador pode conceder gestão do módulo operacional.' };
+  if (actor.role !== 'Administrador' && existing && Object.prototype.hasOwnProperty.call(payload, 'operationsAccess') && operationsAccess !== priorAccess && !isConfiguredManager) return { ok: false, message: 'Somente o perfil Administrador pode alterar o acesso operacional.' };
   const adminsAfter = rows.filter((item) => item.id !== userId && item.active && !item.deleted_at && CrmDomain.isAdmin(mapUser(item))).length + (active && CrmDomain.isAdmin({ role, active }) ? 1 : 0);
   if (adminsAfter < 1) return { ok: false, message: 'É necessário manter ao menos um administrador ativo.' };
   const stamp = now();
@@ -3265,7 +3573,6 @@ async function apiSaveUser(token, payload) {
       await authRequest(`admin/users/${encodeURIComponent(user.id)}`, { method: 'DELETE', admin: true }).catch(() => null);
       throw error;
     }
-    const profile = normalizeTeamContractProfile(payload);
     try {
       if (hasContractProfile) await saveTeamContractProfile(actor, user.id, profile);
     } catch (error) {
@@ -3281,7 +3588,6 @@ async function apiSaveUser(token, payload) {
   const old = mapUser(existing); const beforeValues = { name: old.name, email: old.email, role: old.role, active: old.active, operationsAccess: old.operationsAccess };
   const afterValues = { name, email, role, active, operationsAccess };
   const changedFields = auditChangedFields(beforeValues, afterValues);
-  const profile = normalizeTeamContractProfile(payload);
   let profileResult = { changedFields: [] };
   if (hasContractProfile) profileResult = await saveTeamContractProfile(actor, existing.id, profile);
   if (!changedFields.length && !profileResult.changedFields.length) return { ok: true, user: publicUser(existing), message: 'Nenhuma alteração detectada.' };
@@ -3375,7 +3681,7 @@ const api = {
   apiResetUserPassword, apiApplySharedTemporaryPassword,
   apiListDevelopments, apiSaveDevelopment, apiPreviewLeadImport, apiImportLeads, apiExportLeads, apiExportReport, apiSaveFollowupDays,
   apiGetOperationsDashboard, apiListOperationBrokers, apiListProduction, apiSaveProduction, apiArchiveProduction,
-  apiListOperationGoals, apiSaveOperationGoal, apiSaveOperationGoalsBatch, apiListAttendance, apiSetAttendance,
+  apiListOperationGoals, apiSaveOperationGoal, apiSaveOperationGoalsBatch, apiDeleteOperationGoal, apiListAttendance, apiSetAttendance,
   apiExportOperationsReport, apiPreviewOperationsImport, apiImportOperations,
   apiListAppointments, apiSaveAppointment, apiArchiveAppointment, apiListManagerLocations, apiSaveManagerLocation, apiArchiveManagerLocation,
   apiListNotifications, apiMarkNotificationRead,
