@@ -154,7 +154,12 @@ async function emitSyncSignal() {
 
 async function storageRequest(path, { method = 'GET', body, contentType, headers: extraHeaders = {} } = {}) {
   const cfg = env();
-  const headers = { apikey: cfg.secretKey, Authorization: `Bearer ${cfg.secretKey}`, ...extraHeaders };
+  const headers = { apikey: cfg.secretKey, ...extraHeaders };
+  // Legacy service-role keys are JWTs; new Supabase secret keys are opaque and
+  // must be sent only as apikey, not as an Authorization Bearer token.
+  if (cfg.secretKey.startsWith('eyJ') && !extraHeaders.Authorization) {
+    headers.Authorization = `Bearer ${cfg.secretKey}`;
+  }
   if (contentType) headers['Content-Type'] = contentType;
   const response = await fetch(`${cfg.url}/storage/v1/${path}`, { method, headers, body, cache: 'no-store' });
   if (!response.ok) {
@@ -840,7 +845,7 @@ function appointmentDto(row, users, developments, actor) {
   return {
     id: row.id, leadId: row.lead_id || '', clientName: row.client_name, developmentId: row.development_id || '',
     developmentName: development ? development.name : '', stand: row.stand || '', brokerId: row.broker_id,
-    brokerName: broker ? broker.name : 'Corretor inativo', startsAt: row.starts_at, endsAt: row.ends_at,
+    brokerName: broker ? broker.name : row.broker_id ? 'Corretor inativo' : '', startsAt: row.starts_at, endsAt: row.ends_at,
     status: row.status, notes: own || managerCanSeeAllSchedules(actor) ? (row.notes || '') : '', occupied: false,
     createdAt: row.created_at, updatedAt: row.updated_at
   };
@@ -980,21 +985,31 @@ async function apiSaveAppointment(token, payload = {}) {
   const stand = String(payload.stand || '').trim().slice(0, 120);
   const notes = String(payload.notes || '').trim().slice(0, 1500);
   const status = ['Agendado','Realizado','Cancelado','Não compareceu'].includes(String(payload.status || 'Agendado')) ? String(payload.status || 'Agendado') : '';
-  const brokerId = managerCanSeeAllSchedules(actor) ? String(payload.brokerId || '').trim() : String(actor.id);
+  let brokerId = managerCanSeeAllSchedules(actor) ? String(payload.brokerId || '').trim() : String(actor.id);
   const developmentId = String(payload.developmentId || '').trim();
   const leadId = String(payload.leadId || '').trim();
-  if (!clientName || !brokerId || !developmentId || !status) return { ok: false, message: 'Cliente, empreendimento, corretor, situação, data e horários são obrigatórios.' };
+  if (!clientName || !status) return { ok: false, message: 'Informe o compromisso e uma situação válida.' };
   if (id && !isUuid(id)) return { ok: false, message: 'Agendamento inválido.' };
-  const brokerRows = await dbRequest('crm_users', { query: { select: 'id,name,role,active,deleted_at', id: `eq.${brokerId}`, limit: 1 } });
-  const broker = Array.isArray(brokerRows) ? brokerRows[0] : null;
-  if (!broker || broker.role !== 'Corretor' || broker.active !== true || broker.deleted_at) return { ok: false, message: 'Selecione um corretor ativo.' };
-  const developmentRows = await dbRequest('crm_developments', { query: { select: 'id,active', id: `eq.${developmentId}`, limit: 1 } });
-  if (!Array.isArray(developmentRows) || !developmentRows[0] || developmentRows[0].active !== true) return { ok: false, message: 'Selecione um empreendimento ativo.' };
+  if (brokerId && !isUuid(brokerId)) return { ok: false, message: 'Corretor inválido.' };
+  if (developmentId && !isUuid(developmentId)) return { ok: false, message: 'Empreendimento inválido.' };
+  let lead = null;
   if (leadId) {
     if (!isUuid(leadId)) return { ok: false, message: 'Cliente vinculado inválido.' };
     const leadRows = await dbRequest('crm_leads', { query: { select: 'id,broker_id,deleted_at', id: `eq.${leadId}`, limit: 1 } });
-    const lead = Array.isArray(leadRows) ? leadRows[0] : null;
-    if (!lead || lead.deleted_at || String(lead.broker_id) !== brokerId) return { ok: false, message: 'O cliente deve estar ativo na carteira do corretor selecionado.' };
+    lead = Array.isArray(leadRows) ? leadRows[0] || null : null;
+    if (!lead || lead.deleted_at) return { ok: false, message: 'O cliente vinculado não está ativo no CRM.' };
+    if (!brokerId && managerCanSeeAllSchedules(actor)) brokerId = String(lead.broker_id || '');
+    if (String(lead.broker_id) !== brokerId) return { ok: false, message: 'O cliente deve estar ativo na carteira do corretor selecionado.' };
+  }
+  let broker = null;
+  if (brokerId) {
+    const brokerRows = await dbRequest('crm_users', { query: { select: 'id,name,role,active,deleted_at', id: `eq.${brokerId}`, limit: 1 } });
+    broker = Array.isArray(brokerRows) ? brokerRows[0] : null;
+    if (!broker || broker.role !== 'Corretor' || broker.active !== true || broker.deleted_at) return { ok: false, message: 'Selecione um corretor ativo.' };
+  }
+  if (developmentId) {
+    const developmentRows = await dbRequest('crm_developments', { query: { select: 'id,active', id: `eq.${developmentId}`, limit: 1 } });
+    if (!Array.isArray(developmentRows) || !developmentRows[0] || developmentRows[0].active !== true) return { ok: false, message: 'Selecione um empreendimento ativo.' };
   }
   let existing = null;
   if (id) {
@@ -1010,11 +1025,11 @@ async function apiSaveAppointment(token, payload = {}) {
   const standKey = (value) => String(value || '').trim().toLocaleLowerCase('pt-BR');
   const collision = status === 'Agendado' ? collisionRows.find((row) => String(row.id) !== id && row.status === 'Agendado'
     && Date.parse(row.starts_at) < Date.parse(endAt) && Date.parse(row.ends_at) > Date.parse(startAt)
-    && (String(row.broker_id) === brokerId || (stand && String(row.development_id) === developmentId && standKey(row.stand) === standKey(stand)))) : null;
+    && ((brokerId && String(row.broker_id) === brokerId) || (stand && developmentId && String(row.development_id) === developmentId && standKey(row.stand) === standKey(stand)))) : null;
   if (collision) return { ok: false, message: 'Esse horário está ocupado para o corretor ou stand escolhido. Selecione outro horário.' };
   const stamp = now();
-  const values = { lead_id: leadId || null, client_name: clientName, development_id: developmentId, stand,
-    broker_id: brokerId, starts_at: startAt, ends_at: endAt, status, notes, updated_at: stamp, updated_by: actor.id };
+  const values = { lead_id: leadId || null, client_name: clientName, development_id: developmentId || null, stand,
+    broker_id: brokerId || null, starts_at: startAt, ends_at: endAt, status, notes, updated_at: stamp, updated_by: actor.id };
   const before = existing ? { clientName: existing.client_name, developmentId: existing.development_id, stand: existing.stand, brokerId: existing.broker_id, startsAt: existing.starts_at, endsAt: existing.ends_at, status: existing.status, notes: existing.notes } : {};
   const savedRows = existing
     ? await dbRequest('crm_appointments', { method: 'PATCH', query: { id: `eq.${id}`, deleted_at: 'is.null' }, prefer: 'return=representation', body: values })
@@ -1027,7 +1042,7 @@ async function apiSaveAppointment(token, payload = {}) {
   const linkedLeadStatus=status==='Agendado'?'Atendimento agendado':status==='Realizado'?'Atendimento realizado':'';
   if(saved.lead_id&&linkedLeadStatus){
     const leadRows=await dbRequest('crm_leads',{query:{select:'id,name,status,broker_id,development_id,deleted_at',id:`eq.${saved.lead_id}`,limit:1}});const linkedLead=Array.isArray(leadRows)?leadRows[0]:null;
-    if(linkedLead&&!linkedLead.deleted_at&&String(linkedLead.broker_id)===brokerId&&linkedLead.status!==linkedLeadStatus){
+    if(linkedLead&&!linkedLead.deleted_at&&String(linkedLead.broker_id)===String(brokerId||'')&&linkedLead.status!==linkedLeadStatus){
       await dbRequest('crm_leads',{method:'PATCH',query:{id:`eq.${linkedLead.id}`,deleted_at:'is.null'},prefer:'return=minimal',body:{status:linkedLeadStatus,updated_at:stamp,updated_by:actor.id}});
       await dbRequest('crm_lead_events',{method:'POST',prefer:'return=minimal',body:{lead_id:linkedLead.id,at:stamp,actor_id:actor.id,actor_name:actor.name,actor_role:actor.role,event_type:'status_change',old_status:linkedLead.status,new_status:linkedLeadStatus,broker_id:linkedLead.broker_id,development_id:linkedLead.development_id}});
       await audit(actor,'lead.status_from_appointment','lead',linkedLead.id,['status'],{status:linkedLead.status},{status:linkedLeadStatus,appointmentId:saved.id});
@@ -1328,7 +1343,8 @@ async function apiSaveProduction(token, payload = {}) {
   const workDate = String(payload.workDate || '').trim();
   const today = operationDateString(now());
   if (!isValidDateOnly(workDate) || workDate > today) return { ok: false, message: 'Informe uma data válida, até o dia de hoje.' };
-  if (access === 'broker' && workDate !== today) return { ok: false, message: 'Corretores podem inserir ou corrigir os números somente na data de hoje. Para ajustar uma data passada, solicite à gestão.' };
+  const monthStart = today.slice(0, 7) + '-01';
+  if (access === 'broker' && workDate < monthStart) return { ok: false, message: 'Corretores podem registrar ou corrigir lançamentos somente dentro do mês vigente.' };
   const values = productionValues(payload);
   const stamp = now();
   let beforeRow = null; let saved;
@@ -2814,13 +2830,34 @@ function canReadCommissionDocument(actor, doc) {
   return false;
 }
 
-function mapCommissionDocument(row, users, sales) {
+function mapCommissionDocument(row, users, sales, saleLinks = []) {
   const broker = users.find((user) => String(user.id) === String(row.broker_id));
   const sdr = users.find((user) => String(user.id) === String(row.sdr_id));
   const manager = users.find((user) => String(user.id) === String(row.manager_id));
   const recipientId = row.recipient_id || row.broker_id;
   const recipient = users.find((user) => String(user.id) === String(recipientId));
   const sale = sales.find((item) => String(item.id) === String(row.sale_id));
+  const linkedSales = saleLinks.filter((item) => String(item.commission_document_id) === String(row.id)).map((link) => {
+    const linkedSale = sales.find((item) => String(item.id) === String(link.sale_id));
+    if (!linkedSale) return null;
+    return {
+      id: linkedSale.id, saleId: linkedSale.id, processNumber: linkedSale.process_number || '',
+      internalNumber: linkedSale.internal_number || '', buyerName: linkedSale.buyer_name || '',
+      developmentName: linkedSale.development_name || '', unit: linkedSale.unit || '',
+      unitValue: Number(linkedSale.unit_value || 0), commissionBase: Number(link.commission_base || 0),
+      saleGrossCommission: Number(link.sale_gross_commission || 0), grossCommission: Number(link.gross_commission || 0),
+      withholdingRatePct: Number(link.withholding_rate_pct || 0), withholdingAmount: Number(link.withholding_amount || 0),
+      netCommission: Number(link.net_commission || 0)
+    };
+  }).filter(Boolean);
+  if (!linkedSales.length && sale) linkedSales.push({
+    id: sale.id, saleId: sale.id, processNumber: sale.process_number || '', internalNumber: sale.internal_number || '',
+    buyerName: sale.buyer_name || '', developmentName: sale.development_name || '', unit: sale.unit || '',
+    unitValue: Number(sale.unit_value || 0), commissionBase: Number(row.commission_base || 0),
+    saleGrossCommission: Math.round(Number(sale.unit_value || 0) * 2.5) / 100,
+    grossCommission: Number(row.gross_commission || 0), withholdingRatePct: Number(row.withholding_rate_pct || 0),
+    withholdingAmount: Number(row.withholding_amount || 0), netCommission: Number(row.net_commission || 0)
+  });
   return {
     id: row.id, saleId: row.sale_id || '', processNumber: sale && sale.process_number || '', buyerName: sale && sale.buyer_name || '',
     developmentName: sale && sale.development_name || '', unit: sale && sale.unit || '', brokerId: row.broker_id,
@@ -2834,6 +2871,7 @@ function mapCommissionDocument(row, users, sales) {
     generatedStoragePath: row.generated_storage_path || '', signedStoragePath: row.signed_storage_path || '', storagePath: row.storage_path || '',
     originalName: row.original_name || '', mimeType: row.mime_type || '', sizeBytes: Number(row.size_bytes || 0), notes: row.notes || '',
     signedUploadedAt: row.signed_uploaded_at || '', brokerSignatureConfirmed: row.broker_signature_confirmed === true,
+    sales: linkedSales, saleCount: linkedSales.length,
     brokerSignatureConfirmedAt: row.broker_signature_confirmed_at || '', sdrSignatureConfirmed: row.sdr_signature_confirmed === true,
     sdrSignatureConfirmedAt: row.sdr_signature_confirmed_at || '', managerSignatureConfirmed: row.manager_signature_confirmed === true,
     managerSignatureConfirmedAt: row.manager_signature_confirmed_at || '', archivedAt: row.archived_at || '', createdAt: row.created_at || '', updatedAt: row.updated_at || ''
@@ -2914,13 +2952,26 @@ function htmlToPdfLines(html) {
     .split(/\r?\n/).map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean);
 }
 
-function makeCommissionReceiptPdf(document, sale, recipient, manager, profiles) {
+function makeCommissionReceiptPdf(document, sales, recipient, manager, profiles) {
+  const saleList = Array.isArray(sales) ? sales : [sales].filter(Boolean);
   const recipientProfile = profiles.find((item) => String(item.user_id) === String(recipient.id)) || {};
   const managerProfile = profiles.find((item) => String(item.user_id) === String(manager.id)) || {};
   const recipientRole = document.recipient_role === 'SDR' ? 'SDR participante' : 'Corretor responsável';
   const paymentDate = document.payment_date ? new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeZone: 'UTC' }).format(new Date(document.payment_date + 'T12:00:00Z')) : 'A definir pela gestão';
   const issueDate = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'long', timeZone: 'America/Sao_Paulo' }).format(new Date());
-  const totalGross = Math.round(Math.round(Number(document.commission_base || 0) * 100) * 250 / 10000) / 100;
+  const totalGross = saleList.reduce((sum, sale) => sum + Number(sale.sale_gross_commission || 0), 0);
+  const saleLines = saleList.flatMap((sale, index) => [
+    `${index + 1}. Processo / proposta: ${sale.process_number || sale.internal_number || 'Não informado'}`,
+    'Cliente / comprador: ' + (sale.buyer_name || 'Não informado'),
+    'Empreendimento / produto: ' + (sale.development_name || 'Não informado'),
+    'Unidade: ' + (sale.unit || 'Não informada'),
+    'Valor da venda (VGV): ' + formatCurrency(sale.unit_value),
+    'Comissão bruta total da venda (2,5%): ' + formatCurrency(sale.sale_gross_commission),
+    'Parcela bruta deste recibo: ' + formatCurrency(sale.gross_commission),
+    'Desconto desta venda neste recibo: ' + formatCurrency(sale.withholding_amount),
+    'Valor líquido desta venda neste recibo: ' + formatCurrency(sale.net_commission),
+    ''
+  ]);
   const lines = [
     'SHARKS FÊNIX · MUNDO APTO',
     'DECLARAÇÃO DE RECEBIMENTO DE COMISSÃO',
@@ -2939,17 +2990,15 @@ function makeCommissionReceiptPdf(document, sale, recipient, manager, profiles) 
     'CRECI: ' + (managerProfile.creci || '________________'),
     'Endereço: ' + (managerProfile.address || '________________________________________________'),
     '',
-    '3. DADOS DA VENDA',
-    'Cliente / comprador: ' + (sale.buyer_name || 'Não informado'),
-    'Empreendimento / produto: ' + (sale.development_name || 'Não informado'),
-    'Unidade: ' + (sale.unit || 'Não informada'),
-    'Processo / proposta: ' + (sale.process_number || sale.internal_number || 'Não informado'),
-    'Valor da venda (VGV): ' + formatCurrency(document.commission_base),
+    '3. VENDAS CONSOLIDADAS',
+    'Quantidade de vendas incluídas neste recibo: ' + saleList.length,
+    ...saleLines,
+    'VGV consolidado: ' + formatCurrency(document.commission_base),
     'Comissão bruta total da venda (2,5%): ' + formatCurrency(totalGross),
     'Comissão bruta deste recibo: ' + formatCurrency(document.gross_commission),
     '',
     '3.1. DO OBJETO',
-    'O presente instrumento tem por objeto a declaração de recebimento de comissão pelo BENEFICIÁRIO acima identificado, referente à intermediação e participação na venda do produto imobiliário descrito no item 3.',
+    'O presente instrumento tem por objeto a declaração de recebimento de comissão pelo BENEFICIÁRIO acima identificado, referente às vendas e participações imobiliárias relacionadas no item 3.',
     '',
     '4. DOS VALORES E DESCONTOS',
     'O BENEFICIÁRIO declara ciência e concordância com os seguintes valores:',
@@ -2959,7 +3008,7 @@ function makeCommissionReceiptPdf(document, sale, recipient, manager, profiles) 
     'Valor líquido destinado ao BENEFICIÁRIO: ' + formatCurrency(document.net_commission),
     'Data prevista para pagamento: ' + paymentDate,
     ...(document.notes ? ['Observações: ' + document.notes] : []),
-    'Os valores acima refletem a comissão destinada individualmente ao BENEFICIÁRIO. A alíquota de desconto é aplicada sobre a comissão bruta total; quando houver participação de corretor e SDR, o valor líquido é dividido igualmente e cada um recebe um recibo individual.',
+    'Os valores acima refletem a comissão destinada individualmente ao BENEFICIÁRIO. A gestão aplica o desconto sobre a comissão bruta de cada venda; quando houver participação de corretor e SDR, o valor líquido daquela venda é dividido igualmente e cada beneficiário recebe seu próprio recibo.',
     '',
     '5. DA FORMA DE PAGAMENTO',
     'O pagamento será realizado via transferência bancária. O comprovante poderá ser anexado e armazenado no CRM.',
@@ -2996,23 +3045,24 @@ async function apiListCommissionDocuments(token, options = {}) {
   const actor = await verifyActor(token);
   if (!isFinanceManager(actor) && !['Corretor','SDR'].includes(actor.role)) throw new HttpError(403, 'Este perfil não pode consultar documentos financeiros.');
   const includeArchived = isFinanceManager(actor) && options && options.includeArchived === true;
-  const [rows, users, sales, developments] = await Promise.all([
+  const [rows, users, sales, developments, saleLinks] = await Promise.all([
     listAll('crm_commission_documents', { select: '*', order: 'created_at.desc' }),
     listAll('crm_users', { select: 'id,name,role' }),
-    listAll('crm_sales', { select: 'id,process_number,buyer_name,unit,development_id,sold_at' }),
-    listAll('crm_developments', { select: 'id,name' })
+    listAll('crm_sales', { select: 'id,process_number,internal_number,buyer_name,unit,unit_value,development_id,sold_at' }),
+    listAll('crm_developments', { select: 'id,name' }),
+    listAll('crm_commission_document_sales', { select: '*' })
   ]);
   const saleList = (sales || []).map((sale) => ({ ...sale, development_name: (developments || []).find((item) => String(item.id) === String(sale.development_id))?.name || '' }));
   return (rows || []).filter((row) => (includeArchived ? Boolean(row.archived_at) : !row.archived_at) && canReadCommissionDocument(actor, row))
-    .map((row) => mapCommissionDocument(row, users || [], saleList));
+    .map((row) => mapCommissionDocument(row, users || [], saleList, saleLinks || []));
 }
 
 async function apiCreateCommissionReceipt(token, payload = {}) {
   const actor = await verifyActor(token); requireFinanceManager(actor);
   payload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
-  if (Object.keys(payload).some((key) => !['saleId','brokerId','sdrId','managerId','withholdingRatePct','paymentDate','notes'].includes(key))) return { ok: false, message: 'Campos do recibo inválidos.' };
-  const saleId = String(payload.saleId || '').trim();
-  if (!isUuid(saleId)) return { ok: false, message: 'Selecione uma venda válida.' };
+  if (Object.keys(payload).some((key) => !['saleIds','saleId','brokerId','sdrId','managerId','withholdingRatePct','paymentDate','notes'].includes(key))) return { ok: false, message: 'Campos do recibo inválidos.' };
+  const saleIds = Array.isArray(payload.saleIds) ? [...new Set(payload.saleIds.map((value) => String(value || '').trim()))] : [String(payload.saleId || '').trim()];
+  if (!saleIds.length || saleIds.length > 50 || saleIds.some((id) => !isUuid(id))) return { ok: false, message: 'Selecione de 1 a 50 vendas válidas.' };
   const requestedBrokerId = String(payload.brokerId || '').trim();
   const managerId = String(payload.managerId || '').trim();
   if (!isUuid(requestedBrokerId)) return { ok: false, message: 'Selecione o corretor responsável pelo recibo.' };
@@ -3020,84 +3070,144 @@ async function apiCreateCommissionReceipt(token, payload = {}) {
   if (!isValidDateOnly(payload.paymentDate)) return { ok: false, message: 'Informe uma data prevista para o pagamento.' };
   const withholdingRatePct = parseOptionalPercent(payload.withholdingRatePct, 'Alíquota de desconto');
   if (withholdingRatePct === null) return { ok: false, message: 'Informe a alíquota de desconto, mesmo que seja 0%.' };
-  const saleRows = await dbRequest('crm_sales', { query: { select: '*', id: 'eq.' + saleId, deleted_at: 'is.null', limit: 1 } });
-  const sale = Array.isArray(saleRows) ? saleRows[0] : null;
-  if (!sale) return { ok: false, message: 'A venda selecionada não está disponível.' };
-  const repass = String(sale.repass_status || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
-  if (sale.sale_status === 'Cancelada' || repass.includes('DISTRATO') || repass === 'CANCELADO') return { ok: false, message: 'Não é possível gerar recibo para uma venda cancelada ou em distrato.' };
+  const saleRows = await dbRequest('crm_sales', { query: { select: '*', id: `in.(${saleIds.join(',')})`, deleted_at: 'is.null' } });
+  const salesById = new Map((Array.isArray(saleRows) ? saleRows : []).map((sale) => [String(sale.id), sale]));
+  if (saleIds.some((id) => !salesById.has(id))) return { ok: false, message: 'Uma ou mais vendas selecionadas não estão disponíveis.' };
+  const sales = saleIds.map((id) => salesById.get(id));
   const userRows = await listAll('crm_users', { select: 'id,name,role,active,deleted_at' });
-  const broker = userRows.find((user) => String(user.id) === String(sale.broker_id) && user.role === 'Corretor' && !user.deleted_at);
-  if (!broker || String(broker.id) !== requestedBrokerId) return { ok: false, message: 'O corretor selecionado precisa ser o mesmo responsável registrado na venda.' };
+  const broker = userRows.find((user) => String(user.id) === requestedBrokerId && user.role === 'Corretor' && !user.deleted_at);
+  if (!broker || sales.some((sale) => String(sale.broker_id) !== requestedBrokerId)) return { ok: false, message: 'Todas as vendas selecionadas precisam pertencer ao corretor indicado.' };
   const manager = userRows.find((user) => String(user.id) === managerId && ['Gerente','Administrador'].includes(user.role) && user.active && !user.deleted_at);
   if (!manager) return { ok: false, message: 'Selecione um gerente ativo para assinar o recibo.' };
   const requestedSdrId = String(payload.sdrId || '').trim();
-  const saleSdrId = String(sale.sdr_id || '').trim();
-  if (sale.is_sdr_sale === true && !requestedSdrId && !saleSdrId) return { ok: false, message: 'Selecione o SDR participante para gerar o recibo separado dele.' };
-  if (requestedSdrId && sale.is_sdr_sale !== true) return { ok: false, message: 'Não é possível selecionar um SDR em uma venda sem participação do SDR.' };
-  if (requestedSdrId && saleSdrId && requestedSdrId !== saleSdrId) return { ok: false, message: 'O SDR selecionado precisa corresponder ao vínculo registrado na venda.' };
-  const selectedSdrId = requestedSdrId || saleSdrId;
-  const sdr = selectedSdrId ? userRows.find((user) => String(user.id) === selectedSdrId && user.role === 'SDR' && user.active && !user.deleted_at) : null;
-  if (selectedSdrId && !sdr) return { ok: false, message: 'Selecione um SDR ativo.' };
-  if (sale.is_sdr_sale === true && !sdr) return { ok: false, message: 'Venda com participação SDR precisa ter um SDR ativo selecionado.' };
-  if (sale.is_sdr_sale !== true && saleSdrId) return { ok: false, message: 'A venda tem um SDR vinculado, mas está marcada como sem participação. Corrija o cadastro antes de gerar recibos.' };
+  if (requestedSdrId && !isUuid(requestedSdrId)) return { ok: false, message: 'SDR selecionado inválido.' };
+  if (requestedSdrId && !userRows.some((user) => String(user.id) === requestedSdrId && user.role === 'SDR' && user.active && !user.deleted_at)) return { ok: false, message: 'Selecione um SDR ativo para as vendas sem vínculo cadastrado.' };
+  const salesWithSdr = [];
+  for (const sale of sales) {
+    const repass = String(sale.repass_status || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+    if (sale.sale_status === 'Cancelada' || repass.includes('DISTRATO') || repass === 'CANCELADO') return { ok: false, message: 'Não é possível gerar recibo para venda cancelada ou em distrato.' };
+    let saleSdrId = String(sale.sdr_id || '').trim();
+    if (sale.is_sdr_sale === true) {
+      if (!saleSdrId) saleSdrId = requestedSdrId;
+      if (!saleSdrId) return { ok: false, message: 'Selecione um SDR para cada venda marcada com participação dele e sem vínculo cadastrado.' };
+      const sdr = userRows.find((user) => String(user.id) === saleSdrId && user.role === 'SDR' && user.active && !user.deleted_at);
+      if (!sdr) return { ok: false, message: 'Uma venda selecionada tem um SDR inativo ou inválido.' };
+      if (!String(sale.sdr_id || '').trim()) sale.needsSdrAssignment = true;
+    } else if (saleSdrId) {
+      return { ok: false, message: 'Uma venda está vinculada a um SDR, mas consta como sem participação. Corrija o cadastro antes de gerar os recibos.' };
+    }
+    salesWithSdr.push({ ...sale, assigned_sdr_id: sale.is_sdr_sale === true ? saleSdrId : '' });
+  }
   const profiles = await listAll('crm_user_contract_profiles', { select: '*' });
   const managerProfile = (profiles || []).find((item) => String(item.user_id) === String(manager.id)) || {};
   const managerMissing = [['CPF',managerProfile.cpf],['CNPJ',managerProfile.cnpj],['CRECI',managerProfile.creci],['endereço',managerProfile.address]].filter(([,value]) => !String(value || '').trim()).map(([label]) => label);
   if (managerMissing.length) return { ok: false, message: 'Complete os dados cadastrais do gerente ' + manager.name + ' antes de gerar recibos: ' + managerMissing.join(', ') + '.' };
-  const commissionBase = parseMoney(sale.unit_value, 'Valor da venda');
-  const totalGrossCents = Math.round(Math.round(commissionBase * 100) * 250 / 10000);
-  const totalWithholdingCents = Math.round(totalGrossCents * withholdingRatePct / 100);
-  const totalNetCents = totalGrossCents - totalWithholdingCents;
-  if (totalGrossCents <= 0) return { ok: false, message: 'O valor da venda não permite calcular uma comissão positiva.' };
-  const grossSplit = sdr ? splitMoneyHalf(totalGrossCents / 100) : { first: totalGrossCents / 100, second: 0 };
-  const netSplit = sdr ? splitMoneyHalf(totalNetCents / 100) : { first: totalNetCents / 100, second: 0 };
-  const plannedRecipients = [{ user: broker, role: 'Corretor', grossCents: Math.round(grossSplit.first * 100), netCents: Math.round(netSplit.first * 100) }];
-  if (sdr) plannedRecipients.push({ user: sdr, role: 'SDR', grossCents: Math.round(grossSplit.second * 100), netCents: Math.round(netSplit.second * 100) });
-  const activeRows = await listAll('crm_commission_documents', { select: 'id,recipient_id', sale_id: 'eq.' + saleId, document_type: 'eq.commission_receipt', archived_at: 'is.null' });
-  const existingRecipients = new Set((activeRows || []).map((row) => String(row.recipient_id || row.broker_id || '')));
-  const recipients = plannedRecipients.filter((item) => !existingRecipients.has(String(item.user.id)));
-  if (!recipients.length) return { ok: false, message: 'Os recibos previstos para esta venda já existem. Consulte a área de recibos e comprovantes.' };
-  if (sdr && !saleSdrId) {
-    const updatedSale = await dbRequest('crm_sales', { method: 'PATCH', query: { id: 'eq.' + saleId, is_sdr_sale: 'eq.true', deleted_at: 'is.null' }, prefer: 'return=representation', body: { sdr_id: sdr.id, updated_at: now(), updated_by: actor.id } });
-    if (!Array.isArray(updatedSale) || !updatedSale.length) return { ok: false, message: 'Não foi possível gravar o SDR selecionado na venda. Atualize a tela e tente novamente.' };
-    await audit(actor, 'sale.sdr.assign_for_receipt', 'sale', saleId, ['sdrId'], { sdrId: '' }, { sdrId: sdr.id, isSdrSale: true });
+  const saleBase = new Map();
+  for (const sale of salesWithSdr) {
+    const commissionBase = parseMoney(sale.unit_value, 'Valor da venda');
+    const baseCents = Math.round(commissionBase * 100);
+    const grossCents = Math.round(baseCents * 250 / 10000);
+    if (grossCents <= 0) return { ok: false, message: 'Uma venda selecionada não permite calcular uma comissão positiva.' };
+    const withholdingCents = Math.round(grossCents * withholdingRatePct / 100);
+    const netCents = grossCents - withholdingCents;
+    const split = (cents, hasSdr) => { const first = hasSdr ? Math.floor(cents / 2) : cents; return [first, hasSdr ? cents - first : 0]; };
+    const grossSplit = split(grossCents, sale.is_sdr_sale === true);
+    const netSplit = split(netCents, sale.is_sdr_sale === true);
+    saleBase.set(String(sale.id), { baseCents, saleGrossCents: grossCents,
+      lines: [
+        { user: broker, role: 'Corretor', grossCents: grossSplit[0], netCents: netSplit[0] },
+        ...(sale.is_sdr_sale === true ? [{ user: userRows.find((user) => String(user.id) === sale.assigned_sdr_id), role: 'SDR', grossCents: grossSplit[1], netCents: netSplit[1] }] : [])
+      ] });
+  }
+  const activeLinks = await dbRequest('crm_commission_document_sales', { query: { select: 'sale_id,recipient_id', sale_id: `in.(${saleIds.join(',')})`, archived_at: 'is.null' } });
+  const existingLineKeys = new Set((Array.isArray(activeLinks) ? activeLinks : []).map((row) => `${row.sale_id}|${row.recipient_id}`));
+  const recipientGroups = new Map();
+  let skippedRecipientLines = 0;
+  for (const sale of salesWithSdr) {
+    const allocation = saleBase.get(String(sale.id));
+    for (const part of allocation.lines) {
+      if (existingLineKeys.has(`${sale.id}|${part.user.id}`)) { skippedRecipientLines++; continue; }
+      const key = `${part.user.id}|${part.role}`;
+      if (!recipientGroups.has(key)) recipientGroups.set(key, { user: part.user, role: part.role, lines: [] });
+      recipientGroups.get(key).lines.push({ sale, allocation, ...part });
+    }
+  }
+  if (!recipientGroups.size) return { ok: false, message: 'Os recibos para as vendas selecionadas já existem para todos os beneficiários. Consulte a área de recibos e comprovantes.' };
+  for (const sale of salesWithSdr.filter((item) => item.needsSdrAssignment)) {
+    const updatedSale = await dbRequest('crm_sales', { method: 'PATCH', query: { id: 'eq.' + sale.id, is_sdr_sale: 'eq.true', deleted_at: 'is.null' }, prefer: 'return=representation', body: { sdr_id: sale.assigned_sdr_id, updated_at: now(), updated_by: actor.id } });
+    if (!Array.isArray(updatedSale) || !updatedSale.length) return { ok: false, message: 'Não foi possível gravar o SDR participante em uma das vendas. Atualize a tela e tente novamente.' };
+    await audit(actor, 'sale.sdr.assign_for_receipt', 'sale', sale.id, ['sdrId'], { sdrId: '' }, { sdrId: sale.assigned_sdr_id, isSdrSale: true });
+    sale.sdr_id = sale.assigned_sdr_id;
   }
   const notes = String(payload.notes || '').trim().slice(0, 3000);
   const stamp = now();
-  const developmentRows = await dbRequest('crm_developments', { query: { select: 'id,name', id: `eq.${sale.development_id}`, limit: 1 } });
-  const saleContext = { ...sale, sdr_id: sdr ? sdr.id : null, development_name: (Array.isArray(developmentRows) && developmentRows[0] && developmentRows[0].name) || '' };
+  const [developmentRows, allSales] = await Promise.all([
+    listAll('crm_developments', { select: 'id,name' }),
+    listAll('crm_sales', { select: 'id,process_number,internal_number,buyer_name,unit,unit_value,development_id,sold_at' })
+  ]);
+  const developmentById = new Map((developmentRows || []).map((item) => [String(item.id), item.name]));
+  const saleContexts = salesWithSdr.map((sale) => ({ ...sale, development_name: developmentById.get(String(sale.development_id)) || '' }));
   const created = [];
   let notificationDelayed = false;
   try {
-    for (const item of recipients) {
-      const grossCents = item.grossCents;
-      const netCents = item.netCents;
+    for (const item of recipientGroups.values()) {
+      const linesForItem = item.lines;
+      const baseCents = linesForItem.reduce((sum, line) => sum + line.allocation.baseCents, 0);
+      const grossCents = linesForItem.reduce((sum, line) => sum + line.grossCents, 0);
+      const netCents = linesForItem.reduce((sum, line) => sum + line.netCents, 0);
       const withholdingCents = grossCents - netCents;
+      const sdrIds = [...new Set(linesForItem.map((line) => line.sale.assigned_sdr_id).filter(Boolean))];
+      const sdrIdForDocument = item.role === 'SDR' ? item.user.id : sdrIds.length === 1 ? sdrIds[0] : null;
       const documentRows = await dbRequest('crm_commission_documents', { method: 'POST', prefer: 'return=representation', body: {
-        sale_id: sale.id, broker_id: broker.id, sdr_id: sdr ? sdr.id : null, recipient_id: item.user.id, recipient_role: item.role,
+        sale_id: linesForItem[0].sale.id, broker_id: broker.id, sdr_id: sdrIdForDocument, recipient_id: item.user.id, recipient_role: item.role,
         manager_id: manager.id, document_type: 'commission_receipt', signature_status: 'pending', payment_status: 'pending',
-        commission_base: commissionBase, commission_rate_pct: sdr ? 1.25 : 2.5, gross_commission: grossCents / 100,
+        commission_base: baseCents / 100, commission_rate_pct: baseCents ? Math.round(grossCents / baseCents * 100 * 10000) / 10000 : 0, gross_commission: grossCents / 100,
         withholding_rate_pct: withholdingRatePct, withholding_amount: withholdingCents / 100, net_commission: netCents / 100,
         broker_amount: item.role === 'Corretor' ? netCents / 100 : 0, sdr_amount: item.role === 'SDR' ? netCents / 100 : 0,
         payment_date: payload.paymentDate, notes, created_by: actor.id, updated_by: actor.id, created_at: stamp, updated_at: stamp
       } });
       const document = Array.isArray(documentRows) ? documentRows[0] : documentRows;
       if (!document) throw new HttpError(502, 'Não foi possível criar o registro do recibo.');
-      created.push({ document, path: '' });
-      const bytes = makeCommissionReceiptPdf(document, saleContext, item.user, manager, profiles || []);
-      const fileName = safeFileName((sale.process_number || sale.internal_number || 'venda') + '-recibo-' + item.role.toLocaleLowerCase('pt-BR') + '-' + String(document.id).slice(0, 8) + '.pdf');
+      const generated = { document, path: '', saved: document, links: [], sales: [] };
+      created.push(generated);
+      const linkRows = linesForItem.map((line) => ({
+        commission_document_id: document.id, sale_id: line.sale.id, recipient_id: item.user.id, recipient_role: item.role,
+        commission_base: line.allocation.baseCents / 100, sale_gross_commission: line.allocation.saleGrossCents / 100,
+        gross_commission: line.grossCents / 100, withholding_rate_pct: withholdingRatePct,
+        withholding_amount: (line.grossCents - line.netCents) / 100, net_commission: line.netCents / 100,
+        archived_at: null, created_at: stamp
+      }));
+      const savedLinks = await dbRequest('crm_commission_document_sales', { method: 'POST', prefer: 'return=representation', body: linkRows });
+      if (!Array.isArray(savedLinks) || savedLinks.length !== linkRows.length) throw new HttpError(502, 'Não foi possível vincular todas as vendas ao recibo consolidado.');
+      generated.links = savedLinks;
+      const saleById = new Map(saleContexts.map((sale) => [String(sale.id), sale]));
+      const receiptSales = linesForItem.map((line) => ({ ...saleById.get(String(line.sale.id)),
+        sale_gross_commission: line.allocation.saleGrossCents / 100, gross_commission: line.grossCents / 100,
+        withholding_amount: (line.grossCents - line.netCents) / 100, net_commission: line.netCents / 100
+      }));
+      generated.sales = receiptSales;
+      const bytes = makeCommissionReceiptPdf(document, receiptSales, item.user, manager, profiles || []);
+      const firstSale = linesForItem[0].sale;
+      const fileLabel = linesForItem.length > 1 ? `consolidado-${linesForItem.length}-vendas` : (firstSale.process_number || firstSale.internal_number || 'venda');
+      const fileName = safeFileName(fileLabel + '-recibo-' + item.role.toLocaleLowerCase('pt-BR') + '-' + String(document.id).slice(0, 8) + '.pdf');
       const path = 'generated/' + document.id + '/' + randomBytes(6).toString('hex') + '-' + fileName;
-      created[created.length - 1].path = path;
+      generated.path = path;
       await storageRequest('object/crm-finance-documents/' + storageObjectPath(path), { method: 'POST', body: bytes, contentType: 'application/pdf', headers: { 'x-upsert': 'false' } });
       const savedRows = await dbRequest('crm_commission_documents', { method: 'PATCH', query: { id: 'eq.' + document.id }, prefer: 'return=representation', body: { generated_storage_path: path, original_name: fileName, mime_type: 'application/pdf', size_bytes: bytes.byteLength, updated_at: now(), updated_by: actor.id } });
       const saved = Array.isArray(savedRows) ? savedRows[0] || document : document;
-      const notified = await notifyCommissionReceiptParticipants(saved, 'commission_receipt_signature_requested');
-      if (!notified) notificationDelayed = true;
-      item.saved = saved;
-      await audit(actor, 'commission_receipt.generate', 'commission_document', document.id, ['recipientId','recipientRole','grossCommission','withholdingRatePct','withholdingAmount','netCommission','paymentDate'], {}, {
-        saleId: sale.id, recipientId: item.user.id, recipientRole: item.role, grossCommission: grossCents / 100,
-        withholdingRatePct, withholdingAmount: withholdingCents / 100, netCommission: netCents / 100, paymentDate: payload.paymentDate, fileName
+      generated.saved = saved;
+    }
+    for (const item of created) {
+      const document = item.saved || item.document;
+      await audit(actor, 'commission_receipt.generate', 'commission_document', document.id, ['recipientId','recipientRole','sales','grossCommission','withholdingRatePct','withholdingAmount','netCommission','paymentDate'], {}, {
+        saleIds: item.links.map((line) => line.sale_id), recipientId: item.document.recipient_id, recipientRole: item.document.recipient_role,
+        saleCount: item.links.length, grossCommission: item.document.gross_commission, withholdingRatePct,
+        withholdingAmount: item.document.withholding_amount, netCommission: item.document.net_commission,
+        paymentDate: payload.paymentDate, fileName: item.document.original_name
       });
+    }
+    for (const item of created) {
+      if (!await notifyCommissionReceiptParticipants(item.saved || item.document, 'commission_receipt_signature_requested')) notificationDelayed = true;
     }
   } catch (error) {
     for (const item of created) {
@@ -3106,10 +3216,16 @@ async function apiCreateCommissionReceipt(token, payload = {}) {
     }
     throw error;
   }
-  const documents = created.map((item) => mapCommissionDocument(item.saved || item.document, userRows, [{ ...saleContext }]));
+  const mapSales = (allSales || []).map((sale) => ({ ...sale, development_name: developmentById.get(String(sale.development_id)) || '' }));
+  const createdLinks = created.flatMap((item) => item.links);
+  const documents = created.map((item) => mapCommissionDocument(item.saved || item.document, userRows, mapSales, createdLinks));
+  const sdrDocumentCount = created.filter((item) => item.document.recipient_role === 'SDR').length;
+  const skippedMessage = skippedRecipientLines ? ` ${skippedRecipientLines} vínculo(s) de beneficiário que já tinham recibo ativo foram ignorados.` : '';
+  const signingMessage = sdrDocumentCount
+    ? `Foram gerados ${created.length} recibos separados por beneficiário para ${saleIds.length} venda(s), incluindo ${sdrDocumentCount} recibo(s) de SDR. Cada PDF contém apenas os valores do próprio beneficiário e exige a assinatura dele e do gerente.`
+    : `Foram criados ${created.length} recibo(s) consolidado(s) para ${saleIds.length} venda(s). O PDF precisa da assinatura do corretor beneficiário e do gerente.`;
   return { ok: true, documents, document: documents[0] || null,
-    message: sdr ? 'Foram gerados recibos separados para corretor e SDR. Cada um contém somente os dados do próprio beneficiário e precisa da assinatura dele e do gerente.' : 'Recibo do corretor gerado. Ele contém os dados do beneficiário e precisa da assinatura do corretor e do gerente.'
-      + (notificationDelayed ? ' Uma notificação aparecerá após a próxima sincronização.' : '') };
+    message: signingMessage + skippedMessage + (notificationDelayed ? ' Uma notificação aparecerá após a próxima sincronização.' : '') };
 }
 
 async function apiCreateCommissionDocument(token, payload = {}) {
@@ -3277,10 +3393,19 @@ async function apiRestoreCommissionDocument(token, documentId) {
   const doc = Array.isArray(rows) ? rows[0] : null;
   if (!doc) return { ok: false, message: 'Documento arquivado não encontrado.' };
   if (doc.document_type === 'commission_receipt') {
-    const active = await dbRequest('crm_commission_documents', { query: {
-      select: 'id', sale_id: `eq.${doc.sale_id}`, recipient_id: `eq.${doc.recipient_id || doc.broker_id}`, document_type: 'eq.commission_receipt', archived_at: 'is.null', limit: 1
-    } });
-    if (Array.isArray(active) && active.length) return { ok: false, message: 'Já existe um recibo ativo para esta venda. Arquive-o antes de restaurar este recibo.' };
+    const associations = await dbRequest('crm_commission_document_sales', { query: { select: 'sale_id', commission_document_id: `eq.${doc.id}` } });
+    const saleIds = [...new Set((Array.isArray(associations) ? associations : []).map((item) => String(item.sale_id)).filter(isUuid))];
+    if (saleIds.length) {
+      const active = await dbRequest('crm_commission_document_sales', { query: {
+        select: 'id', sale_id: `in.(${saleIds.join(',')})`, recipient_id: `eq.${doc.recipient_id || doc.broker_id}`, archived_at: 'is.null', limit: 1
+      } });
+      if (Array.isArray(active) && active.length) return { ok: false, message: 'Já existe um recibo ativo para uma ou mais vendas deste documento. Arquive os recibos ativos antes de restaurá-lo.' };
+    } else if (doc.sale_id) {
+      const active = await dbRequest('crm_commission_documents', { query: {
+        select: 'id', sale_id: `eq.${doc.sale_id}`, recipient_id: `eq.${doc.recipient_id || doc.broker_id}`, document_type: 'eq.commission_receipt', archived_at: 'is.null', limit: 1
+      } });
+      if (Array.isArray(active) && active.length) return { ok: false, message: 'Já existe um recibo ativo para esta venda. Arquive-o antes de restaurar este recibo.' };
+    }
   }
   const stamp = now();
   await dbRequest('crm_commission_documents', { method: 'PATCH', query: { id: `eq.${doc.id}`, archived_at: 'not.is.null' }, prefer: 'return=minimal', body: { archived_at: null, archived_by: null, updated_at: stamp, updated_by: actor.id } });

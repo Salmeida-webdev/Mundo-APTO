@@ -1,7 +1,7 @@
 <script>
 (() => {
   'use strict';
-  const state = { token: '', refreshToken: '', user: null, refs: null, page: 'dashboard', pageNumber: 1, leadListRequestId: 0, lastDashboard: null, pollId: null, queryTimer: null, realtimeClient: null, realtimeChannel: null, realtimeTimer: null, operationsPeriod: 'week', operationsBrokerId: '', operationsDateFrom: '', operationsDateTo: '', operationsQuery: '', operationsAttendanceDay: '', operationsBrokers: [], operationsBrokersUpdatedAt: 0, appointmentsView: 'month', appointmentsMonth: '', appointmentsWeekDate: '', appointmentsDateFrom: '', appointmentsDateTo: '', salesHealthPeriod: 'month', salesHealthMonth: '', salesHealthBrokerId: '', salesHealthDevelopmentId: '', salesView: 'open', brokerSalesView: 'open', notifications: [], notificationIds: new Set(), notificationsInitialized: false };
+  const state = { token: '', refreshToken: '', user: null, refs: null, page: 'dashboard', pageNumber: 1, leadListRequestId: 0, lastDashboard: null, pollId: null, queryTimer: null, realtimeClient: null, realtimeChannel: null, realtimeTimer: null, operationsPeriod: 'week', operationsBrokerId: '', operationsDateFrom: '', operationsDateTo: '', operationsQuery: '', operationsAttendanceDay: '', operationsBrokers: [], operationsBrokersUpdatedAt: 0, appointmentsView: 'month', appointmentsMonth: '', appointmentsWeekDate: '', appointmentsDateFrom: '', appointmentsDateTo: '', appointmentsTab: 'active', salesHealthPeriod: 'month', salesHealthMonth: '', salesHealthBrokerId: '', salesHealthDevelopmentId: '', salesView: 'open', brokerSalesView: 'open', notifications: [], notificationIds: new Set(), notificationsInitialized: false };
   const byId = (id) => document.getElementById(id);
   const ADMIN_ROLES = ['Administrador', 'Gerente', 'Coordenador', 'Assistente'];
   const ROLE_LIST = ['Administrador', 'Gerente', 'Coordenador', 'Assistente', 'SDR', 'Corretor'];
@@ -486,13 +486,13 @@
     state.operationsDateFrom=dateFrom;state.operationsDateTo=dateTo;
     return { period: state.operationsPeriod || 'week', brokerId: state.operationsBrokerId || '', dateFrom, dateTo };
   }
-  function operationFilterBar(onChange) {
+  function operationFilterBar(onChange, options = {}) {
     const currentFilters=operationFilters();
     const bar = el('div', 'ops-filterbar');
     const period = makeSelect([{ label: 'Hoje', value: 'day' }, { label: 'Semana atual', value: 'week' }, { label: 'Mês atual', value: 'month' },{label:'Trimestre atual',value:'quarter'},{label:'Semestre atual',value:'semester'},{label:'Ano atual',value:'year'}], state.operationsPeriod || 'week');
     period.setAttribute('aria-label', 'Período operacional');
     const periodWrap = el('label', 'filter-field'); periodWrap.append(el('span', '', 'Período'), period); bar.appendChild(periodWrap);
-    if (isOperationsTeamReader()) {
+    if (isOperationsTeamReader() && options.includeBrokerFilter !== false) {
       const broker = makeSelect([{ label: 'Toda a equipe', value: '' }, ...(state.operationsBrokers || []).map((item) => ({ label: item.name + (item.active ? '' : ' · inativo'), value: item.id }))], state.operationsBrokerId || '');
       broker.setAttribute('aria-label', 'Filtrar por corretor');
       const brokerWrap = el('label', 'filter-field'); brokerWrap.append(el('span', '', 'Corretor'), broker); bar.appendChild(brokerWrap);
@@ -608,19 +608,68 @@
     }
     page.appendChild(locPanel);
     const panel = el('section', 'panel'); const head = el('div', 'panel-header'); const title = el('div');
-    title.append(el('h3', '', 'Atendimentos'), el('p', '', 'Os compromissos desta agenda não alteram automaticamente os indicadores de produção; os corretores registram os números manualmente em Lançamentos.'));
-    head.append(title, el('span', 'panel-chip', String((data.appointments || []).length) + ' registros')); panel.appendChild(head);
-    const rows = (data.appointments || []).map((item) => {
-      const actionsCell = el('div', 'row-actions');
-      if (!item.occupied && (data.canManageAll || String(item.brokerId) === String(data.actorId))) {
-        actionsCell.append(button('Editar', 'button-small', () => openAppointmentDialog(item)));
-        if (item.status !== 'Cancelado') actionsCell.append(button('Cancelar', 'button-small button-danger', () => cancelAppointment(item)));
+    const allAppointments = data.appointments || [];
+    const activeAppointments = allAppointments.filter((item) => item.status !== 'Cancelado');
+    const canceledAppointments = allAppointments.filter((item) => item.status === 'Cancelado');
+    title.append(el('h3', '', 'Compromissos'), el('p', '', 'Os compromissos não alteram automaticamente os indicadores de produção; os corretores registram os números manualmente em Lançamentos.'));
+    head.append(title, el('span', 'panel-chip', String(activeAppointments.length) + ' ativos')); panel.appendChild(head);
+    const tabs = el('div', 'appointment-tabs');
+    const list = el('div', 'appointment-day-list');
+    const renderAppointmentList = () => {
+      const showingCanceled = (state.appointmentsTab || 'active') === 'canceled';
+      const selected = showingCanceled ? canceledAppointments : activeAppointments;
+      list.replaceChildren();
+      if (!selected.length) {
+        list.appendChild(el('div', 'empty-state', showingCanceled ? 'Não há atendimentos cancelados neste período.' : 'Não há compromissos neste período.'));
+        return;
       }
-      return [timeRangeLabel(item.startsAt, item.endsAt), item.occupied ? 'Ocupado' : item.clientName,
-        item.occupied ? '—' : [item.developmentName, item.stand].filter(Boolean).join(' · '), item.occupied ? '—' : item.brokerName,
-        item.occupied ? 'Ocupado' : item.status, actionsCell.children.length ? actionsCell : '—'];
-    });
-    panel.appendChild(operationsTable([{ label: 'Data e horário' }, { label: 'Cliente' }, { label: 'Empreendimento / stand' }, { label: 'Corretor' }, { label: 'Situação' }, { label: 'Ações' }], rows, '940px'));
+      const groups = new Map();
+      selected.forEach((item) => {
+        const key = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(item.startsAt));
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(item);
+      });
+      [...groups.entries()].sort(([a], [b]) => a.localeCompare(b)).forEach(([day, items]) => {
+        const group = el('section', 'appointment-day-group');
+        const dayDate = new Date(day + 'T12:00:00-03:00');
+        const weekday = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'long' }).format(dayDate);
+        const dayLabel = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric' }).format(dayDate);
+        const heading = weekday + ' · ' + dayLabel;
+        group.appendChild(el('h4', 'appointment-day-header', heading));
+        const cards = el('div', 'appointment-day-cards');
+        items.forEach((item) => {
+          const card = el('article', 'appointment-card');
+          const when = el('div', 'appointment-card-time');
+          const clock = (value) => new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
+          when.append(el('strong', '', clock(item.startsAt) + ' – ' + clock(item.endsAt)));
+          const details = el('div', 'appointment-card-details');
+          details.append(el('strong', '', item.occupied ? 'Ocupado' : item.clientName || 'Compromisso'));
+          if (!item.occupied) {
+            const metadata = [item.developmentName, item.stand, item.brokerName].filter(Boolean).join(' · ');
+            if (metadata) details.appendChild(el('span', '', metadata));
+            if (item.notes) details.appendChild(el('small', '', item.notes));
+          }
+          const status = el('span', 'appointment-status' + (item.status === 'Cancelado' ? ' is-canceled' : ''), item.occupied ? 'Ocupado' : item.status || 'Agendado');
+          const actionsCell = el('div', 'row-actions');
+          if (!item.occupied && (data.canManageAll || String(item.brokerId) === String(data.actorId))) {
+            actionsCell.append(button('Editar', 'button-small', () => openAppointmentDialog(item)));
+            if (item.status !== 'Cancelado') actionsCell.append(button('Cancelar', 'button-small button-danger', () => cancelAppointment(item)));
+          }
+          card.append(when, details, status);
+          if (actionsCell.children.length) card.appendChild(actionsCell);
+          cards.appendChild(card);
+        });
+        group.appendChild(cards); list.appendChild(group);
+      });
+    };
+    const activeTab = button('Ativos · ' + activeAppointments.length, 'appointment-tab', () => { state.appointmentsTab = 'active'; renderAppointmentList(); updateAppointmentTabs(); });
+    const canceledTab = button('Cancelados · ' + canceledAppointments.length, 'appointment-tab', () => { state.appointmentsTab = 'canceled'; renderAppointmentList(); updateAppointmentTabs(); });
+    const updateAppointmentTabs = () => {
+      const canceled = (state.appointmentsTab || 'active') === 'canceled';
+      activeTab.classList.toggle('is-active', !canceled); canceledTab.classList.toggle('is-active', canceled);
+    };
+    activeTab.type = 'button'; canceledTab.type = 'button'; tabs.append(activeTab, canceledTab);
+    panel.append(tabs, list); renderAppointmentList(); updateAppointmentTabs();
     page.appendChild(panel);
     const upcoming = (data.appointments || []).filter((item) => new Date(item.startsAt) >= new Date() && item.status !== 'Cancelado').slice(0, 4);
     if (upcoming.length) {
@@ -638,20 +687,20 @@
     try{dialog.showModal();}catch(error){dialog.setAttribute('open','');}
   }
   function openAppointmentDialog(appointment){
-      const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');const box=el('div','modal-content');box.append(el('h2','',appointment?'Editar atendimento':'Novo atendimento'),el('p','muted','Agendamentos vinculados podem atualizar o status de atendimento, mas não são somados à produção. Cancelamentos não apagam o histórico.'));
-      const form=document.createElement('form');const grid=el('div','form-grid');const clientName=document.createElement('input');clientName.maxLength=150;clientName.required=true;clientName.value=appointment&&!appointment.occupied?appointment.clientName:'';
+      const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');const box=el('div','modal-content');box.append(el('h2','',appointment?'Editar compromisso':'Novo compromisso'),el('p','muted','O compromisso e a data/hora são obrigatórios. Os demais detalhes podem ser preenchidos quando forem úteis. Cancelamentos ficam na aba separada e não apagam o histórico.'));
+      const form=document.createElement('form');const grid=el('div','form-grid');const clientName=document.createElement('input');clientName.maxLength=150;clientName.required=true;clientName.placeholder='Ex.: Visita com família Silva';clientName.value=appointment&&!appointment.occupied?appointment.clientName:'';
       const selectedLeadId=appointment&&!appointment.occupied?String(appointment.leadId||''):'';let leads=[];
       const lead=makeSelect([{label:selectedLeadId?'Cliente vinculado à agenda':'Sem vínculo com cliente CRM',value:selectedLeadId}],selectedLeadId);
       lead.onchange=()=>{const selected=leads.find((item)=>String(item.id)===String(lead.value));if(selected)clientName.value=selected.name;};
-      const dev=makeSelect([{label:'Selecione o empreendimento',value:''},...(state.refs.developments||[]).map((item)=>({label:item.name,value:item.id}))],appointment&&!appointment.occupied?appointment.developmentId:'');dev.required=true;
+      const dev=makeSelect([{label:'Sem empreendimento vinculado',value:''},...(state.refs.developments||[]).map((item)=>({label:item.name,value:item.id}))],appointment&&!appointment.occupied?appointment.developmentId:'');
       const stand=document.createElement('input');stand.maxLength=120;stand.value=appointment&&!appointment.occupied?appointment.stand:'';stand.placeholder='Ex.: Stand Brooklin';
-      const date=document.createElement('input');date.type='date';date.required=true;const start=document.createElement('input');start.type='time';start.required=true;const duration=document.createElement('input');duration.type='number';duration.min='15';duration.max='480';duration.step='15';duration.value='60';duration.required=true;
-      if(appointment&&!appointment.occupied){const parsed=new Date(appointment.startsAt);date.value=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).format(parsed);start.value=new Intl.DateTimeFormat('en-GB',{timeZone:'America/Sao_Paulo',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(parsed);duration.value=String(Math.max(15,Math.round((new Date(appointment.endsAt)-parsed)/60000)));}
-      const broker=makeSelect([{label:'Selecione o corretor',value:''},...(state.refs.brokers||[]).filter((item)=>item.active).map((item)=>({label:item.name,value:item.id}))],appointment&&!appointment.occupied?appointment.brokerId:state.user.role==='Corretor'?state.user.id:'');broker.required=true;
+      const date=document.createElement('input');date.type='date';date.required=true;const start=document.createElement('input');start.type='time';start.required=true;const duration=document.createElement('input');duration.type='number';duration.min='1';duration.max='480';duration.step='1';duration.value='60';
+      if(appointment&&!appointment.occupied){const parsed=new Date(appointment.startsAt);date.value=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).format(parsed);start.value=new Intl.DateTimeFormat('en-GB',{timeZone:'America/Sao_Paulo',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(parsed);duration.value=String(Math.max(1,Math.round((new Date(appointment.endsAt)-parsed)/60000)));}
+      const broker=makeSelect([{label:'Sem corretor vinculado',value:''},...(state.refs.brokers||[]).filter((item)=>item.active).map((item)=>({label:item.name,value:item.id}))],appointment&&!appointment.occupied?appointment.brokerId:state.user.role==='Corretor'?state.user.id:'');
       const status=makeSelect([{label:'Agendado',value:'Agendado'},{label:'Realizado',value:'Realizado'},{label:'Cancelado',value:'Cancelado'},{label:'Não compareceu',value:'Não compareceu'}],appointment&&!appointment.occupied?appointment.status:'Agendado');
       const notes=document.createElement('textarea');notes.rows=3;notes.maxLength=1500;notes.value=appointment&&!appointment.occupied?appointment.notes:'';
-      addField(grid,'Cliente',clientName);addField(grid,'Vincular cliente existente (opcional)',lead,true);addField(grid,'Empreendimento',dev);addField(grid,'Stand',stand);addField(grid,'Data',date);addField(grid,'Horário de início',start);addField(grid,'Duração em minutos',duration);if(dataCanManageAgenda())addField(grid,'Corretor responsável',broker);else broker.value=state.user.id;addField(grid,'Situação',status);addField(grid,'Observações',notes,true);form.appendChild(grid);
-      const error=el('p','form-error');error.setAttribute('role','alert');const footer=el('div','modal-actions');const cancel=button('Fechar','button-quiet',()=>dialog.close());const save=button('Salvar atendimento','button-primary',()=>{});save.type='submit';footer.append(cancel,save);form.append(error,footer);form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const startAt=localDateTimeIso(date.value,start.value);const endAt=new Date(new Date(startAt).getTime()+Number(duration.value)*60000).toISOString();const result=await callApi('apiSaveAppointment',state.token,{id:appointment?appointment.id:'',clientName:clientName.value,leadId:lead.value,developmentId:dev.value,stand:stand.value,brokerId:broker.value,startsAt:startAt,endsAt:endAt,status:status.value,notes:notes.value});if(!result||result.ok!==true)throw new Error(result&&result.message||'Não foi possível salvar o atendimento.');dialog.close();toast(result.message,'success');await renderAppointments();}catch(err){error.textContent=err.message||'Não foi possível salvar o atendimento.';}finally{save.disabled=false;}});box.appendChild(form);showAdminDialog(dialog,content,box);
+      addField(grid,'Compromisso',clientName);addField(grid,'Vincular cliente existente (opcional)',lead,true);addField(grid,'Empreendimento (opcional)',dev);addField(grid,'Stand (opcional)',stand);addField(grid,'Data',date);addField(grid,'Horário',start);addField(grid,'Duração em minutos (opcional)',duration);if(dataCanManageAgenda())addField(grid,'Corretor responsável (opcional)',broker);else broker.value=state.user.id;addField(grid,'Situação',status);addField(grid,'Observações (opcional)',notes,true);form.appendChild(grid);
+      const error=el('p','form-error');error.setAttribute('role','alert');const footer=el('div','modal-actions');const cancel=button('Fechar','button-quiet',()=>dialog.close());const save=button('Salvar compromisso','button-primary',()=>{});save.type='submit';footer.append(cancel,save);form.append(error,footer);form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const startAt=localDateTimeIso(date.value,start.value);const minutes=Number(duration.value||60);const endAt=new Date(new Date(startAt).getTime()+minutes*60000).toISOString();const result=await callApi('apiSaveAppointment',state.token,{id:appointment?appointment.id:'',clientName:clientName.value,leadId:lead.value,developmentId:dev.value,stand:stand.value,brokerId:broker.value,startsAt:startAt,endsAt:endAt,status:status.value,notes:notes.value});if(!result||result.ok!==true)throw new Error(result&&result.message||'Não foi possível salvar o compromisso.');dialog.close();toast(result.message,'success');await renderAppointments();}catch(err){error.textContent=err.message||'Não foi possível salvar o compromisso.';}finally{save.disabled=false;}});box.appendChild(form);showAdminDialog(dialog,content,box);
       callApi('apiListLeads',state.token,{},1,100,'all').then((leadResult)=>{
         leads=leadResult&&Array.isArray(leadResult.items)?leadResult.items:[];
         const options=[{label:'Sem vínculo com cliente CRM',value:''},...leads.map((item)=>({label:item.name+' · '+item.brokerName,value:item.id}))];
@@ -753,9 +802,9 @@
     return sign + item.difference + ' vs. período anterior' + percent;
   }
   function formatDateOnly(value) { return String(value || '').split('-').reverse().join('/') || '—'; }
-  function operationsPage(onChange) {
+  function operationsPage(onChange, options = {}) {
     const page = el('div', 'ops-page');
-    page.appendChild(operationFilterBar(onChange));
+    page.appendChild(operationFilterBar(onChange, options));
     return page;
   }
 
@@ -855,7 +904,7 @@
     if (canExportOperations()) actions.appendChild(button('Exportar lançamentos CSV','button-small',()=>exportOperationSection('production',filters)));
     if (canManageOperations()) actions.appendChild(button('Importar CSV','button-small',()=>openOperationsImport('production')));
     const page = operationsPage(() => renderProduction().catch(handleFailure));
-    page.prepend(operationsHeader('Lançamentos de produção', 'Cada lançamento é individual e pode ser feito mais de uma vez no mesmo dia. Corretores editam apenas os próprios registros; contas de gestão designadas podem corrigir os registros da equipe.', actions));
+    page.prepend(operationsHeader('Lançamentos de produção', 'Não há limite de quantidade de lançamentos por corretor no mesmo dia. Corretores podem lançar em qualquer data do mês vigente até hoje e editar os próprios registros; contas de gestão designadas podem corrigir os registros da equipe.', actions));
     page.appendChild(el('div','ops-note','O campo manual preserva o total de vendas informado. Vendas canceladas ou em distrato vinculadas ao mesmo corretor e à mesma data são descontadas automaticamente das vendas válidas, metas e ranking; a contagem original fica preservada para edição e histórico.'));
     const toolbar=el('div','ops-toolbar');const search=document.createElement('input');search.type='search';search.value=state.operationsQuery||'';search.placeholder='Buscar corretor ou observação';search.setAttribute('aria-label','Buscar lançamentos por corretor ou observação');search.className='ops-search';toolbar.append(search,el('p','','A busca inclui corretor, observações e data.'));page.appendChild(toolbar);
     const query=(state.operationsQuery||'').trim().toLocaleLowerCase('pt-BR');const visibleRows=rows.filter((row)=>!query||[row.brokerName,row.notes,row.workDate].some((value)=>String(value||'').toLocaleLowerCase('pt-BR').includes(query)));
@@ -863,7 +912,8 @@
     const values = visibleRows.map((row) => {
       const actionsCell = el('div','ops-actions');
       if (canManageOperations() || (operationsAccess() === 'broker' && String(row.brokerId) === String(state.user.id))) {
-        if(canManageOperations()||row.workDate===todayBrazil())actionsCell.appendChild(button('Editar','button-small',()=>openProductionDialog(row)));
+        const currentMonthStart=todayBrazil().slice(0,7)+'-01';
+        if(canManageOperations()||(operationsAccess()==='broker'&&row.workDate>=currentMonthStart&&row.workDate<=todayBrazil()))actionsCell.appendChild(button('Editar','button-small',()=>openProductionDialog(row)));
         actionsCell.appendChild(button('Cancelar','button-small button-danger',()=>archiveProduction(row)));
       }
       const salesLabel = row.linkedCancelledSales ? `${row.sales} válidas de ${row.reportedSales}; ${row.linkedCancelledSales} cancelada(s)/distratada(s) descontada(s)` : String(row.sales);
@@ -876,12 +926,12 @@
   function openProductionDialog(entry) {
     if (!(canManageOperations() || operationsAccess() === 'broker')) return;
     const dialog = byId('admin-dialog'); const content = byId('admin-dialog-content'); content.replaceChildren();
-    const box = el('div','modal-content'); box.append(el('h2','',entry?'Editar lançamento':'Novo lançamento de produção'),el('p','muted',canManageOperations()?'A gestão pode registrar ou corrigir lançamentos de qualquer data até hoje. Cada alteração será auditada.':'Corretores podem lançar e corrigir os próprios números somente na data de hoje. Cada alteração será auditada.'));
+    const box = el('div','modal-content'); box.append(el('h2','',entry?'Editar lançamento':'Novo lançamento de produção'),el('p','muted',canManageOperations()?'A gestão pode registrar ou corrigir lançamentos de qualquer data até hoje. Cada alteração será auditada.':'Você pode registrar mais de um lançamento no mesmo dia, sem limite diário de quantidade, em qualquer data do mês vigente até hoje. Cada alteração será auditada.'));
     const form = document.createElement('form'); const grid = el('div','form-grid');
     const brokerSelect = makeSelect((state.operationsBrokers || []).filter((item)=>item.active).map((item)=>({label:item.name,value:item.id})), entry ? entry.brokerId : operationsAccess()==='broker' ? state.user.id : '');
     if (operationsAccess()==='broker') { brokerSelect.value=state.user.id; brokerSelect.disabled=true; }
     addField(grid,'Corretor responsável',brokerSelect,true);
-    const date = document.createElement('input'); date.type='date'; date.required=true; date.max=todayBrazil(); if(operationsAccess()==='broker')date.min=todayBrazil(); date.value=entry?entry.workDate:todayBrazil(); addField(grid,'Data do lançamento',date,true);
+    const date = document.createElement('input'); date.type='date'; date.required=true; date.max=todayBrazil(); if(operationsAccess()==='broker')date.min=todayBrazil().slice(0,7)+'-01'; date.value=entry?entry.workDate:todayBrazil(); addField(grid,'Data do lançamento',date,true);
     const controls = {};
     [['prospections','Prospecções'],['interactions','Interações'],['appointments','Agendamentos'],['visits','Visitas'],['sales','Vendas informadas (base manual)'],['folders','Pastas de documentação encaminhadas']].forEach(([key,label])=>{const input=document.createElement('input');input.type='number';input.min='0';input.max='1000000';input.step='1';input.required=true;input.value=entry?String(key==='sales'?(entry.reportedSales??entry.sales)||0:entry[key]||0):'0';controls[key]=input;addField(grid,label,input);});
     grid.appendChild(el('p','field-hint','Informe o total manual registrado. Se uma venda vinculada for cancelada ou distratada, o CRM desconta esse caso dos resultados válidos, sem sobrescrever o número informado.'));
@@ -946,51 +996,57 @@
   async function renderAttendance() {
     if(!canReadOperations()){state.page='dashboard';setActiveNav('dashboard');return renderDashboard();}
     const filters=operationFilters();
-    let rows;let weekRows;
+    filters.brokerId='';
     const selectedDay=state.operationsAttendanceDay&&state.operationsAttendanceDay<=todayBrazil()?state.operationsAttendanceDay:todayBrazil();
-    const weekStart=mondayOfOperationWeek(selectedDay);const weekEnd=shiftOperationDate(weekStart,6);
-    // A tabela mostra a semana completa, mas a API não aceita consultas em datas futuras.
-    // Na semana atual, busque registros somente até hoje e mantenha os dias futuros zerados.
-    const attendanceQueryEnd=weekEnd>todayBrazil()?todayBrazil():weekEnd;
-    try{await refreshOperationBrokers();[rows,weekRows]=await Promise.all([callApi('apiListAttendance',state.token,filters),callApi('apiListAttendance',state.token,{...filters,dateFrom:weekStart,dateTo:attendanceQueryEnd})]);}
-    catch(error){const area=byId('content-area');area.replaceChildren();const page=operationsPage(()=>renderAttendance().catch(handleFailure));page.prepend(operationsHeader('Frequência nos plantões','Não foi possível carregar os registros para o período selecionado.'));page.appendChild(el('div','contract-readiness contract-readiness-pending',error&&error.message?error.message:'O CRM não conseguiu consultar os registros de frequência.'));page.appendChild(button('Tentar novamente','button-small button-primary',()=>renderAttendance().catch(handleFailure)));area.appendChild(page);return;}
+    let rows;let dayRows;
+    try{await refreshOperationBrokers();[rows,dayRows]=await Promise.all([callApi('apiListAttendance',state.token,filters),callApi('apiListAttendance',state.token,{dateFrom:selectedDay,dateTo:selectedDay})]);}
+    catch(error){const area=byId('content-area');area.replaceChildren();const page=operationsPage(()=>renderAttendance().catch(handleFailure),{includeBrokerFilter:false});page.prepend(operationsHeader('Frequência nos plantões','Não foi possível carregar os registros para o período selecionado.'));page.appendChild(el('div','contract-readiness contract-readiness-pending',error&&error.message?error.message:'O CRM não conseguiu consultar os registros de frequência.'));page.appendChild(button('Tentar novamente','button-small button-primary',()=>renderAttendance().catch(handleFailure)));area.appendChild(page);return;}
     const area=byId('content-area');area.replaceChildren();
-    const page=operationsPage(()=>renderAttendance().catch(handleFailure));
-    const actions=el('div','ops-actions');if(canExportOperations())actions.appendChild(button('Exportar plantões CSV','button-small button-primary',()=>exportOperationSection('attendance',filters)));if(canManageOperations()){actions.appendChild(button('Lançar / corrigir frequências','button-small button-primary',()=>openAttendanceEntryDialog(selectedDay)));actions.appendChild(button('Importar CSV','button-small',()=>openOperationsImport('attendance')));}
-    page.prepend(operationsHeader('Frequência nos plantões','Consulte os totais por período e acompanhe a semana de segunda a domingo. Cada turno conta separadamente; este módulo não controla jornada.',actions));
+    const page=operationsPage(()=>renderAttendance().catch(handleFailure),{includeBrokerFilter:false});
+    const actions=el('div','ops-actions');if(canExportOperations())actions.appendChild(button('Exportar plantões CSV','button-small button-primary',()=>exportOperationSection('attendance',filters)));if(canManageOperations())actions.appendChild(button('Importar CSV','button-small',()=>openOperationsImport('attendance')));
+    page.prepend(operationsHeader('Frequência nos plantões','Consulte o total por período e confira abaixo, por corretor, os turnos lançados. A grade diária permite registrar todos os corretores de uma única data.',actions));
     const summary={morning:0,afternoon:0,night:0};rows.forEach((row)=>{if(summary[row.shift]!==undefined)summary[row.shift]+=1;});
     const summaryCards=el('section','ops-shift-grid');OPERATION_SHIFTS.forEach((shift)=>{const card=el('div','ops-shift-card');card.append(el('span','',shift.label),el('strong','',String(summary[shift.id])),el('small','','presenças no período selecionado'));summaryCards.appendChild(card);});
     const totalCard=el('div','ops-shift-card');totalCard.append(el('span','','Total'),el('strong','',String(rows.length)),el('small','','frequências registradas'));summaryCards.appendChild(totalCard);page.appendChild(summaryCards);
-
-    const weekPanel=el('section','panel');const weekHead=el('div','panel-header');const weekTitle=el('div');
-    weekTitle.append(el('h3','','Resumo semanal'),el('p','',formatDateOnly(weekStart)+' a '+formatDateOnly(weekEnd)+' · semana de segunda a domingo.'));
-    const weekActions=el('div','ops-week-navigation');const currentWeekStart=mondayOfOperationWeek(todayBrazil());
-    const previousWeek=button('‹ Semana anterior','button-small',()=>{state.operationsAttendanceDay=shiftOperationDate(selectedDay,-7);renderAttendance().catch(handleFailure);});
-    const nextWeek=button('Próxima semana ›','button-small',()=>{state.operationsAttendanceDay=shiftOperationDate(selectedDay,7);renderAttendance().catch(handleFailure);});
-    nextWeek.disabled=weekStart>=currentWeekStart;weekActions.append(previousWeek,nextWeek);weekHead.append(weekTitle,weekActions);weekPanel.appendChild(weekHead);
-    const teamVisible=operationsAccess()!=='broker';const selectedBrokerId=teamVisible?String(filters.brokerId||''):'';
-    const weeklyBrokerScope=(state.operationsBrokers||[]).filter((broker)=>(broker.active||String(broker.id)===selectedBrokerId)&&(!selectedBrokerId||String(broker.id)===selectedBrokerId));
-    const weeklyByBroker=new Map();
-    if(teamVisible){weeklyBrokerScope.forEach((broker)=>weeklyByBroker.set(String(broker.id),{id:String(broker.id),name:broker.name,morning:0,afternoon:0,night:0,total:0}));}
-    else if(state.user&&state.user.role==='Corretor')weeklyByBroker.set(String(state.user.id),{id:String(state.user.id),name:state.user.name,morning:0,afternoon:0,night:0,total:0});
-    const weekTotals={morning:0,afternoon:0,night:0,total:0};
-    weekRows.forEach((row)=>{
-      let broker=weeklyByBroker.get(String(row.brokerId));
-      if(!broker){broker={id:String(row.brokerId),name:row.brokerName,morning:0,afternoon:0,night:0,total:0};weeklyByBroker.set(String(row.brokerId),broker);}
-      if(['morning','afternoon','night'].includes(row.shift)){broker[row.shift]+=1;broker.total+=1;weekTotals[row.shift]+=1;weekTotals.total+=1;}
+    const teamVisible=operationsAccess()!=='broker';
+    const brokerScope=(state.operationsBrokers||[]).filter((broker)=>broker.active);
+    const byBroker=new Map();
+    if(teamVisible)brokerScope.forEach((broker)=>byBroker.set(String(broker.id),{name:broker.name,morning:0,afternoon:0,night:0,total:0}));
+    else if(state.user)byBroker.set(String(state.user.id),{name:state.user.name,morning:0,afternoon:0,night:0,total:0});
+    const periodTotals={morning:0,afternoon:0,night:0,total:0};
+    rows.forEach((row)=>{
+      let broker=byBroker.get(String(row.brokerId));
+      if(!broker){broker={name:row.brokerName,morning:0,afternoon:0,night:0,total:0};byBroker.set(String(row.brokerId),broker);}
+      if(['morning','afternoon','night'].includes(row.shift)){broker[row.shift]++;broker.total++;periodTotals[row.shift]++;periodTotals.total++;}
     });
-    const weeklyShiftCards=el('section','ops-shift-grid');
-    const weeklyScopeLabel=teamVisible?(selectedBrokerId?'do corretor filtrado':'da equipe'):'suas frequências';
-    OPERATION_SHIFTS.forEach((shift)=>weeklyShiftCards.appendChild((()=>{const card=el('div','ops-shift-card');card.append(el('span','',shift.label),el('strong','',String(weekTotals[shift.id])),el('small','',teamVisible?`frequências ${weeklyScopeLabel} na semana`:'suas frequências na semana'));return card;})()));
-    weeklyShiftCards.appendChild((()=>{const card=el('div','ops-shift-card');card.append(el('span','','Total semanal'),el('strong','',String(weekTotals.total)),el('small','',teamVisible?(selectedBrokerId?'frequências do corretor filtrado':'frequências de todos os corretores'):'suas frequências'));return card;})());
-    weekPanel.appendChild(weeklyShiftCards);
-    const weeklyBrokerRows=[...weeklyByBroker.values()].sort((a,b)=>a.name.localeCompare(b.name,'pt-BR')).map((broker)=>[broker.name,broker.morning,broker.afternoon,broker.night,broker.total]);
-    weeklyBrokerRows.push([teamVisible?(selectedBrokerId?'TOTAL DO CORRETOR FILTRADO':'TOTAL DA EQUIPE'):'TOTAL DO CORRETOR',weekTotals.morning,weekTotals.afternoon,weekTotals.night,weekTotals.total]);
-    weekPanel.append(el('h4','','Frequências semanais por corretor'));
-    weekPanel.appendChild(operationsTable([{label:'Corretor'},{label:'Manhã',numeric:true},{label:'Tarde',numeric:true},{label:'Noite',numeric:true},{label:'Total na semana',numeric:true}],weeklyBrokerRows,'640px'));
-    page.appendChild(weekPanel);
+    const periodPanel=el('section','panel');
+    const periodHead=el('div','panel-header');const periodTitle=el('div');
+    periodTitle.append(el('h3','','Frequências por corretor no período selecionado'),el('p','','Consolidação por corretor e turno conforme o filtro acima.'));
+    periodHead.appendChild(periodTitle);periodPanel.appendChild(periodHead);
+    const periodRows=[...byBroker.values()].sort((a,b)=>a.name.localeCompare(b.name,'pt-BR')).map((broker)=>[broker.name,broker.morning,broker.afternoon,broker.night,broker.total]);
+    periodRows.push([teamVisible?'TOTAL DA EQUIPE':'TOTAL DO CORRETOR',periodTotals.morning,periodTotals.afternoon,periodTotals.night,periodTotals.total]);
+    periodPanel.appendChild(operationsTable([{label:'Corretor'},{label:'Manhã',numeric:true},{label:'Tarde',numeric:true},{label:'Noite',numeric:true},{label:'Total no período',numeric:true}],periodRows,'640px'));
+    page.appendChild(periodPanel);
 
-    page.appendChild(el('p','ops-note','O detalhamento dia a dia foi removido desta tela. Use os filtros para consultar intervalos e o resumo semanal para ver cada corretor por turno; a gestão pode lançar ou corrigir frequências pelo formulário acima.'));
+    const dayPanel=el('section','panel');const dayHead=el('div','panel-header');const dayTitle=el('div');
+    dayTitle.append(el('h3','','Lançar frequência do dia'),el('p','',canManageOperations()?'Selecione uma data. Todos os corretores ativos aparecem para marcar manhã, tarde e noite.':'Consulta dos turnos registrados para a data selecionada.'));
+    const dayField=el('label','filter-field');const dayInput=document.createElement('input');dayInput.type='date';dayInput.max=todayBrazil();dayInput.value=selectedDay;dayInput.setAttribute('aria-label','Data para consultar ou lançar frequência');dayField.append(el('span','','Data'),dayInput);dayHead.append(dayTitle,dayField);dayPanel.appendChild(dayHead);
+    const attendanceByBroker=new Map();dayRows.forEach((row)=>{const key=String(row.brokerId);if(!attendanceByBroker.has(key))attendanceByBroker.set(key,new Set());attendanceByBroker.get(key).add(row.shift);});
+    const dailyScope=teamVisible?(state.operationsBrokers||[]).filter((broker)=>broker.active):[{id:state.user.id,name:state.user.name,active:true}];
+    const dailyRows=dailyScope.slice().sort((a,b)=>a.name.localeCompare(b.name,'pt-BR')).map((broker)=>{
+      const cells=OPERATION_SHIFTS.map((shift)=>{
+        const present=(attendanceByBroker.get(String(broker.id))||new Set()).has(shift.id);
+        const toggle=button(present?'Presente ✓':'Marcar presença','ops-attendance-toggle'+(present?' is-present':''),async()=>{
+          if(!canManageOperations())return;toggle.disabled=true;
+          try{const result=await callApi('apiSetAttendance',state.token,{brokerId:broker.id,attendanceDate:dayInput.value,shift:shift.id,present:!present});if(!result||result.ok!==true)throw new Error(result&&result.message||'Não foi possível atualizar a frequência.');toast(result.message,'success');state.operationsAttendanceDay=dayInput.value;await renderAttendance();}
+          catch(error){handleFailure(error);toggle.disabled=false;}
+        });
+        toggle.type='button';toggle.disabled=!canManageOperations();toggle.setAttribute('aria-label',broker.name+' · '+shift.label+' · '+(present?'presença registrada':'marcar presença'));return toggle;
+      });
+      return [broker.name,...cells];
+    });
+    const attendanceGrid=operationsTable([{label:'Corretor'},...OPERATION_SHIFTS.map((shift)=>({label:shift.label}))],dailyRows,'720px','Não há corretores ativos para lançar frequência.');
+    dayPanel.appendChild(attendanceGrid);dayInput.addEventListener('change',()=>{state.operationsAttendanceDay=dayInput.value||todayBrazil();renderAttendance().catch(handleFailure);});page.appendChild(dayPanel);
     area.appendChild(page);
   }
 
@@ -2653,13 +2709,14 @@
         const createdDate=doc.createdAt?new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(doc.createdAt)):'';
         if(createdFrom.value&&createdDate<createdFrom.value)return false;
         if(createdTo.value&&createdDate>createdTo.value)return false;
-        return !query||`${doc.buyerName} ${doc.processNumber} ${doc.brokerName} ${doc.sdrName} ${doc.originalName} ${financeDocumentLabels[doc.type]||doc.type}`.toLocaleLowerCase('pt-BR').includes(query);
+        const linkedSaleSearch=(doc.sales||[]).map((sale)=>[sale.buyerName,sale.processNumber,sale.internalNumber,sale.developmentName,sale.unit].join(' ')).join(' ');
+        return !query||`${doc.buyerName} ${doc.processNumber} ${doc.brokerName} ${doc.sdrName} ${doc.originalName} ${linkedSaleSearch} ${financeDocumentLabels[doc.type]||doc.type}`.toLocaleLowerCase('pt-BR').includes(query);
       });body.replaceChildren();
       if(!visible.length){const tr=el('tr');const td=el('td','table-empty',docs.length?'Nenhum documento corresponde aos filtros.':includeArchived?'Nenhum documento arquivado.':'Nenhum documento financeiro disponível.');td.colSpan=9;tr.appendChild(td);body.appendChild(tr);return;}
       visible.forEach((doc)=>{
-        const saleLabel=doc.buyerName||'Documento sem venda vinculada';const processLabel=doc.processNumber?'Processo '+doc.processNumber:'';const unitLabel=[doc.developmentName,doc.unit].filter(Boolean).join(' · ');
+        const linkedSales=Array.isArray(doc.sales)?doc.sales:[];const saleLabel=linkedSales.length>1?`${linkedSales.length} vendas consolidadas`:doc.buyerName||'Documento sem venda vinculada';const processLabel=linkedSales.length<=1&&doc.processNumber?'Processo '+doc.processNumber:'';const unitLabel=linkedSales.length<=1?[doc.developmentName,doc.unit].filter(Boolean).join(' · '):'';
       const amount=doc.type==='commission_receipt'?`${brl(doc.grossCommission)} bruta · desconto ${brl(doc.withholdingAmount)} · líquida ${brl(doc.netCommission)}`:'—';
-      const tr=el('tr');tr.append(el('td','', [saleLabel,processLabel,unitLabel].filter(Boolean).join('\n')),el('td','',financeDocumentLabels[doc.type]||doc.type),el('td','',[doc.recipientName,doc.recipientRole==='SDR'?'SDR participante':'Corretor'].filter(Boolean).join('\n')),el('td','',amount),el('td','',financeSignatureLabel(doc.signatureStatus)),el('td','',doc.type==='commission_receipt'?financePaymentLabel(doc.paymentStatus)+(doc.paymentDate?' · previsto '+formatDateOnly(doc.paymentDate):'')+(doc.paymentCompletedAt?' · '+formatDate(doc.paymentCompletedAt):''):'—'),el('td','',formatDate(doc.createdAt)));
+      const tr=el('tr');const saleCell=el('td');saleCell.append(el('strong','',saleLabel));if(processLabel||unitLabel)saleCell.append(el('div','muted',[processLabel,unitLabel].filter(Boolean).join(' · ')));if(linkedSales.length>1){const detail=document.createElement('details');const summary=el('summary','receipt-sale-details-summary','Ver vendas incluídas');detail.appendChild(summary);const list=el('div','receipt-sale-details-list');linkedSales.forEach((sale)=>list.appendChild(el('div','receipt-sale-summary',[[sale.processNumber||sale.internalNumber?'Processo '+(sale.processNumber||sale.internalNumber):'Venda',sale.buyerName].filter(Boolean).join(' · '),[sale.developmentName,sale.unit,brl(sale.unitValue)].filter(Boolean).join(' · ')].filter(Boolean).join('\n'))));detail.appendChild(list);saleCell.appendChild(detail);}tr.append(saleCell,el('td','',financeDocumentLabels[doc.type]||doc.type),el('td','',[doc.recipientName,doc.recipientRole==='SDR'?'SDR participante':'Corretor'].filter(Boolean).join('\n')),el('td','',amount),el('td','',financeSignatureLabel(doc.signatureStatus)),el('td','',doc.type==='commission_receipt'?financePaymentLabel(doc.paymentStatus)+(doc.paymentDate?' · previsto '+formatDateOnly(doc.paymentDate):'')+(doc.paymentCompletedAt?' · '+formatDate(doc.paymentCompletedAt):''):'—'),el('td','',formatDate(doc.createdAt)));
         const files=el('td');if(doc.generatedStoragePath)files.appendChild(button('Recibo gerado','button-small',()=>downloadCommissionDocument(doc,'generated')));if(doc.signedStoragePath)files.appendChild(button('Arquivo assinado','button-small',()=>downloadCommissionDocument(doc,'signed')));if(doc.storagePath)files.appendChild(button(doc.originalName||'Anexo','button-small',()=>downloadCommissionDocument(doc,'stored')));if(!files.children.length)files.appendChild(el('span','muted','Sem arquivo'));tr.appendChild(files);
         const actionCell=el('td');const actionButtons=el('div','row-actions');
         if(!includeArchived&&doc.type==='commission_receipt'&&doc.signatureStatus==='pending'&&canUploadOwnSignedCommissionReceipt(doc)){actionButtons.append(button(doc.signedStoragePath?'Enviar outro PDF assinado':'Anexar recibo assinado','button-small button-primary',()=>chooseCommissionDocumentFile(doc,true)));}
@@ -2671,52 +2728,56 @@
       });
     }
     [search,type,status,createdFrom,createdTo].forEach((control)=>control.addEventListener(control===search?'input':'change',update));update();
-    if(canManageFinanceDocuments())area.appendChild(el('p','field-hint','Os arquivos ficam em armazenamento privado e cada consulta usa um link temporário. A assinatura é feita fora do CRM. Cada recibo é individual: o beneficiário envia o próprio PDF assinado e gerente ou assistente confere a assinatura do beneficiário e do gerente antes de registrar o pagamento. Confira o conteúdo do modelo gerado antes do uso oficial.'));
+    if(canManageFinanceDocuments())area.appendChild(el('p','field-hint','Os arquivos ficam em armazenamento privado e cada consulta usa um link temporário. Um recibo pode consolidar várias vendas para o mesmo beneficiário; com SDR, cada beneficiário recebe e assina o próprio PDF junto com o gerente. A assinatura é feita fora do CRM. Confira o conteúdo do modelo gerado antes do uso oficial.'));
   }
 
   async function openCommissionReceiptDialog(){
     if(!canManageFinanceDocuments())return;
     try{
       const [sales,users,documents]=await Promise.all([callApi('apiListSales',state.token),callApi('apiListUsers',state.token),callApi('apiListCommissionDocuments',state.token)]);
-      const receiptsBySale=new Map();(documents||[]).filter((doc)=>doc.type==='commission_receipt'&&!doc.archivedAt).forEach((doc)=>{const set=receiptsBySale.get(String(doc.saleId))||new Set();set.add(String(doc.recipientId||doc.brokerId));receiptsBySale.set(String(doc.saleId),set);});
+      const receiptsBySale=new Map();(documents||[]).filter((doc)=>doc.type==='commission_receipt'&&!doc.archivedAt).forEach((doc)=>{const linkedSales=Array.isArray(doc.sales)&&doc.sales.length?doc.sales:[{id:doc.saleId,saleId:doc.saleId}];linkedSales.forEach((linked)=>{const key=String(linked.saleId||linked.id||'');if(!key)return;const set=receiptsBySale.get(key)||new Set();set.add(String(doc.recipientId||doc.brokerId));receiptsBySale.set(key,set);});});
       const available=(sales||[]).filter((item)=>{if(item.deletedAt||item.isCancelledOrDistrato||item.isCommissionPaid)return false;const recipients=receiptsBySale.get(String(item.id))||new Set();const brokerDone=recipients.has(String(item.brokerId));const sdrDone=item.isSdrSale===true&&item.sdrId?recipients.has(String(item.sdrId)):false;return item.isSdrSale===true?(!brokerDone||!sdrDone||!item.sdrId):!brokerDone;});
       const brokers=(users||[]).filter((item)=>item.role==='Corretor');
       const sdrs=(users||[]).filter((item)=>item.role==='SDR'&&item.active);
       const managers=(users||[]).filter((item)=>['Gerente','Administrador'].includes(item.role)&&item.active);
       const dialog=byId('admin-dialog');const content=byId('admin-dialog-content');content.replaceChildren();const box=el('div','modal-content');
-      box.append(el('h2','','Gerar recibo de comissão'),el('p','muted','Selecione a venda, o corretor e, quando houver participação do SDR, o SDR correspondente. O CRM gera um recibo individual para cada beneficiário. A comissão bruta total é 2,5% do valor da venda; a alíquota é descontada antes da divisão líquida de 50%. Cada recibo exige a assinatura do próprio beneficiário e do gerente.'));
+      box.append(el('h2','','Gerar recibo de comissão'),el('p','muted','Selecione um corretor e uma ou mais vendas dele. O CRM consolida no mesmo PDF as vendas de cada beneficiário. Mantém a comissão bruta de 2,5%, o desconto informado pela gestão e, quando houver SDR, a divisão líquida de 50%. Cada beneficiário recebe um recibo separado para assinar com o gerente.'));
       const form=document.createElement('form');const grid=el('div','form-grid');
-      const sale=makeSelect([{label:'Selecione uma venda em aberto',value:''},...available.map((item)=>({value:item.id,label:[item.processNumber||item.internalNumber,item.buyerName,item.developmentName,item.unit,brl(item.unitValue)].filter(Boolean).join(' · ')}))],'');sale.required=true;
       const broker=makeSelect([{label:'Selecione o corretor da venda',value:''},...brokers.map((item)=>({value:item.id,label:item.name+(item.active?'':' · inativo')}))],'');broker.required=true;
-      const sdr=makeSelect([{label:'Sem participação do SDR',value:''},...sdrs.map((item)=>({value:item.id,label:item.name}))],'');sdr.disabled=true;
-      const sdrSummary=el('p','field-hint','Selecione uma venda. Se ela tiver participação do SDR, escolha o SDR que receberá o segundo recibo.');
+      const selectedIds=new Set();const saleList=el('div','receipt-sale-list');
+      const saleSelection=el('div','field field-full');saleSelection.append(el('span','','Vendas disponíveis para o corretor'),el('small','field-hint','Selecione até 50 vendas do mesmo corretor para consolidar no recibo.'));
+      const saleTools=el('div','receipt-sale-tools');const selectAll=button('Selecionar disponíveis','button-small',()=>{const list=scopedSales();list.slice(0,50).forEach((item)=>selectedIds.add(String(item.id)));if(list.length>50)toast('O limite por recibo é de 50 vendas.','error');renderSaleOptions();refreshPreview();});const clearSelection=button('Limpar seleção','button-small',()=>{selectedIds.clear();renderSaleOptions();refreshPreview();});selectAll.type='button';clearSelection.type='button';saleTools.append(selectAll,clearSelection);saleSelection.append(saleTools,saleList);
+      const sdr=makeSelect([{label:'Selecione o SDR para vendas sem vínculo cadastrado',value:''},...sdrs.map((item)=>({value:item.id,label:item.name}))],'');sdr.disabled=true;
+      const sdrSummary=el('p','field-hint','Vendas com participação do SDR já vinculado mantêm esse beneficiário. Se alguma venda estiver marcada como participação SDR, mas sem nome cadastrado, selecione aqui o SDR que será vinculado.');
       const defaultManager=state.user&&managers.some((item)=>String(item.id)===String(state.user.id))?state.user.id:'';
       const manager=makeSelect([{label:'Selecione o gerente signatário',value:''},...managers.map((item)=>({value:item.id,label:item.name}))],defaultManager);manager.required=true;
       const withholding=document.createElement('input');withholding.type='number';withholding.min='0';withholding.max='100';withholding.step='0.0001';withholding.required=true;withholding.value='0';
       const paymentDate=document.createElement('input');paymentDate.type='date';paymentDate.required=true;paymentDate.value='';
       const notes=document.createElement('textarea');notes.maxLength=3000;notes.rows=3;
-      const preview=el('div','ops-note','Selecione uma venda para conferir os valores e as assinaturas requeridas.');
-      function syncSaleParties(){
-        const item=available.find((row)=>row.id===sale.value);
-        if(!item){broker.value='';sdr.value='';sdr.disabled=true;sdrSummary.textContent='Selecione uma venda. Se ela tiver participação do SDR, escolha o SDR que receberá o segundo recibo.';refreshPreview();return;}
-        broker.value=String(item.brokerId||'');
-        sdr.disabled=item.isSdrSale!==true;
-        if(item.isSdrSale===true){sdr.value=String(item.sdrId||'');sdrSummary.textContent='Esta venda tem participação do SDR. O corretor e o SDR receberão recibos separados, cada um pela metade da comissão bruta.';}
-        else{sdr.value='';sdrSummary.textContent='Esta venda não tem participação do SDR. Será gerado somente o recibo integral do corretor.';}
-        refreshPreview();
+      const preview=el('div','ops-note','Selecione um corretor e marque as vendas para conferir os valores consolidados e os recibos previstos.');
+      function scopedSales(){return available.filter((item)=>String(item.brokerId)===String(broker.value));}
+      function selectedSales(){return available.filter((item)=>selectedIds.has(String(item.id)));}
+      function renderSaleOptions(){
+        saleList.replaceChildren();const list=scopedSales();selectAll.disabled=!broker.value||!list.length;clearSelection.disabled=!selectedIds.size;
+        if(!broker.value){saleList.appendChild(el('p','receipt-sale-empty','Escolha o corretor responsável para carregar as vendas disponíveis.'));return;}
+        if(!list.length){saleList.appendChild(el('p','receipt-sale-empty','Este corretor não tem vendas disponíveis para gerar recibo.'));return;}
+        list.forEach((item)=>{const recipients=receiptsBySale.get(String(item.id))||new Set();const brokerDone=recipients.has(String(item.brokerId));const sdrDone=item.isSdrSale===true&&item.sdrId?recipients.has(String(item.sdrId)):false;const check=document.createElement('input');check.type='checkbox';check.checked=selectedIds.has(String(item.id));check.setAttribute('aria-label','Selecionar venda '+(item.processNumber||item.internalNumber||item.buyerName));
+          const text=el('span','receipt-sale-option-text');text.append(el('strong','',[item.processNumber||item.internalNumber||'Venda',item.buyerName].filter(Boolean).join(' · ')),el('small','',[item.developmentName,item.unit,brl(item.unitValue)].filter(Boolean).join(' · ')));
+          const badges=el('span','receipt-sale-badges');if(brokerDone)badges.appendChild(el('small','receipt-sale-badge','Recibo do corretor já ativo'));if(item.isSdrSale===true&&sdrDone)badges.appendChild(el('small','receipt-sale-badge','Recibo do SDR já ativo'));
+          const label=el('label','receipt-sale-option');label.append(check,text);if(badges.children.length)label.appendChild(badges);check.addEventListener('change',()=>{if(check.checked&&selectedIds.size>=50){check.checked=false;toast('O limite por recibo é de 50 vendas.','error');return;}if(check.checked)selectedIds.add(String(item.id));else selectedIds.delete(String(item.id));refreshPreview();});saleList.appendChild(label);
+        });
       }
+      function syncSdrField(){const chosen=selectedSales();const needsDefault=chosen.some((item)=>item.isSdrSale===true&&!item.sdrId);sdr.disabled=!needsDefault;if(!needsDefault)sdr.value='';sdrSummary.textContent=needsDefault?'Uma ou mais vendas têm participação SDR sem pessoa vinculada. Escolha o SDR para gravar esse vínculo antes de gerar os recibos.':'Os SDRs já vinculados serão mantidos em suas vendas. Vendas sem participação do SDR geram somente a parte do corretor.';}
       function refreshPreview(){
-        const item=available.find((row)=>row.id===sale.value);
-        if(!item){preview.textContent='Selecione uma venda para conferir os valores e as assinaturas requeridas.';return;}
-        const gross=Math.round(Number(item.unitValue||0)*2.5)/100;
-        const rate=Number(withholding.value||0);const withheld=Math.round(gross*rate)/100;const net=Math.max(0,Math.round((gross-withheld)*100)/100);
-        const hasSdr=item.isSdrSale===true;const brokerGross=hasSdr?Math.floor(gross*100/2)/100:gross;const sdrGross=hasSdr?Math.round((gross-brokerGross)*100)/100:0;const brokerAmount=hasSdr?Math.floor(net*100/2)/100:net;const sdrAmount=hasSdr?Math.round((net-brokerAmount)*100)/100:0;
-        preview.textContent='Comissão bruta total (2,5%): '+brl(gross)+' · desconto total: '+brl(withheld)+' ('+rate+'%) · valor líquido total: '+brl(net)+(hasSdr?' · recibo do corretor: '+brl(brokerGross)+' bruto / '+brl(brokerAmount)+' líquido · recibo do SDR: '+brl(sdrGross)+' bruto / '+brl(sdrAmount)+' líquido. Cada um assina o próprio recibo com o gerente.':' · recibo do corretor: '+brl(gross)+' bruto / '+brl(net)+' líquido. Assinam o corretor e o gerente.');
+        const chosen=selectedSales();syncSdrField();if(!chosen.length){preview.textContent='Marque uma ou mais vendas para conferir os totais e os beneficiários.';return;}
+        const rate=Number(withholding.value||0);const brokerTotals={gross:0,withheld:0,net:0};const sdrTotals=new Map();let base=0;let fullGross=0;let fullWithheld=0;let fullNet=0;
+        chosen.forEach((item)=>{const baseCents=Math.round(Number(item.unitValue||0)*100);const grossCents=Math.round(baseCents*250/10000);const withheldCents=Math.round(grossCents*rate/100);const netCents=grossCents-withheldCents;const hasSdr=item.isSdrSale===true;const split=(amount)=>{const first=hasSdr?Math.floor(amount/2):amount;return[first,hasSdr?amount-first:0];};const gross=split(grossCents);const net=split(netCents);const discount=[gross[0]-net[0],gross[1]-net[1]];base+=baseCents/100;fullGross+=grossCents/100;fullWithheld+=withheldCents/100;fullNet+=netCents/100;brokerTotals.gross+=gross[0]/100;brokerTotals.withheld+=discount[0]/100;brokerTotals.net+=net[0]/100;if(hasSdr){const sdrId=item.sdrId||sdr.value;const name=sdrs.find((person)=>String(person.id)===String(sdrId))?.name||'SDR a selecionar';const total=sdrTotals.get(name)||{gross:0,withheld:0,net:0};total.gross+=gross[1]/100;total.withheld+=discount[1]/100;total.net+=net[1]/100;sdrTotals.set(name,total);}});
+        const rateLabel=String(rate).replace('.',',');const parts=['VGV consolidado: '+brl(base),'comissão bruta (2,5%): '+brl(fullGross),'desconto total ('+rateLabel+'%): '+brl(fullWithheld),'líquido total: '+brl(fullNet),'corretor: '+brl(brokerTotals.gross)+' bruto − '+brl(brokerTotals.withheld)+' desconto = '+brl(brokerTotals.net)+' líquido'];sdrTotals.forEach((values,name)=>parts.push(name+': '+brl(values.gross)+' bruto − '+brl(values.withheld)+' desconto = '+brl(values.net)+' líquido'));preview.textContent=chosen.length+' venda(s) selecionada(s) · '+parts.join(' · ')+' · cada beneficiário assina seu recibo com o gerente.';
       }
-      addField(grid,'Venda',sale,true);addField(grid,'Corretor responsável',broker);addField(grid,'SDR participante (quando aplicável)',sdr);addField(grid,'Participação do SDR',sdrSummary,true);addField(grid,'Gerente signatário',manager);addField(grid,'Alíquota de desconto (%)',withholding);addField(grid,'Data prevista para pagamento',paymentDate);addField(grid,'Observações (opcional)',notes,true);grid.appendChild(preview);form.appendChild(grid);
-      sale.addEventListener('change',syncSaleParties);sdr.addEventListener('change',refreshPreview);withholding.addEventListener('input',refreshPreview);
+      addField(grid,'Corretor responsável',broker);grid.appendChild(saleSelection);addField(grid,'SDR para vendas sem vínculo cadastrado (quando necessário)',sdr);addField(grid,'Participação do SDR',sdrSummary,true);addField(grid,'Gerente signatário',manager);addField(grid,'Alíquota de desconto (%)',withholding);addField(grid,'Data prevista para pagamento',paymentDate);addField(grid,'Observações (opcional)',notes,true);grid.appendChild(preview);form.appendChild(grid);
+      broker.addEventListener('change',()=>{const validIds=new Set(scopedSales().map((item)=>String(item.id)));[...selectedIds].forEach((id)=>{if(!validIds.has(id))selectedIds.delete(id);});renderSaleOptions();refreshPreview();});sdr.addEventListener('change',refreshPreview);withholding.addEventListener('input',refreshPreview);renderSaleOptions();refreshPreview();
       const error=el('p','form-error');error.setAttribute('role','alert');form.appendChild(error);const actions=el('div','modal-actions');actions.append(button('Cancelar','',()=>dialog.close()));const save=el('button','button button-primary','Gerar PDF');save.type='submit';actions.appendChild(save);form.appendChild(actions);box.appendChild(form);content.appendChild(box);
-      form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const selected=available.find((item)=>item.id===sale.value);if(!selected)throw new Error('Selecione uma venda.');if(!broker.value||String(broker.value)!==String(selected.brokerId))throw new Error('Selecione o corretor responsável indicado na venda.');if(selected.isSdrSale===true&&!sdr.value)throw new Error('Selecione o SDR participante para gerar os dois recibos.');if(selected.isSdrSale===false&&sdr.value)throw new Error('Remova o SDR: esta venda está cadastrada sem participação dele.');const result=await callApi('apiCreateCommissionReceipt',state.token,{saleId:sale.value,brokerId:broker.value,sdrId:sdr.value,managerId:manager.value,withholdingRatePct:withholding.value,paymentDate:paymentDate.value,notes:notes.value});if(!result||result.ok!==true)throw new Error(result&&result.message||'Não foi possível gerar o recibo.');dialog.close();toast(result.message,'success');await renderCommissionDocuments();}catch(err){error.textContent=err.message||'Não foi possível gerar o recibo.';}finally{save.disabled=false;}});
+      form.addEventListener('submit',async(event)=>{event.preventDefault();error.textContent='';save.disabled=true;try{const chosen=selectedSales();if(!chosen.length)throw new Error('Selecione pelo menos uma venda.');if(chosen.some((item)=>String(item.brokerId)!==String(broker.value)))throw new Error('Todas as vendas devem pertencer ao corretor selecionado.');if(chosen.some((item)=>item.isSdrSale===true&&!item.sdrId)&&!sdr.value)throw new Error('Selecione o SDR para as vendas com participação sem vínculo cadastrado.');const result=await callApi('apiCreateCommissionReceipt',state.token,{saleIds:chosen.map((item)=>item.id),brokerId:broker.value,sdrId:sdr.value,managerId:manager.value,withholdingRatePct:withholding.value,paymentDate:paymentDate.value,notes:notes.value});if(!result||result.ok!==true)throw new Error(result&&result.message||'Não foi possível gerar o recibo.');dialog.close();toast(result.message,'success');await renderCommissionDocuments();}catch(err){error.textContent=err.message||'Não foi possível gerar o recibo.';}finally{save.disabled=false;}});
       if(!available.length){error.textContent='Não há vendas ativas, sem cancelamento ou recebimento, disponíveis para gerar recibo.';save.disabled=true;}dialog.showModal();
     }catch(error){handleFailure(error);}
   }
