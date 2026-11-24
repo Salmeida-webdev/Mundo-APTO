@@ -3382,6 +3382,9 @@ async function apiArchiveCommissionDocument(token, documentId) {
   if (doc.archived_at) return { ok: false, message: 'Documento já arquivado.' };
   const stamp = now();
   await dbRequest('crm_commission_documents', { method: 'PATCH', query: { id: `eq.${doc.id}`, archived_at: 'is.null' }, prefer: 'return=minimal', body: { archived_at: stamp, archived_by: actor.id, updated_at: stamp, updated_by: actor.id } });
+  if (doc.document_type === 'commission_receipt') {
+    await dbRequest('crm_commission_document_sales', { method: 'PATCH', query: { commission_document_id: `eq.${doc.id}`, archived_at: 'is.null' }, prefer: 'return=minimal', body: { archived_at: stamp } });
+  }
   await audit(actor, 'commission_document.archive', 'commission_document', doc.id, ['archived_at','archived_by'], { archivedAt: null }, { archivedAt: stamp, documentType: doc.document_type, fileName: doc.original_name });
   return { ok: true, message: 'Documento arquivado. O histórico permanece preservado e pode ser restaurado pela gestão.' };
 }
@@ -3397,7 +3400,7 @@ async function apiRestoreCommissionDocument(token, documentId) {
     const saleIds = [...new Set((Array.isArray(associations) ? associations : []).map((item) => String(item.sale_id)).filter(isUuid))];
     if (saleIds.length) {
       const active = await dbRequest('crm_commission_document_sales', { query: {
-        select: 'id', sale_id: `in.(${saleIds.join(',')})`, recipient_id: `eq.${doc.recipient_id || doc.broker_id}`, archived_at: 'is.null', limit: 1
+        select: 'id', sale_id: `in.(${saleIds.join(',')})`, recipient_id: `eq.${doc.recipient_id || doc.broker_id}`, commission_document_id: `neq.${doc.id}`, archived_at: 'is.null', limit: 1
       } });
       if (Array.isArray(active) && active.length) return { ok: false, message: 'Já existe um recibo ativo para uma ou mais vendas deste documento. Arquive os recibos ativos antes de restaurá-lo.' };
     } else if (doc.sale_id) {
@@ -3408,6 +3411,9 @@ async function apiRestoreCommissionDocument(token, documentId) {
     }
   }
   const stamp = now();
+  if (doc.document_type === 'commission_receipt') {
+    await dbRequest('crm_commission_document_sales', { method: 'PATCH', query: { commission_document_id: `eq.${doc.id}`, archived_at: 'not.is.null' }, prefer: 'return=minimal', body: { archived_at: null } });
+  }
   await dbRequest('crm_commission_documents', { method: 'PATCH', query: { id: `eq.${doc.id}`, archived_at: 'not.is.null' }, prefer: 'return=minimal', body: { archived_at: null, archived_by: null, updated_at: stamp, updated_by: actor.id } });
   await audit(actor, 'commission_document.restore', 'commission_document', doc.id, ['archived_at','archived_by'], { archivedAt: doc.archived_at }, { archivedAt: null });
   return { ok: true, message: 'Documento restaurado com os arquivos e histórico preservados.' };

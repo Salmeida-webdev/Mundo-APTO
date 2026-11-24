@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const root = path.resolve(__dirname, '..');
 const { default: handler } = require('../netlify/functions/crm.mjs');
@@ -40,6 +41,7 @@ const rows = {
   crm_contracts: [],
   crm_contract_documents: [],
   crm_commission_documents: [],
+  crm_commission_document_sales: [],
   crm_production_entries: [],
   crm_production_goals: [],
   crm_attendance_records: [],
@@ -237,6 +239,7 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
         const entityFilter = url.searchParams.get('entity_type');
         const brokerFilter = url.searchParams.get('broker_id');
         const saleFilter = url.searchParams.get('sale_id');
+        const commissionDocumentFilter = url.searchParams.get('commission_document_id');
         const contractFilter = url.searchParams.get('contract_id');
         const documentTypeFilter = url.searchParams.get('document_type');
         const cycleFilter = url.searchParams.get('cycle');
@@ -262,6 +265,8 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
         const sessionVersionFilter=url.searchParams.get('session_version');if(sessionVersionFilter&&sessionVersionFilter.startsWith('eq.'))filtered=filtered.filter((row)=>String(row.session_version||0)===sessionVersionFilter.slice(3));
         if (saleFilter && saleFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.sale_id) === saleFilter.slice(3));
         if (saleFilter && saleFilter.startsWith('in.(')) { const saleIds = new Set(saleFilter.slice(4, -1).split(',').map((value) => value.replace(/^"|"$/g, ''))); filtered = filtered.filter((row) => saleIds.has(String(row.sale_id))); }
+        if (commissionDocumentFilter && commissionDocumentFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.commission_document_id) === commissionDocumentFilter.slice(3));
+        if (commissionDocumentFilter && commissionDocumentFilter.startsWith('neq.')) filtered = filtered.filter((row) => String(row.commission_document_id) !== commissionDocumentFilter.slice(4));
         if (contractFilter && contractFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.contract_id) === contractFilter.slice(3));
         if (documentTypeFilter && documentTypeFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.document_type) === documentTypeFilter.slice(3));
         if (cycleFilter && cycleFilter.startsWith('eq.')) filtered = filtered.filter((row) => String(row.cycle) === cycleFilter.slice(3));
@@ -293,6 +298,14 @@ function mockEnvironmentAndFetch(t, { role = 'Corretor', userId = userIdBrokerA,
         return Response.json(filtered, { headers });
       }
       if (method === 'PATCH') {
+        const commissionDocumentFilter = url.searchParams.get('commission_document_id') || '';
+        const associationArchiveFilter = url.searchParams.get('archived_at') || '';
+        if (table === 'crm_commission_document_sales' && commissionDocumentFilter.startsWith('eq.')) {
+          const entries=list.filter((item)=>String(item.commission_document_id)===commissionDocumentFilter.slice(3)
+            && (associationArchiveFilter==='is.null'?!item.archived_at:associationArchiveFilter==='not.is.null'?Boolean(item.archived_at):true));
+          for(const entry of entries)Object.assign(entry,JSON.parse(options.body));
+          return Response.json(entries);
+        }
         const idFilter = url.searchParams.get('id') || '';
         const id = idFilter.slice(3);
         const userFilter = url.searchParams.get('user_id') || '';
@@ -438,29 +451,31 @@ test('lista operacional atualiza corretores ativos sem expor a equipe a outros c
   assert.equal((await invoke('apiListOperationBrokers',[restricted.token],restricted.token)).response.status,403);
 });
 
-test('corretor lança produção somente na data vigente; gestão pode corrigir datas passadas e tudo fica auditado', async (t) => {
+test('corretor pode lançar produção em qualquer data do mês vigente sem limite diário; gestão pode corrigir histórico e tudo fica auditado', async (t) => {
   const originals={entries:rows.crm_production_entries.slice(),audit:rows.crm_audit.slice()};
   t.after(()=>{rows.crm_production_entries.splice(0,rows.crm_production_entries.length,...originals.entries);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
   const brokerA=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerA,email:'a@example.test'});
-  const today=operationToday();const oldDate=operationShiftDate(today,-3);const futureDate=operationShiftDate(today,1);
-  const historicAttempt=await invoke('apiSaveProduction',[brokerA.token,{workDate:oldDate,prospections:4}],brokerA.token);
+  const today=operationToday();const monthStart=today.slice(0,7)+'-01';const oldDate=today>monthStart?operationShiftDate(today,-1):today;const priorMonthDate=operationShiftDate(monthStart,-1);const futureDate=operationShiftDate(today,1);
+  const historicAttempt=await invoke('apiSaveProduction',[brokerA.token,{workDate:oldDate,prospections:4,interactions:0,appointments:0,visits:0,sales:0}],brokerA.token);
+  const priorMonthAttempt=await invoke('apiSaveProduction',[brokerA.token,{workDate:priorMonthDate,prospections:4,interactions:0,appointments:0,visits:0,sales:0}],brokerA.token);
   const futureAttempt=await invoke('apiSaveProduction',[brokerA.token,{workDate:futureDate,prospections:4}],brokerA.token);
-  assert.equal(historicAttempt.body.ok,false);assert.match(historicAttempt.body.message,/somente na data de hoje/i);
+  assert.equal(historicAttempt.body.ok,true,JSON.stringify(historicAttempt.body));
+  assert.equal(priorMonthAttempt.body.ok,false);assert.match(priorMonthAttempt.body.message,/dentro do mês vigente/i);
   assert.equal(futureAttempt.body.ok,false);assert.match(futureAttempt.body.message,/data válida/i);
   const payload={workDate:today,prospections:4,interactions:3,appointments:2,visits:1,sales:0,notes:'Primeiro lançamento do dia'};
   const first=await invoke('apiSaveProduction',[brokerA.token,payload],brokerA.token);
   const second=await invoke('apiSaveProduction',[brokerA.token,{...payload,prospections:2,notes:'Segundo lançamento no mesmo dia'}],brokerA.token);
   assert.equal(first.body.ok,true,JSON.stringify(first.body));
   assert.equal(second.body.ok,true,JSON.stringify(second.body));
-  assert.equal(rows.crm_production_entries.length,2);
+  assert.equal(rows.crm_production_entries.length,3,'o corretor pode criar lançamentos em datas diferentes do mês vigente');
   const edited=await invoke('apiSaveProduction',[brokerA.token,{...payload,id:first.body.id,prospections:5,notes:'Correção feita depois'}],brokerA.token);
   assert.equal(edited.body.ok,true,JSON.stringify(edited.body));
   assert.equal(rows.crm_audit.at(-1).action,'operations.production.update');
   assert.equal(rows.crm_audit.at(-1).before_values.prospections,4);
   assert.equal(rows.crm_audit.at(-1).after_values.prospections,5);
   const dashboard=await invoke('apiGetOperationsDashboard',[brokerA.token,{period:'day'}],brokerA.token);
-  assert.equal(dashboard.body.recentOwnEntries.length,2);
-  assert.ok(dashboard.body.recentOwnEntries.every((item)=>item.workDate===today));
+  assert.ok(dashboard.body.recentOwnEntries.some((item)=>item.workDate===today));
+  assert.ok(dashboard.body.recentOwnEntries.some((item)=>item.workDate===oldDate));
   const cancelled=await invoke('apiArchiveProduction',[brokerA.token,second.body.id],brokerA.token);
   assert.equal(cancelled.body.ok,true,JSON.stringify(cancelled.body));
   assert.ok(rows.crm_production_entries.find((row)=>row.id===second.body.id).deleted_at);
@@ -1456,8 +1471,8 @@ test('fase do repasse mantém a lista anterior e acrescenta as 16 opções envia
 });
 
 test('recibos e comprovantes respeitam perfis, carteira, assinatura externa e pagamento integral', async (t) => {
-  const originals={sales:structuredClone(rows.crm_sales),documents:structuredClone(rows.crm_commission_documents),audit:structuredClone(rows.crm_audit),profiles:structuredClone(rows.crm_user_contract_profiles)};
-  t.after(()=>{rows.crm_sales.splice(0,rows.crm_sales.length,...originals.sales);rows.crm_commission_documents.splice(0,rows.crm_commission_documents.length,...originals.documents);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);rows.crm_user_contract_profiles.splice(0,rows.crm_user_contract_profiles.length,...originals.profiles);});
+  const originals={sales:structuredClone(rows.crm_sales),documents:structuredClone(rows.crm_commission_documents),documentSales:structuredClone(rows.crm_commission_document_sales),audit:structuredClone(rows.crm_audit),profiles:structuredClone(rows.crm_user_contract_profiles)};
+  t.after(()=>{rows.crm_sales.splice(0,rows.crm_sales.length,...originals.sales);rows.crm_commission_documents.splice(0,rows.crm_commission_documents.length,...originals.documents);rows.crm_commission_document_sales.splice(0,rows.crm_commission_document_sales.length,...originals.documentSales);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);rows.crm_user_contract_profiles.splice(0,rows.crm_user_contract_profiles.length,...originals.profiles);});
   const saleId='10000000-0000-4000-8000-000000000051';
   const nonSdrSaleId='10000000-0000-4000-8000-000000000052';
   rows.crm_sales.push({id:saleId,broker_id:userIdBrokerA,sdr_id:userIdSdr,development_id:'E001',unit_value:314609.34,process_number:'PROC-51',buyer_name:'Compradora de teste',unit:'305',sold_at:'2026-10-29',sale_status:'Contabilizado',repass_status:'FASE DO REGISTRO',is_sdr_sale:true,deleted_at:null});
@@ -1595,6 +1610,33 @@ test('recibos e comprovantes respeitam perfis, carteira, assinatura externa e pa
   assert.ok(rows.crm_audit.some((item)=>item.action==='commission_receipt.payment_completed'));
 });
 
+test('recibo consolida mais de uma venda do mesmo corretor em um PDF e mantém vínculo individual por venda', async (t) => {
+  const originals={sales:structuredClone(rows.crm_sales),documents:structuredClone(rows.crm_commission_documents),documentSales:structuredClone(rows.crm_commission_document_sales),audit:structuredClone(rows.crm_audit),profiles:structuredClone(rows.crm_user_contract_profiles)};
+  t.after(()=>{rows.crm_sales.splice(0,rows.crm_sales.length,...originals.sales);rows.crm_commission_documents.splice(0,rows.crm_commission_documents.length,...originals.documents);rows.crm_commission_document_sales.splice(0,rows.crm_commission_document_sales.length,...originals.documentSales);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);rows.crm_user_contract_profiles.splice(0,rows.crm_user_contract_profiles.length,...originals.profiles);});
+  const saleIds=['10000000-0000-4000-8000-000000000061','10000000-0000-4000-8000-000000000062'];
+  rows.crm_sales.push(
+    {id:saleIds[0],broker_id:userIdBrokerA,sdr_id:null,development_id:'E001',unit_value:100000,process_number:'PROC-61',buyer_name:'Cliente Um',unit:'101',sold_at:'2026-11-10',sale_status:'Contabilizado',repass_status:'FASE DO REGISTRO',is_sdr_sale:false,deleted_at:null},
+    {id:saleIds[1],broker_id:userIdBrokerA,sdr_id:null,development_id:'E001',unit_value:200000,process_number:'PROC-62',buyer_name:'Cliente Dois',unit:'202',sold_at:'2026-11-11',sale_status:'Contabilizado',repass_status:'FASE DO REGISTRO',is_sdr_sale:false,deleted_at:null}
+  );
+  rows.crm_user_contract_profiles.push({user_id:userIdManager,cpf:'333.333.333-33',cnpj:'12.345.678/0001-90',creci:'CRECI-GER-1',address:'Avenida da Gestão, 20'});
+  const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
+  const result=await invoke('apiCreateCommissionReceipt',[manager.token,{saleIds,brokerId:userIdBrokerA,managerId:userIdManager,withholdingRatePct:0,paymentDate:'2026-12-05',notes:'Consolidado'}],manager.token);
+  assert.equal(result.body.ok,true,JSON.stringify(result.body));
+  assert.equal(result.body.documents.length,1,'duas vendas do mesmo beneficiário viram um recibo');
+  assert.equal(result.body.documents[0].commissionBase,300000);
+  assert.equal(result.body.documents[0].grossCommission,7500);
+  assert.deepEqual(new Set(result.body.documents[0].sales.map((item)=>item.id)),new Set(saleIds));
+  assert.equal(rows.crm_commission_document_sales.length,2);
+  assert.ok(rows.crm_commission_document_sales.every((item)=>item.recipient_id===userIdBrokerA));
+  const pdf=manager.calls.find((call)=>call.path.includes('/object/crm-finance-documents/generated/'));
+  assert.ok(pdf,'o consolidado deve gerar um único PDF');
+  const pdfText=pdf.body.replace(/\\([()\\])/g,'$1');
+  assert.match(pdfText,/Cliente Um/);
+  assert.match(pdfText,/Cliente Dois/);
+  const duplicate=await invoke('apiCreateCommissionReceipt',[manager.token,{saleIds,brokerId:userIdBrokerA,managerId:userIdManager,withholdingRatePct:0,paymentDate:'2026-12-05'}],manager.token);
+  assert.equal(duplicate.body.ok,false,'não permite duplicar recibos ativos das mesmas vendas para o mesmo beneficiário');
+});
+
 test('falha ao gerar link de upload não grava caminho inválido no histórico financeiro', async (t) => {
   const originals={documents:structuredClone(rows.crm_commission_documents),audit:structuredClone(rows.crm_audit)};
   t.after(()=>{rows.crm_commission_documents.splice(0,rows.crm_commission_documents.length,...originals.documents);rows.crm_audit.splice(0,rows.crm_audit.length,...originals.audit);});
@@ -1644,12 +1686,12 @@ test('agenda cria, vincula, atualiza e cancela com controle de carteira e bloque
   const date=operationToday();
   const linkedLeadId='10000000-0000-4000-8000-000000000140';
   rows.crm_leads.push({id:linkedLeadId,name:'Lead UUID de teste',phone:'11999990140',development_id:'E001',notes:'',sdr_feedback:'',status:'Em contato',broker_id:userIdBrokerA,created_at:`${date}T10:00:00Z`,created_by:userIdBrokerA,updated_at:`${date}T10:00:00Z`,updated_by:userIdBrokerA,deleted_at:null});
-  rows.crm_appointments.push({id:'10000000-0000-4000-8000-000000000111',broker_id:userIdBrokerA,development_id:'E001',client_name:'Reserva existente',stand:'Stand Centro',starts_at:`${date}T10:00:00-03:00`,ends_at:`${date}T11:00:00-03:00`,status:'Agendado',notes:'',deleted_at:null});
+  rows.crm_appointments.push({id:'10000000-0000-4000-8000-000000000111',broker_id:userIdBrokerA,development_id:null,client_name:'Reserva existente',stand:'Stand Centro',starts_at:`${date}T10:00:00-03:00`,ends_at:`${date}T11:00:00-03:00`,status:'Agendado',notes:'',deleted_at:null});
   const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test'});
-  const conflict=await invoke('apiSaveAppointment',[manager.token,{clientName:'Conflito de horário',developmentId:'E001',brokerId:userIdBrokerA,stand:'Stand Centro',startsAt:`${date}T10:30:00-03:00`,endsAt:`${date}T11:30:00-03:00`,status:'Agendado'}],manager.token);
+  const conflict=await invoke('apiSaveAppointment',[manager.token,{clientName:'Conflito de horário',brokerId:userIdBrokerA,stand:'Stand Centro',startsAt:`${date}T10:30:00-03:00`,endsAt:`${date}T11:30:00-03:00`,status:'Agendado'}],manager.token);
   assert.equal(conflict.body.ok,false);
   assert.match(conflict.body.message,/horário está ocupado/i);
-  const created=await invoke('apiSaveAppointment',[manager.token,{clientName:'Cliente vinculado',leadId:linkedLeadId,developmentId:'E001',brokerId:userIdBrokerA,stand:'Stand Centro',startsAt:`${date}T12:00:00-03:00`,endsAt:`${date}T13:00:00-03:00`,status:'Agendado',notes:'Visita confirmada'}],manager.token);
+  const created=await invoke('apiSaveAppointment',[manager.token,{clientName:'Cliente vinculado',leadId:linkedLeadId,brokerId:userIdBrokerA,stand:'Stand Centro',startsAt:`${date}T12:00:00-03:00`,endsAt:`${date}T13:00:00-03:00`,status:'Agendado',notes:'Visita confirmada'}],manager.token);
   assert.equal(created.body.ok,true,JSON.stringify(created.body));
   assert.match(created.body.message,/produção continuam sendo lançados manualmente/i);
   const saved=rows.crm_appointments.find((item)=>item.id===created.body.appointmentId);
@@ -1657,7 +1699,7 @@ test('agenda cria, vincula, atualiza e cancela com controle de carteira e bloque
   assert.equal(rows.crm_leads.find((item)=>item.id===linkedLeadId).status,'Atendimento agendado');
   assert.ok(rows.crm_audit.some((item)=>item.action==='appointment.create'&&item.entity_id===saved.id));
   const brokerB=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerB,email:'b@example.test'});
-  assert.equal((await invoke('apiSaveAppointment',[brokerB.token,{id:saved.id,clientName:'Tentativa cruzada',developmentId:'E001',brokerId:userIdBrokerA,startsAt:saved.starts_at,endsAt:saved.ends_at,status:'Agendado'}],brokerB.token)).response.status,403);
+  assert.equal((await invoke('apiSaveAppointment',[brokerB.token,{id:saved.id,clientName:'Tentativa cruzada',brokerId:userIdBrokerA,startsAt:saved.starts_at,endsAt:saved.ends_at,status:'Agendado'}],brokerB.token)).response.status,403);
   const updated=await invoke('apiSaveAppointment',[manager.token,{id:saved.id,clientName:saved.client_name,leadId:saved.lead_id,developmentId:saved.development_id,brokerId:saved.broker_id,stand:saved.stand,startsAt:saved.starts_at,endsAt:saved.ends_at,status:'Realizado',notes:saved.notes}],manager.token);
   assert.equal(updated.body.ok,true,JSON.stringify(updated.body));
   assert.equal(rows.crm_leads.find((item)=>item.id===linkedLeadId).status,'Atendimento realizado');
@@ -1665,7 +1707,7 @@ test('agenda cria, vincula, atualiza e cancela com controle de carteira e bloque
   const cancelled=await invoke('apiArchiveAppointment',[manager.token,saved.id],manager.token);
   assert.equal(cancelled.body.ok,true,JSON.stringify(cancelled.body));
   assert.equal(saved.status,'Cancelado');
-  const unexpected=await invoke('apiSaveAppointment',[manager.token,{clientName:'Campos extras',developmentId:'E001',brokerId:userIdBrokerA,startsAt:`${date}T15:00:00-03:00`,endsAt:`${date}T16:00:00-03:00`,status:'Agendado',isAdmin:true}],manager.token);
+  const unexpected=await invoke('apiSaveAppointment',[manager.token,{clientName:'Campos extras',brokerId:userIdBrokerA,startsAt:`${date}T15:00:00-03:00`,endsAt:`${date}T16:00:00-03:00`,status:'Agendado',isAdmin:true}],manager.token);
   assert.equal(unexpected.body.ok,false);
 });
 
@@ -1674,7 +1716,7 @@ test('notificações da agenda ficam no CRM e chegam só à gestão e ao correto
   t.after(()=>{rows.crm_in_app_notifications.splice(0,rows.crm_in_app_notifications.length,...originals.notifications);rows.crm_appointments.splice(0,rows.crm_appointments.length,...originals.appointments);});
   const date=operationShiftDate(operationToday(),1);
   const broker=mockEnvironmentAndFetch(t,{role:'Corretor',userId:userIdBrokerA,email:'a@example.test'});
-  const created=await invoke('apiSaveAppointment',[broker.token,{clientName:'Atendimento para notificação',developmentId:'E001',startsAt:`${date}T12:00:00-03:00`,endsAt:`${date}T13:00:00-03:00`,status:'Agendado'}],broker.token);
+  const created=await invoke('apiSaveAppointment',[broker.token,{clientName:'Atendimento para notificação',startsAt:`${date}T12:00:00-03:00`,endsAt:`${date}T13:00:00-03:00`,status:'Agendado'}],broker.token);
   assert.equal(created.body.ok,true,JSON.stringify(created.body));
   const notices=rows.crm_in_app_notifications.filter((item)=>item.appointment_id===created.body.appointmentId);
   assert.deepEqual(new Set(notices.map((item)=>item.recipient_id)),new Set([userIdBrokerA,userIdManager,userIdAssistant]));
@@ -1690,7 +1732,7 @@ test('notificações da agenda ficam no CRM e chegam só à gestão e ao correto
 test('constraint do banco protege agendamentos simultâneos e devolve conflito amigável', async (t) => {
   const date=operationToday();
   const manager=mockEnvironmentAndFetch(t,{role:'Gerente',userId:userIdManager,email:'gestao@example.test',appointmentConstraintConflict:true});
-  const response=await invoke('apiSaveAppointment',[manager.token,{clientName:'Reserva concorrente',developmentId:'E001',brokerId:userIdBrokerA,stand:'',startsAt:`${date}T16:00:00-03:00`,endsAt:`${date}T17:00:00-03:00`,status:'Agendado'}],manager.token);
+  const response=await invoke('apiSaveAppointment',[manager.token,{clientName:'Reserva concorrente',brokerId:userIdBrokerA,stand:'',startsAt:`${date}T16:00:00-03:00`,endsAt:`${date}T17:00:00-03:00`,status:'Agendado'}],manager.token);
   assert.equal(response.response.status,409);
   assert.match(response.body.message,/acabou de ser reservado/i);
 });
@@ -2055,12 +2097,25 @@ test('migration Sharks acrescenta produção, metas, frequência e permissões s
 
 test('build estático não deixa marcações Apps Script nem credenciais no HTML publicado', () => {
   const html = fs.readFileSync(path.join(root, 'public/index.html'), 'utf8');
+  const client = fs.readFileSync(path.join(root, 'public/client.js'), 'utf8');
+  const netlify = fs.readFileSync(path.join(root, 'netlify.toml'), 'utf8');
   assert.doesNotMatch(html, /google\.script|<\?!=|<\?=|__MUNDO_APTO_LOGO_DATA_URI__/);
-  assert.match(html, /Ativar acesso administrador/);
-  assert.match(html, /Exportar documentos CSV/);
-  assert.match(html, /Valor da unidade \(R\$\)/);
-  assert.match(html, /Percentual da comissão total/);
-  assert.match(html, /Nº da proposta \/ pasta/);
+  assert.match(html, /<script src="\/client\.js" defer><\/script>/);
+  assert.doesNotMatch(html, /<script\b(?![^>]*\bsrc=)[^>]*>/i);
+  assert.doesNotMatch(client, /<\/?script\b/i);
+  assert.doesNotThrow(() => new vm.Script(client, { filename: 'public/client.js' }));
+  const csp = netlify.split('\n').find((line) => line.includes('Content-Security-Policy')) || '';
+  assert.match(csp, /script-src 'self'/);
+  assert.doesNotMatch(csp, /script-src[^;]*'unsafe-inline'/);
+  assert.match(csp, /cdn\.jsdelivr\.net\/npm\/@supabase\/supabase-js\@2\.119\.0\/dist\/umd\/supabase\.js/);
+  assert.match(csp, /wss:\/\/ecxkijhflxudevtlppai\.supabase\.co/);
+  const application = html + client;
+  assert.match(application, /Ativar acesso administrador/);
+  assert.match(application, /Exportar documentos CSV/);
+  assert.match(application, /Valor da unidade \(R\$\)/);
+  assert.match(application, /Percentual da comissão total/);
+  assert.match(application, /Nº da proposta \/ pasta/);
   assert.match(html, /data:image\/jpeg;base64,/);
   assert.doesNotMatch(html, /SUPABASE_SECRET_KEY|CRM_BOOTSTRAP_SECRET|DEFAULT_TEMP_PASSWORD_SENTINEL/);
+  assert.doesNotMatch(client, /SUPABASE_SECRET_KEY|CRM_BOOTSTRAP_SECRET|DEFAULT_TEMP_PASSWORD_SENTINEL/);
 });

@@ -7,6 +7,7 @@ const root = path.resolve(__dirname, '..');
 const styles = fs.readFileSync(path.join(root, 'apps-script/Styles.html'), 'utf8');
 const index = fs.readFileSync(path.join(root, 'apps-script/Index.html'), 'utf8');
 const client = fs.readFileSync(path.join(root, 'apps-script/Client.html'), 'utf8');
+const backend = fs.readFileSync(path.join(root, 'netlify/functions/crm.mjs'), 'utf8');
 
 test('identidade visual está presente na entrada, na navegação e no cabeçalho móvel', () => {
   assert.equal((index.match(/class="brand-logo brand-logo-login"/g) || []).length, 2);
@@ -109,18 +110,18 @@ test('corretor tem área própria de vendas somente para consulta', () => {
   assert.match(styles, /\.sales-broker-kpis/);
 });
 
-test('módulo Sharks está integrado ao mesmo CRM, com filtros diário/semanal/mensal e visão semanal de frequência', () => {
+test('módulo Sharks está integrado ao mesmo CRM, com filtros de período e frequência diária por corretor', () => {
   assert.match(client,/value: 'day'/);
   assert.match(client,/value: 'week'/);
   assert.match(client,/value: 'month'/);
-  assert.match(client,/Resumo semanal/);
-  assert.match(client,/Semana anterior/);
-  assert.match(client,/Próxima semana/);
+  assert.match(client,/Frequências por corretor no período selecionado/);
+  assert.match(client,/Lançar frequência do dia/);
+  assert.match(client,/Todos os corretores ativos aparecem para marcar manhã, tarde e noite/);
   assert.match(client,/apiSetAttendance/);
-  assert.match(client,/const attendanceQueryEnd=weekEnd>todayBrazil\(\)\?todayBrazil\(\):weekEnd/);
-  assert.match(client,/dateFrom:weekStart,dateTo:attendanceQueryEnd/);
-  assert.match(client,/campos|Frequência do dia selecionado/i);
-  assert.match(styles,/\.ops-week-navigation/);
+  assert.match(client,/dateFrom:selectedDay,dateTo:selectedDay/);
+  assert.match(client,/includeBrokerFilter:false/);
+  assert.match(client,/filters\.brokerId=''/);
+  assert.match(styles,/\.ops-attendance-toggle/);
   assert.match(styles,/\.ops-freshness/);
 });
 
@@ -214,15 +215,50 @@ test('ranking individual não lista colegas e preserva privacidade dos indicador
   assert.match(client,/Sua posição é exibida sem listar outros corretores nem revelar os números de produção ou frequência da equipe/);
 });
 
-test('resumo semanal de plantões mostra corretor, turno e totais sem detalhamento dia a dia', () => {
-  assert.match(client,/Frequências semanais por corretor/);
-  assert.doesNotMatch(client,/Detalhamento diário por corretor/);
-  assert.doesNotMatch(client,/Totais diários de toda a equipe/);
-  assert.match(client,/TOTAL DO CORRETOR FILTRADO/);
+test('plantões exibem totais por corretor no período e grade diária de presença para a equipe', () => {
+  assert.match(client,/Frequências por corretor no período selecionado/);
   assert.match(client,/TOTAL DA EQUIPE/);
-  assert.match(client,/\{\.\.\.filters,dateFrom:weekStart,dateTo:attendanceQueryEnd\}/);
-  assert.match(client,/filters\.brokerId/);
-  assert.match(client,/weekTotals\[shift\.id\]/);
+  assert.match(client,/TOTAL DO CORRETOR/);
+  assert.match(client,/Lançar frequência do dia/);
+  assert.match(client,/Data para consultar ou lançar frequência/);
+  assert.match(client,/const dailyScope=teamVisible\?/);
+  assert.match(client,/\{ id: 'morning', label: 'Manhã' \}/);
+  assert.match(client,/\{ id: 'afternoon', label: 'Tarde' \}/);
+  assert.match(client,/\{ id: 'night', label: 'Noite' \}/);
+  assert.match(client,/dateFrom:selectedDay,dateTo:selectedDay/);
+  assert.match(client,/filters\.brokerId=''/);
+  assert.doesNotMatch(client,/Frequências semanais por corretor/);
+});
+
+test('agenda tem campos obrigatórios mínimos, compromissos agrupados por dia e cancelados em aba própria', () => {
+  const appointment = client.slice(client.indexOf('async function renderAppointments()'), client.indexOf('function openAppointmentDialog('));
+  const dialog = client.slice(client.indexOf('function openAppointmentDialog('), client.indexOf('function dataCanManageAgenda('));
+  assert.match(dialog,/addField\(grid,'Compromisso',clientName\)/);
+  assert.match(dialog,/clientName\.required=true/);
+  assert.match(dialog,/date\.required=true/);
+  assert.match(dialog,/start\.required=true/);
+  assert.doesNotMatch(dialog,/lead\.required\s*=\s*true|dev\.required\s*=\s*true|stand\.required\s*=\s*true|broker\.required\s*=\s*true|notes\.required\s*=\s*true/);
+  assert.match(appointment,/const groups = new Map\(\)/);
+  assert.match(appointment,/appointment-day-group/);
+  assert.match(appointment,/Cancelados/);
+  assert.match(appointment,/state\.appointmentsTab/);
+});
+
+test('lançamentos do corretor permitem qualquer dia do mês vigente sem bloquear vários registros no dia', () => {
+  assert.match(client,/Você pode registrar mais de um lançamento no mesmo dia, sem limite diário de quantidade, em qualquer data do mês vigente até hoje/);
+  assert.match(client,/date\.min=todayBrazil\(\)\.slice\(0,7\)\+'-01'/);
+  assert.match(client,/Novo lançamento/);
+  assert.match(backend,/if \(access === 'broker' && workDate < monthStart\)/);
+  assert.doesNotMatch(backend,/somente na data de hoje/);
+});
+
+test('recibos permitem selecionar várias vendas mantendo validação do corretor e limite seguro', () => {
+  assert.match(client,/saleIds/);
+  assert.match(client,/Todas as vendas devem pertencer ao corretor selecionado/);
+  assert.match(client,/Selecione pelo menos uma venda/);
+  assert.match(client,/Selecione um corretor e uma ou mais vendas dele/);
+  assert.match(client,/Selecionar disponíveis/);
+  assert.match(client,/limite por recibo é de 50 vendas/);
 });
 
 test('agenda abre mês por padrão e monta formulários antes das consultas secundárias', () => {

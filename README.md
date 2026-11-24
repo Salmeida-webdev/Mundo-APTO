@@ -48,7 +48,7 @@ npm run build
 npm test
 ```
 
-O build gera `public/index.html`, embutindo CSS, JavaScript e logo para publicação estática. `npm run check` também executa verificações de segurança, regras de perfil, histórico, responsividade e estrutura.
+O build gera `public/index.html` com CSS e logo incorporados e `public/client.js` como arquivo externo, compatível com a Content Security Policy do Netlify. A política libera somente os scripts da própria aplicação e o SDK de tempo real do Supabase; não libera scripts inline. `npm run check` também executa verificações de segurança, regras de perfil, histórico, responsividade e estrutura.
 
 ## Variáveis de ambiente no Netlify
 
